@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     )
 
     # Claude
-    claude_timeout: int = Field(default=600, description="Max timeout in seconds")
+    claude_timeout: int = Field(default=900, description="Max timeout in seconds")
     claude_max_retries: int = Field(default=3, description="Max retries per issue")
 
     # Scheduler

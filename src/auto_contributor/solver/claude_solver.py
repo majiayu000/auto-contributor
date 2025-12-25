@@ -222,6 +222,11 @@ class ClaudeSolver:
 {guide_preview}
 """
 
+        # Truncate very long issue bodies to keep prompt manageable
+        issue_body = issue.body
+        if len(issue_body) > 5000:
+            issue_body = issue_body[:5000] + "\n\n... (truncated, see original issue for full details)"
+
         return f"""You are an expert software engineer fixing GitHub issue #{issue.issue_number} in repository {issue.repo}.
 
 ## Issue Information
@@ -229,7 +234,7 @@ class ClaudeSolver:
 **Title:** {issue.title}
 
 **Description:**
-{issue.body}
+{issue_body}
 
 **Labels:** {', '.join(issue.labels)}
 {contrib_section}
