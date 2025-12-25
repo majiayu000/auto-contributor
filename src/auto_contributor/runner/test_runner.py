@@ -1,0 +1,279 @@
+"""Multi-framework test runner."""
+
+import asyncio
+import json
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+
+import structlog
+
+from auto_contributor.core.exceptions import TestError
+
+logger = structlog.get_logger(__name__)
+
+
+class TestFramework(str, Enum):
+    """Supported test frameworks."""
+
+    PYTEST = "pytest"
+    NPM = "npm"
+    PNPM = "pnpm"
+    YARN = "yarn"
+    CARGO = "cargo"
+    GO = "go"
+    MAVEN = "maven"
+    GRADLE = "gradle"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class TestResult:
+    """Result of running tests."""
+
+    passed: bool
+    framework: TestFramework
+    output: str
+    duration: float
+    failed_tests: list[str] = field(default_factory=list)
+    exit_code: int = 0
+
+
+class TestRunner:
+    """Detects and runs tests for various project types."""
+
+    # Files that indicate a specific test framework
+    DETECTION_FILES: dict[TestFramework, list[str]] = {
+        TestFramework.PYTEST: ["pytest.ini", "pyproject.toml", "setup.py", "setup.cfg"],
+        TestFramework.NPM: ["package.json"],
+        TestFramework.PNPM: ["pnpm-lock.yaml"],
+        TestFramework.YARN: ["yarn.lock"],
+        TestFramework.CARGO: ["Cargo.toml"],
+        TestFramework.GO: ["go.mod"],
+        TestFramework.MAVEN: ["pom.xml"],
+        TestFramework.GRADLE: ["build.gradle", "build.gradle.kts"],
+    }
+
+    # Commands to run tests for each framework
+    TEST_COMMANDS: dict[TestFramework, list[str]] = {
+        TestFramework.PYTEST: ["python", "-m", "pytest", "-x", "--tb=short", "-q"],
+        TestFramework.NPM: ["npm", "test", "--", "--passWithNoTests"],
+        TestFramework.PNPM: ["pnpm", "test", "--passWithNoTests"],
+        TestFramework.YARN: ["yarn", "test", "--passWithNoTests"],
+        TestFramework.CARGO: ["cargo", "test", "--", "--test-threads=1"],
+        TestFramework.GO: ["go", "test", "-v", "./..."],
+        TestFramework.MAVEN: ["mvn", "test", "-q"],
+        TestFramework.GRADLE: ["./gradlew", "test"],
+    }
+
+    def __init__(self, timeout: int = 300):
+        self.timeout = timeout
+
+    def detect_framework(self, repo_path: Path) -> TestFramework:
+        """Detect which test framework a repository uses."""
+        # Check for pnpm/yarn first (more specific than npm)
+        for framework in [TestFramework.PNPM, TestFramework.YARN]:
+            for filename in self.DETECTION_FILES[framework]:
+                if (repo_path / filename).exists():
+                    return framework
+
+        # Check other frameworks
+        for framework, files in self.DETECTION_FILES.items():
+            if framework in [TestFramework.PNPM, TestFramework.YARN]:
+                continue
+
+            for filename in files:
+                if (repo_path / filename).exists():
+                    # Special check for Python - verify pytest is available
+                    if framework == TestFramework.PYTEST:
+                        if self._has_pytest_config(repo_path):
+                            return framework
+                    else:
+                        return framework
+
+        return TestFramework.UNKNOWN
+
+    def _has_pytest_config(self, repo_path: Path) -> bool:
+        """Check if the project has pytest configured."""
+        # Check pyproject.toml for pytest config
+        pyproject = repo_path / "pyproject.toml"
+        if pyproject.exists():
+            content = pyproject.read_text()
+            if "[tool.pytest" in content or "pytest" in content:
+                return True
+
+        # Check for pytest.ini
+        if (repo_path / "pytest.ini").exists():
+            return True
+
+        # Check for tests directory
+        if (repo_path / "tests").is_dir() or (repo_path / "test").is_dir():
+            return True
+
+        return False
+
+    def _has_npm_test_script(self, repo_path: Path) -> bool:
+        """Check if npm/pnpm/yarn project has a test script defined."""
+        package_json = repo_path / "package.json"
+        if not package_json.exists():
+            return False
+
+        try:
+            data = json.loads(package_json.read_text())
+            scripts = data.get("scripts", {})
+            # Check if "test" script exists and is not a placeholder
+            test_script = scripts.get("test", "")
+            if not test_script:
+                return False
+            # Common placeholder patterns that indicate no real tests
+            placeholders = [
+                "echo \"Error: no test specified\"",
+                "echo 'Error: no test specified'",
+                "exit 1",
+                "no test",
+            ]
+            for placeholder in placeholders:
+                if placeholder in test_script.lower():
+                    return False
+            return True
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("failed_to_parse_package_json", error=str(e))
+            return False
+
+    async def run_tests(self, repo_path: Path) -> TestResult:
+        """
+        Run tests for a repository.
+
+        Args:
+            repo_path: Path to the repository
+
+        Returns:
+            TestResult with pass/fail status and output
+        """
+        framework = self.detect_framework(repo_path)
+
+        if framework == TestFramework.UNKNOWN:
+            logger.warning("no_test_framework_detected", path=str(repo_path))
+            return TestResult(
+                passed=True,  # No tests = pass (can't verify)
+                framework=framework,
+                output="No test framework detected",
+                duration=0.0,
+            )
+
+        # Check if npm-based projects have a test script
+        if framework in [TestFramework.NPM, TestFramework.PNPM, TestFramework.YARN]:
+            if not self._has_npm_test_script(repo_path):
+                logger.info(
+                    "no_test_script_in_package_json",
+                    framework=framework.value,
+                    path=str(repo_path),
+                )
+                return TestResult(
+                    passed=True,  # No test script = skip tests (common for docs/config repos)
+                    framework=framework,
+                    output="No test script defined in package.json, skipping tests",
+                    duration=0.0,
+                )
+
+        command = self.TEST_COMMANDS[framework]
+        logger.info("running_tests", framework=framework.value, command=" ".join(command))
+
+        start_time = time.time()
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(repo_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=self._get_test_env(),
+            )
+
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self.timeout,
+            )
+
+            duration = time.time() - start_time
+            output = stdout.decode(errors="replace")
+            passed = process.returncode == 0
+
+            failed_tests = self._extract_failures(output, framework) if not passed else []
+
+            return TestResult(
+                passed=passed,
+                framework=framework,
+                output=output,
+                duration=duration,
+                failed_tests=failed_tests,
+                exit_code=process.returncode or 0,
+            )
+
+        except asyncio.TimeoutError:
+            duration = time.time() - start_time
+            return TestResult(
+                passed=False,
+                framework=framework,
+                output=f"Tests timed out after {self.timeout} seconds",
+                duration=duration,
+                exit_code=-1,
+            )
+
+        except Exception as e:
+            duration = time.time() - start_time
+            logger.error("test_execution_failed", error=str(e))
+            return TestResult(
+                passed=False,
+                framework=framework,
+                output=str(e),
+                duration=duration,
+                exit_code=-1,
+            )
+
+    def _get_test_env(self) -> dict[str, str]:
+        """Get environment variables for test execution."""
+        import os
+
+        env = os.environ.copy()
+        # Disable interactive prompts
+        env["CI"] = "true"
+        env["NONINTERACTIVE"] = "1"
+        return env
+
+    def _extract_failures(self, output: str, framework: TestFramework) -> list[str]:
+        """Extract failed test names from output."""
+        failures = []
+
+        if framework == TestFramework.PYTEST:
+            # Look for FAILED lines
+            for line in output.split("\n"):
+                if line.startswith("FAILED "):
+                    test_name = line.replace("FAILED ", "").split(" ")[0]
+                    failures.append(test_name)
+
+        elif framework in [TestFramework.NPM, TestFramework.PNPM, TestFramework.YARN]:
+            # Look for failing test patterns (jest/vitest)
+            for line in output.split("\n"):
+                if "FAIL " in line or "✕" in line or "✘" in line:
+                    failures.append(line.strip())
+
+        elif framework == TestFramework.GO:
+            # Look for --- FAIL: lines
+            for line in output.split("\n"):
+                if line.startswith("--- FAIL:"):
+                    test_name = line.replace("--- FAIL:", "").split(" ")[0].strip()
+                    failures.append(test_name)
+
+        elif framework == TestFramework.CARGO:
+            # Look for test ... FAILED
+            for line in output.split("\n"):
+                if " FAILED" in line and "test " in line:
+                    parts = line.split(" ")
+                    for i, part in enumerate(parts):
+                        if part == "test" and i + 1 < len(parts):
+                            failures.append(parts[i + 1])
+                            break
+
+        return failures[:10]  # Limit to first 10 failures
