@@ -238,7 +238,7 @@ class ContributionScheduler:
 
             for attempt in range(max_test_retries):
                 logger.info("step_3_test_start", attempt=attempt + 1, max_attempts=max_test_retries)
-                test_result = await self.runner.run_tests(repo_path)
+                test_result = await self.runner.run_tests(repo_path, solve_result.files_changed)
                 logger.info(
                     "step_3_test_complete",
                     passed=test_result.passed,

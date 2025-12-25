@@ -141,12 +141,15 @@ class TestRunner:
             logger.warning("failed_to_parse_package_json", error=str(e))
             return False
 
-    async def run_tests(self, repo_path: Path) -> TestResult:
+    async def run_tests(
+        self, repo_path: Path, files_changed: list[str] | None = None
+    ) -> TestResult:
         """
         Run tests for a repository.
 
         Args:
             repo_path: Path to the repository
+            files_changed: List of changed files to determine which packages to test
 
         Returns:
             TestResult with pass/fail status and output
@@ -177,7 +180,8 @@ class TestRunner:
                     duration=0.0,
                 )
 
-        command = self.TEST_COMMANDS[framework]
+        # Get the appropriate test command, customized for affected files
+        command = self._get_test_command(framework, repo_path, files_changed)
         logger.info("running_tests", framework=framework.value, command=" ".join(command))
 
         start_time = time.time()
@@ -231,6 +235,88 @@ class TestRunner:
                 duration=duration,
                 exit_code=-1,
             )
+
+    def _get_test_command(
+        self,
+        framework: TestFramework,
+        repo_path: Path,
+        files_changed: list[str] | None = None,
+    ) -> list[str]:
+        """Get the test command, customized for affected packages."""
+        base_command = self.TEST_COMMANDS[framework].copy()
+
+        # For Go projects, run only affected package tests instead of ./...
+        if framework == TestFramework.GO and files_changed:
+            packages = self._extract_go_packages(files_changed)
+            if packages:
+                # Replace ./... with specific packages
+                # Format: go test -v ./path/to/package/...
+                package_args = [f"./{pkg}/..." for pkg in packages]
+                base_command = ["go", "test", "-v", "-timeout", "180s"] + package_args
+                logger.info(
+                    "running_targeted_go_tests",
+                    packages=packages,
+                    command=" ".join(base_command),
+                )
+            else:
+                # Fallback to running tests in the root package only
+                base_command = ["go", "test", "-v", "-timeout", "180s", "."]
+
+        # For pytest, run only affected test files or directories
+        elif framework == TestFramework.PYTEST and files_changed:
+            test_paths = self._extract_python_test_paths(files_changed, repo_path)
+            if test_paths:
+                base_command = ["python", "-m", "pytest", "-x", "--tb=short", "-q"] + test_paths
+                logger.info(
+                    "running_targeted_pytest",
+                    paths=test_paths,
+                    command=" ".join(base_command),
+                )
+
+        return base_command
+
+    def _extract_go_packages(self, files_changed: list[str]) -> list[str]:
+        """Extract unique Go package paths from changed files."""
+        packages = set()
+        for f in files_changed:
+            if f.endswith(".go") and not f.endswith("_test.go"):
+                # Get the directory path as the package
+                package = str(Path(f).parent)
+                if package and package != ".":
+                    packages.add(package)
+            elif f.endswith("_test.go"):
+                # Test file - get its package
+                package = str(Path(f).parent)
+                if package and package != ".":
+                    packages.add(package)
+        return list(packages)
+
+    def _extract_python_test_paths(
+        self, files_changed: list[str], repo_path: Path
+    ) -> list[str]:
+        """Extract relevant test paths from changed Python files."""
+        test_paths = set()
+        for f in files_changed:
+            if not f.endswith(".py"):
+                continue
+
+            path = Path(f)
+            # If it's a test file, add it directly
+            if path.name.startswith("test_") or path.name.endswith("_test.py"):
+                if (repo_path / f).exists():
+                    test_paths.add(f)
+            else:
+                # For source files, try to find corresponding test file
+                parent = path.parent
+                test_file = parent / f"test_{path.name}"
+                if (repo_path / test_file).exists():
+                    test_paths.add(str(test_file))
+                # Also check tests/ directory
+                tests_file = Path("tests") / parent / f"test_{path.name}"
+                if (repo_path / tests_file).exists():
+                    test_paths.add(str(tests_file))
+
+        return list(test_paths)
 
     def _get_test_env(self) -> dict[str, str]:
         """Get environment variables for test execution."""
