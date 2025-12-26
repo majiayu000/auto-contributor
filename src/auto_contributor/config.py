@@ -76,6 +76,37 @@ class Settings(BaseSettings):
     slack_webhook: str | None = None
     notification_email: str | None = None
 
+    # Container Testing
+    container_enabled: bool = Field(
+        default=True,
+        description="Use Docker containers for isolated test execution"
+    )
+    container_memory_limit: str = Field(
+        default="4g",
+        description="Memory limit for test containers"
+    )
+    container_cpu_limit: str = Field(
+        default="2",
+        description="CPU limit for test containers"
+    )
+    container_timeout: int = Field(
+        default=600,
+        description="Timeout in seconds for container tests"
+    )
+    container_cache_dependencies: bool = Field(
+        default=True,
+        description="Cache dependencies between container runs"
+    )
+
+    # Projects that should skip local tests (rely on CI instead)
+    skip_local_test_patterns: list[str] = Field(
+        default=[
+            "pytorch", "tensorflow", "huggingface",
+            "Lightning-AI", "langchain", "transformers",
+        ],
+        description="Repo patterns to skip local testing (complex dependencies)"
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # Ensure directories exist

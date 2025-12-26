@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,7 +16,7 @@ from auto_contributor.finder import IssueFinder, IssueCandidate
 from auto_contributor.models import Issue, IssueStatus, PullRequest, PRStatus, init_db, get_session_factory
 from auto_contributor.monitor import CIMonitor
 from auto_contributor.pr import PRManager
-from auto_contributor.runner import TestRunner
+from auto_contributor.runner import TestRunner, ContainerTestRunner, ContainerConfig
 from auto_contributor.solver import ClaudeSolver
 
 logger = structlog.get_logger(__name__)
@@ -39,11 +40,87 @@ class ContributionScheduler:
         # Initialize components
         self.finder = IssueFinder(settings)
         self.solver = ClaudeSolver(settings)
-        self.runner = TestRunner()
         self.pr_manager = PRManager(settings)
         self.ci_monitor = CIMonitor(settings, self.solver)
 
+        # Initialize test runners
+        self.local_runner = TestRunner()
+
+        # Container runner with settings
+        container_config = ContainerConfig(
+            enabled=settings.container_enabled,
+            memory_limit=settings.container_memory_limit,
+            cpu_limit=settings.container_cpu_limit,
+            timeout=settings.container_timeout,
+            cache_dependencies=settings.container_cache_dependencies,
+        )
+        self.container_runner = ContainerTestRunner(container_config)
+
         self._session_factory = None
+        self._container_available: bool | None = None  # Cached check
+
+    async def _is_container_available(self) -> bool:
+        """Check if container runtime is available (cached)."""
+        if self._container_available is None:
+            self._container_available = await self.container_runner.is_available()
+            logger.info("container_runtime_check", available=self._container_available)
+        return self._container_available
+
+    def _should_skip_local_tests(self, repo: str) -> bool:
+        """Check if we should skip local tests for this repo (complex dependencies)."""
+        for pattern in self.settings.skip_local_test_patterns:
+            if pattern.lower() in repo.lower():
+                logger.info(
+                    "skipping_local_tests",
+                    repo=repo,
+                    reason=f"matches pattern: {pattern}",
+                )
+                return True
+        return False
+
+    async def _run_tests(
+        self,
+        repo_path: Path,
+        files_changed: list[str],
+        language: str | None = None,
+        repo: str = "",
+    ) -> "TestResult":
+        """
+        Run tests using the appropriate runner.
+
+        Strategy:
+        1. If repo matches skip patterns -> skip local tests, return success
+        2. If container is available and enabled -> use container runner
+        3. Otherwise -> use local runner
+        """
+        from auto_contributor.runner import TestResult, TestFramework
+
+        # Check if we should skip local tests for complex projects
+        if self._should_skip_local_tests(repo):
+            logger.info(
+                "local_tests_skipped",
+                repo=repo,
+                reason="complex dependencies - will rely on CI",
+            )
+            return TestResult(
+                passed=True,
+                framework=TestFramework.UNKNOWN,
+                output="Local tests skipped for complex project - will verify in CI",
+                duration=0.0,
+            )
+
+        # Try container runner first if available
+        if self.settings.container_enabled and await self._is_container_available():
+            logger.info("using_container_runner", repo=repo)
+            return await self.container_runner.run_tests(
+                repo_path,
+                files_changed,
+                language,
+            )
+
+        # Fall back to local runner
+        logger.info("using_local_runner", repo=repo)
+        return await self.local_runner.run_tests(repo_path, files_changed)
 
     async def start(self) -> None:
         """Start the scheduler."""
@@ -238,7 +315,12 @@ class ContributionScheduler:
 
             for attempt in range(max_test_retries):
                 logger.info("step_3_test_start", attempt=attempt + 1, max_attempts=max_test_retries)
-                test_result = await self.runner.run_tests(repo_path, solve_result.files_changed)
+                test_result = await self._run_tests(
+                    repo_path=repo_path,
+                    files_changed=solve_result.files_changed,
+                    language=issue.language,
+                    repo=issue.repo,
+                )
                 logger.info(
                     "step_3_test_complete",
                     passed=test_result.passed,
