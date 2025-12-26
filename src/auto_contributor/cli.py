@@ -370,5 +370,113 @@ def config() -> None:
     console.print(f"  Max concurrent solves: {settings.limits_max_concurrent_solves}")
 
 
+@app.command()
+def loop(
+    interval: int = typer.Option(
+        10,
+        "--interval",
+        "-i",
+        help="Interval in minutes between each cycle",
+    ),
+    topic: str = typer.Option(
+        None,
+        "--topic",
+        "-t",
+        help="Search trending repos by topic",
+    ),
+    check_ci: bool = typer.Option(
+        True,
+        "--check-ci/--no-check-ci",
+        help="Check CI status of existing PRs",
+    ),
+) -> None:
+    """Run contribution loop: solve issues and check PRs every N minutes."""
+    import logging
+    from datetime import datetime
+    from auto_contributor.monitor import CIMonitor
+
+    # Disable SQLAlchemy logging unless debug
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
+    settings = get_settings()
+    scheduler = ContributionScheduler(settings)
+    ci_monitor = CIMonitor(settings, scheduler.solver)
+
+    console.print(f"[green]Starting contribution loop (every {interval} minutes)...[/green]")
+    console.print(f"  Topic: {topic or 'default search'}")
+    console.print(f"  Check CI: {check_ci}")
+    console.print(f"  Press Ctrl+C to stop\n")
+
+    async def run_loop():
+        from auto_contributor.models import init_db, get_session_factory, PullRequest, PRStatus
+        from sqlalchemy import select
+
+        await init_db()
+        session_factory = get_session_factory()
+        cycle = 0
+
+        while True:
+            cycle += 1
+            now = datetime.now().strftime("%H:%M:%S")
+            console.print(f"\n[cyan]{'='*50}[/cyan]")
+            console.print(f"[cyan]Cycle {cycle} started at {now}[/cyan]")
+            console.print(f"[cyan]{'='*50}[/cyan]")
+
+            try:
+                # Step 1: Process one issue
+                console.print(f"\n[yellow]>>> Step 1: Solving one issue...[/yellow]")
+                await scheduler.run_once(dry_run=False, limit=1, topic=topic)
+
+                # Step 2: Check CI status of open PRs
+                if check_ci:
+                    console.print(f"\n[yellow]>>> Step 2: Checking CI status...[/yellow]")
+                    async with session_factory() as session:
+                        result = await session.execute(
+                            select(PullRequest)
+                            .where(PullRequest.status == PRStatus.OPEN.value)
+                        )
+                        open_prs = result.scalars().all()
+
+                        if open_prs:
+                            console.print(f"  Found {len(open_prs)} open PRs to check")
+                            for pr in open_prs:
+                                console.print(f"  Checking: {pr.pr_url}")
+                                try:
+                                    ci_status = await ci_monitor.check_pr_status(pr.pr_url)
+                                    status_str = "✅ passed" if ci_status.all_passed else (
+                                        "❌ failed" if ci_status.has_failures else "⏳ pending"
+                                    )
+                                    console.print(f"    CI Status: {status_str}")
+
+                                    # Update PR status in database
+                                    if ci_status.all_passed:
+                                        pr.ci_status = "success"
+                                    elif ci_status.has_failures:
+                                        pr.ci_status = "failure"
+                                    else:
+                                        pr.ci_status = "pending"
+
+                                except Exception as e:
+                                    console.print(f"    [red]Error: {e}[/red]")
+
+                            await session.commit()
+                        else:
+                            console.print("  No open PRs to check")
+
+                console.print(f"\n[green]Cycle {cycle} complete. Sleeping {interval} minutes...[/green]")
+
+            except Exception as e:
+                console.print(f"\n[red]Cycle {cycle} error: {e}[/red]")
+                import traceback
+                console.print(traceback.format_exc())
+
+            await asyncio.sleep(interval * 60)
+
+    try:
+        asyncio.run(run_loop())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Loop stopped by user.[/yellow]")
+
+
 if __name__ == "__main__":
     app()
