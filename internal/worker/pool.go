@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -521,14 +522,16 @@ func containsAt(s, substr string, start int) bool {
 }
 
 func configureRemote(repoDir, name, url string) error {
-	// Try to add, ignore if exists
-	cmd := fmt.Sprintf("cd %s && git remote add %s %s 2>/dev/null || git remote set-url %s %s",
-		repoDir, name, url, name, url)
-	return runShell(cmd)
-}
-
-func runShell(cmd string) error {
-	return nil // Simplified - in production use exec.Command
+	// Try to add remote
+	addCmd := exec.Command("git", "remote", "add", name, url)
+	addCmd.Dir = repoDir
+	if err := addCmd.Run(); err != nil {
+		// If add fails (already exists), try to set-url
+		setCmd := exec.Command("git", "remote", "set-url", name, url)
+		setCmd.Dir = repoDir
+		return setCmd.Run()
+	}
+	return nil
 }
 
 func formatChangedFiles(files []string) string {

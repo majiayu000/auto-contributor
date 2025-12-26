@@ -87,7 +87,10 @@ Respond ONLY with JSON:
   "test_framework": "pytest/jest/go test/etc"
 }`, issue.IssueNumber, issue.Title, issue.Body)
 
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
+		"-p", prompt,
+		"--output-format", "text")
 	cmd.Dir = repoDir
 
 	output, err := cmd.Output()
@@ -125,9 +128,12 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",                        // Non-interactive mode
+		"--dangerously-skip-permissions", // Auto-approve file edits
+		"-p", prompt,
+		"--output-format", "text")
 	cmd.Dir = repoDir
-	cmd.Env = append(os.Environ(), "CLAUDE_AUTO_ACCEPT=1")
 
 	// Capture output
 	stdout, err := cmd.StdoutPipe()
