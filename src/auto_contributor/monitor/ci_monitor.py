@@ -82,9 +82,10 @@ class CIMonitor:
             CIStatus with all check results
         """
         # Use gh CLI to get check status
+        # Available fields: bucket, completedAt, description, event, link, name, startedAt, state, workflow
         cmd = [
             "gh", "pr", "checks", pr_url,
-            "--json", "name,state,conclusion,detailsUrl,startedAt,completedAt",
+            "--json", "name,state,link,startedAt,completedAt,bucket",
         ]
 
         process = await asyncio.create_subprocess_exec(
@@ -102,20 +103,32 @@ class CIMonitor:
         checks = []
 
         for check in checks_data:
-            status = CICheckStatus(check.get("state", "queued").lower().replace(" ", "_"))
+            # Map state to our status enum
+            # gh returns: pass, fail, pending, skipping
+            state = check.get("state", "pending").lower()
+            bucket = check.get("bucket", "").lower()
 
-            conclusion = None
-            if check.get("conclusion"):
-                try:
-                    conclusion = CIConclusion(check["conclusion"].lower())
-                except ValueError:
-                    conclusion = None
+            if state in ["pass", "success"]:
+                status = CICheckStatus.COMPLETED
+                conclusion = CIConclusion.SUCCESS
+            elif state in ["fail", "failure"]:
+                status = CICheckStatus.COMPLETED
+                conclusion = CIConclusion.FAILURE
+            elif state in ["pending", "waiting", "queued"]:
+                status = CICheckStatus.IN_PROGRESS if bucket == "in_progress" else CICheckStatus.QUEUED
+                conclusion = None
+            elif state in ["skipping", "skipped"]:
+                status = CICheckStatus.COMPLETED
+                conclusion = CIConclusion.SKIPPED
+            else:
+                status = CICheckStatus.IN_PROGRESS
+                conclusion = None
 
             checks.append(CICheck(
                 name=check["name"],
                 status=status,
                 conclusion=conclusion,
-                details_url=check.get("detailsUrl"),
+                details_url=check.get("link"),
                 started_at=check.get("startedAt"),
                 completed_at=check.get("completedAt"),
             ))
