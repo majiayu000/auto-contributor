@@ -67,8 +67,10 @@ class TestRunner:
         TestFramework.GRADLE: ["./gradlew", "test"],
     }
 
-    def __init__(self, timeout: int = 300):
+    def __init__(self, timeout: int = 300, install_timeout: int = 300):
         self.timeout = timeout
+        self.install_timeout = install_timeout
+        self._installed_repos: set[str] = set()  # Track repos where we've installed deps
 
     def detect_framework(self, repo_path: Path) -> TestFramework:
         """Detect which test framework a repository uses."""
@@ -141,6 +143,71 @@ class TestRunner:
             logger.warning("failed_to_parse_package_json", error=str(e))
             return False
 
+    async def _install_dependencies(
+        self, repo_path: Path, framework: TestFramework
+    ) -> bool:
+        """Install dependencies for npm-based projects. Returns True if successful."""
+        repo_key = str(repo_path)
+        if repo_key in self._installed_repos:
+            return True
+
+        # Determine install command based on framework
+        install_commands = {
+            TestFramework.NPM: ["npm", "install"],
+            TestFramework.PNPM: ["pnpm", "install"],
+            TestFramework.YARN: ["yarn", "install"],
+        }
+
+        if framework not in install_commands:
+            return True  # No install needed for non-npm frameworks
+
+        command = install_commands[framework]
+        logger.info(
+            "installing_dependencies",
+            framework=framework.value,
+            command=" ".join(command),
+            path=str(repo_path),
+        )
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(repo_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=self._get_test_env(),
+            )
+
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self.install_timeout,
+            )
+
+            if process.returncode == 0:
+                self._installed_repos.add(repo_key)
+                logger.info("dependencies_installed", framework=framework.value)
+                return True
+            else:
+                output = stdout.decode(errors="replace")
+                logger.warning(
+                    "dependency_install_failed",
+                    framework=framework.value,
+                    exit_code=process.returncode,
+                    output=output[:500],
+                )
+                return False
+
+        except asyncio.TimeoutError:
+            logger.error(
+                "dependency_install_timeout",
+                framework=framework.value,
+                timeout=self.install_timeout,
+            )
+            return False
+        except Exception as e:
+            logger.error("dependency_install_error", error=str(e))
+            return False
+
     async def run_tests(
         self, repo_path: Path, files_changed: list[str] | None = None
     ) -> TestResult:
@@ -178,6 +245,17 @@ class TestRunner:
                     framework=framework,
                     output="No test script defined in package.json, skipping tests",
                     duration=0.0,
+                )
+
+            # Install dependencies before running tests
+            install_success = await self._install_dependencies(repo_path, framework)
+            if not install_success:
+                return TestResult(
+                    passed=False,
+                    framework=framework,
+                    output="Failed to install dependencies",
+                    duration=0.0,
+                    exit_code=-1,
                 )
 
         # Get the appropriate test command, customized for affected files

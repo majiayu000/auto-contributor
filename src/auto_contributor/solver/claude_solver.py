@@ -564,11 +564,19 @@ Fix for #{issue.issue_number}: {issue.title}
         """
         timeout = timeout or self.settings.claude_timeout
 
+        # Truncate logs to prevent "Prompt is too long" error
+        # Keep first 3000 chars (context) + last 2000 chars (actual errors)
+        max_logs = 5000
+        if len(logs) > max_logs:
+            truncated_logs = logs[:3000] + "\n\n... (truncated) ...\n\n" + logs[-2000:]
+        else:
+            truncated_logs = logs
+
         prompt = f"""The CI check '{check_name}' has failed. Please fix the issue.
 
 ## CI Failure Logs
 ```
-{logs[:10000]}  # Truncate very long logs
+{truncated_logs}
 ```
 
 ## Instructions
