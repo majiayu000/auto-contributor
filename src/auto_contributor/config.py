@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     )
     filter_exclude_labels: list[str] = Field(default=["wontfix", "duplicate", "invalid"])
     filter_exclude_repos: list[str] = Field(
-        default=[],
+        default=["denoland/deno"],  # deno has permission issues with Claude Code
         description="Repos to exclude from contribution (owner/name format)"
     )
     filter_min_repo_stars: int = Field(default=100)
