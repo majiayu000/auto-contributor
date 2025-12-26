@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auto_contributor.config import Settings
 from auto_contributor.finder import IssueFinder, IssueCandidate
-from auto_contributor.models import Issue, IssueStatus, PullRequest, PRStatus, init_db, get_session_factory
+from auto_contributor.metrics import MetricsCollector
+from auto_contributor.models import (
+    Issue, IssueStatus, PullRequest, PRStatus, FailureReason,
+    SolveAttempt, init_db, get_session_factory
+)
 from auto_contributor.monitor import CIMonitor
 from auto_contributor.pr import PRManager
 from auto_contributor.runner import TestRunner, ContainerTestRunner, ContainerConfig
@@ -58,6 +62,14 @@ class ContributionScheduler:
 
         self._session_factory = None
         self._container_available: bool | None = None  # Cached check
+        self._metrics_collector: MetricsCollector | None = None
+
+    @property
+    def metrics(self) -> MetricsCollector:
+        """Get or create the metrics collector."""
+        if self._metrics_collector is None:
+            self._metrics_collector = MetricsCollector(self._session_factory)
+        return self._metrics_collector
 
     async def _is_container_available(self) -> bool:
         """Check if container runtime is available (cached)."""
@@ -242,7 +254,7 @@ class ContributionScheduler:
                 await self._process_issue(session, issue)
 
     async def _process_issue(self, session: AsyncSession, issue: Issue) -> None:
-        """Process a single issue."""
+        """Process a single issue with full metrics collection."""
         logger.info(
             "=== PROCESSING ISSUE START ===",
             repo=issue.repo,
@@ -255,6 +267,10 @@ class ContributionScheduler:
         issue.status = IssueStatus.PROCESSING.value
         await session.commit()
         logger.info("status_updated", new_status="processing")
+
+        # Initialize metrics tracking
+        attempt: SolveAttempt | None = None
+        repo_path = None
 
         try:
             # Step 0: Check if issue already has a linked PR
@@ -275,6 +291,29 @@ class ContributionScheduler:
                 await session.commit()
                 logger.info("=== PROCESSING ISSUE END (SKIPPED - has PR) ===")
                 return
+
+            # Create issue metrics record
+            has_contributing = await self.finder.get_contributing_guide(issue.repo) is not None
+            await self.metrics.create_or_update_issue_metrics(
+                session, issue,
+                has_contributing=has_contributing,
+            )
+
+            # Count existing attempts for this issue
+            from sqlalchemy import func
+            attempt_count = await session.execute(
+                select(func.count(SolveAttempt.id)).where(SolveAttempt.issue_id == issue.id)
+            )
+            attempt_number = (attempt_count.scalar() or 0) + 1
+
+            # Start metrics tracking for this attempt
+            attempt = await self.metrics.start_attempt(
+                session, issue,
+                attempt_number=attempt_number,
+                prompt_version="v2",  # Current prompt version with TEST-FIX LOOP
+                model_used="claude-sonnet-4",
+            )
+            await session.commit()
 
             # Step 1: Clone repository
             logger.info("step_1_clone_start", repo=issue.repo)
@@ -307,12 +346,39 @@ class ContributionScheduler:
 
             if not solve_result.success:
                 logger.error("solve_failed", reason=solve_result.message)
+                # Record failure metrics
+                failure_reason = FailureReason.NO_CHANGES if "no changes" in solve_result.message.lower() else FailureReason.UNKNOWN
+                if solve_result.error == "TIMEOUT":
+                    failure_reason = FailureReason.TIMEOUT
+
+                await self.metrics.record_solve_result(
+                    session, attempt,
+                    success=False,
+                    files_changed=solve_result.files_changed,
+                    claude_output=solve_result.claude_output,
+                    fix_complete_marker=False,
+                    claude_tests_passed=solve_result.tests_passed,
+                    failure_reason=failure_reason,
+                    error_details=solve_result.message,
+                )
+                await self.metrics.update_issue_metrics_after_attempt(session, issue, attempt)
+
                 issue.status = IssueStatus.ABANDONED.value
                 issue.error_message = solve_result.message
                 await session.commit()
                 await self.solver.cleanup_repo(repo_path)
                 logger.info("=== PROCESSING ISSUE END (ABANDONED - solve failed) ===")
                 return
+
+            # Record successful solve (so far)
+            await self.metrics.record_solve_result(
+                session, attempt,
+                success=True,  # Will update if tests fail
+                files_changed=solve_result.files_changed,
+                claude_output=solve_result.claude_output,
+                fix_complete_marker=solve_result.tests_passed is not None,
+                claude_tests_passed=solve_result.tests_passed,
+            )
 
             # Step 2.5: Evaluate project complexity using Claude
             logger.info("step_2.5_evaluate_complexity", repo=issue.repo)
@@ -324,6 +390,9 @@ class ContributionScheduler:
                 reasons=complexity.get("reasons"),
                 recommended_cmd=complexity.get("recommended_test_command"),
             )
+
+            # Record complexity metrics
+            await self.metrics.record_complexity(session, attempt, complexity)
 
             # Step 3: Hybrid Test Strategy
             # Decision based on Claude's complexity evaluation + Claude's test status
@@ -376,45 +445,63 @@ class ContributionScheduler:
             else:
                 # Claude didn't report tests passed - run full external test cycle
                 max_test_retries = 3
+                last_test_result = None
 
-                for attempt in range(max_test_retries):
-                    logger.info("step_3_test_start", attempt=attempt + 1, max_attempts=max_test_retries)
+                for retry_num in range(max_test_retries):
+                    logger.info("step_3_test_start", attempt=retry_num + 1, max_attempts=max_test_retries)
                     test_result = await self._run_tests(
                         repo_path=repo_path,
                         files_changed=solve_result.files_changed,
                         language=issue.language,
                         repo=issue.repo,
                     )
+                    last_test_result = test_result
                     logger.info(
                         "step_3_test_complete",
                         passed=test_result.passed,
                         framework=test_result.framework.value,
                         duration=f"{test_result.duration:.2f}s",
                         failed_tests=test_result.failed_tests,
-                        attempt=attempt + 1,
+                        attempt=retry_num + 1,
                     )
 
                     if test_result.passed:
                         tests_passed = True
-                        logger.info("all_tests_passed", attempt=attempt + 1)
+                        logger.info("all_tests_passed", attempt=retry_num + 1)
                         break
 
                     # Tests failed - try to fix
-                    logger.warning("tests_failed", output=test_result.output[:500], attempt=attempt + 1)
+                    logger.warning("tests_failed", output=test_result.output[:500], attempt=retry_num + 1)
 
-                    if attempt < max_test_retries - 1:
-                        logger.info("step_3b_fix_tests_start", attempt=attempt + 1)
+                    if retry_num < max_test_retries - 1:
+                        logger.info("step_3b_fix_tests_start", attempt=retry_num + 1)
                         fix_result = await self.solver.fix_ci_failure(
                             repo_path, "tests", test_result.output
                         )
                         logger.info("step_3b_fix_tests_complete", success=fix_result.success)
 
                         if not fix_result.success:
-                            logger.error("fix_attempt_failed", attempt=attempt + 1)
+                            logger.error("fix_attempt_failed", attempt=retry_num + 1)
                     else:
                         logger.error("max_test_retries_exceeded")
 
+                # Record test results to metrics
+                if last_test_result and attempt:
+                    await self.metrics.record_test_result(
+                        session, attempt,
+                        passed=tests_passed,
+                        framework=last_test_result.framework.value if last_test_result.framework else None,
+                        duration=last_test_result.duration,
+                        output=last_test_result.output[:1000] if last_test_result.output else None,
+                    )
+
             if not tests_passed:
+                # Update attempt as failed
+                if attempt:
+                    attempt.success = False
+                    attempt.failure_reason = FailureReason.TESTS_FAILED.value
+                    await self.metrics.update_issue_metrics_after_attempt(session, issue, attempt)
+
                 issue.status = IssueStatus.ABANDONED.value
                 issue.error_message = f"Tests failed (Claude: {solve_result.tests_passed})"
                 await session.commit()
@@ -455,8 +542,23 @@ class ContributionScheduler:
                 )
                 session.add(pr)
 
+                # Record success metrics
+                if attempt:
+                    attempt.success = True
+                    await self.metrics.update_issue_metrics_after_attempt(session, issue, attempt)
+
+                # Update daily stats
+                await self.metrics.update_daily_stats(session)
+
                 logger.info("=== PROCESSING ISSUE END (SUCCESS) ===", pr_url=pr_result.pr_url)
             else:
+                # PR creation failed
+                if attempt:
+                    attempt.success = False
+                    attempt.failure_reason = FailureReason.PR_FAILED.value
+                    attempt.error_details = pr_result.message
+                    await self.metrics.update_issue_metrics_after_attempt(session, issue, attempt)
+
                 issue.status = IssueStatus.ABANDONED.value
                 issue.error_message = pr_result.message
                 logger.info("=== PROCESSING ISSUE END (ABANDONED - PR failed) ===")
@@ -467,10 +569,23 @@ class ContributionScheduler:
             logger.error("processing_exception", error=str(e), error_type=type(e).__name__)
             import traceback
             logger.error("traceback", tb=traceback.format_exc())
+
+            # Record exception in metrics
+            if attempt:
+                attempt.success = False
+                attempt.failure_reason = FailureReason.UNKNOWN.value
+                attempt.error_details = str(e)[:500]
+                await self.metrics.update_issue_metrics_after_attempt(session, issue, attempt)
+
             issue.status = IssueStatus.ABANDONED.value
             issue.error_message = str(e)
             await session.commit()
             logger.info("=== PROCESSING ISSUE END (EXCEPTION) ===")
+
+        finally:
+            # Clean up repo if it exists
+            if repo_path:
+                await self.solver.cleanup_repo(repo_path)
 
     async def monitor_ci(self) -> None:
         """Monitor CI status of open PRs."""

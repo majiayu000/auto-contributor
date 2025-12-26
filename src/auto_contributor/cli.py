@@ -371,6 +371,167 @@ def config() -> None:
 
 
 @app.command()
+def stats(
+    days: int = typer.Option(
+        7,
+        "--days",
+        "-d",
+        help="Number of days to include in statistics",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show detailed breakdown",
+    ),
+) -> None:
+    """Show detailed statistics and analytics."""
+    from auto_contributor.models import (
+        init_db, get_session_factory,
+        SolveAttempt, IssueMetrics, DailyStats, Issue
+    )
+    from auto_contributor.metrics import MetricsCollector
+    from sqlalchemy import select, func
+    from datetime import datetime, timedelta
+    import json
+
+    async def get_stats():
+        await init_db()
+        factory = get_session_factory()
+        collector = MetricsCollector(factory)
+
+        async with factory() as session:
+            # Get summary stats
+            summary = await collector.get_stats_summary(session, days=days)
+
+            # Get failure breakdown
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            failure_result = await session.execute(
+                select(SolveAttempt.failure_reason, func.count(SolveAttempt.id))
+                .where(
+                    SolveAttempt.started_at >= cutoff,
+                    SolveAttempt.success == False,
+                    SolveAttempt.failure_reason != None,
+                )
+                .group_by(SolveAttempt.failure_reason)
+            )
+            failures = dict(failure_result.all())
+
+            # Get language breakdown
+            lang_result = await session.execute(
+                select(Issue.language, func.count(SolveAttempt.id), func.sum(SolveAttempt.success))
+                .join(Issue)
+                .where(SolveAttempt.started_at >= cutoff)
+                .group_by(Issue.language)
+            )
+            languages = {}
+            for lang, attempts, successes in lang_result:
+                lang_name = lang or "unknown"
+                languages[lang_name] = {
+                    "attempts": attempts,
+                    "successes": successes or 0,
+                    "rate": (successes or 0) / attempts if attempts > 0 else 0,
+                }
+
+            # Get recent daily stats
+            daily_result = await session.execute(
+                select(DailyStats)
+                .order_by(DailyStats.date.desc())
+                .limit(7)
+            )
+            daily = daily_result.scalars().all()
+
+            # Get top repos by success
+            repo_result = await session.execute(
+                select(Issue.repo, func.count(SolveAttempt.id), func.sum(SolveAttempt.success))
+                .join(Issue)
+                .where(SolveAttempt.started_at >= cutoff)
+                .group_by(Issue.repo)
+                .order_by(func.count(SolveAttempt.id).desc())
+                .limit(10)
+            )
+            repos = []
+            for repo, attempts, successes in repo_result:
+                repos.append({
+                    "repo": repo,
+                    "attempts": attempts,
+                    "successes": successes or 0,
+                    "rate": (successes or 0) / attempts if attempts > 0 else 0,
+                })
+
+            return summary, failures, languages, daily, repos
+
+    summary, failures, languages, daily, repos = asyncio.run(get_stats())
+
+    # Display summary
+    console.print("\n[bold cyan]📊 Auto-Contributor Statistics[/bold cyan]\n")
+    console.print(f"[dim]Period: Last {days} days[/dim]\n")
+
+    # Summary table
+    summary_table = Table(title="Summary", box=None)
+    summary_table.add_column("Metric", style="cyan")
+    summary_table.add_column("Value", style="green")
+
+    summary_table.add_row("Total Attempts", str(summary["total_attempts"]))
+    summary_table.add_row("Successful", str(summary["successful_attempts"]))
+    summary_table.add_row("Success Rate", f"{summary['success_rate']*100:.1f}%")
+    summary_table.add_row("Avg Duration", f"{summary['avg_duration_seconds']:.0f}s")
+    console.print(summary_table)
+
+    # Failure breakdown
+    if failures:
+        console.print("\n[bold]Failure Reasons[/bold]")
+        fail_table = Table(box=None)
+        fail_table.add_column("Reason", style="red")
+        fail_table.add_column("Count", style="yellow")
+        for reason, count in sorted(failures.items(), key=lambda x: x[1], reverse=True):
+            fail_table.add_row(reason or "unknown", str(count))
+        console.print(fail_table)
+
+    # Language breakdown
+    if languages and verbose:
+        console.print("\n[bold]By Language[/bold]")
+        lang_table = Table(box=None)
+        lang_table.add_column("Language", style="cyan")
+        lang_table.add_column("Attempts", style="white")
+        lang_table.add_column("Success", style="green")
+        lang_table.add_column("Rate", style="yellow")
+        for lang, data in sorted(languages.items(), key=lambda x: x[1]["attempts"], reverse=True):
+            lang_table.add_row(
+                lang,
+                str(data["attempts"]),
+                str(data["successes"]),
+                f"{data['rate']*100:.0f}%"
+            )
+        console.print(lang_table)
+
+    # Top repos
+    if repos and verbose:
+        console.print("\n[bold]Top Repositories[/bold]")
+        repo_table = Table(box=None)
+        repo_table.add_column("Repository", style="cyan")
+        repo_table.add_column("Attempts", style="white")
+        repo_table.add_column("Success", style="green")
+        repo_table.add_column("Rate", style="yellow")
+        for r in repos:
+            repo_table.add_row(
+                r["repo"],
+                str(r["attempts"]),
+                str(r["successes"]),
+                f"{r['rate']*100:.0f}%"
+            )
+        console.print(repo_table)
+
+    # Daily trend
+    if daily:
+        console.print("\n[bold]Daily Trend[/bold]")
+        for d in daily:
+            bar_len = int(d.issues_solved * 2) if d.issues_solved else 0
+            bar = "█" * bar_len
+            console.print(f"  {d.date}: {bar} {d.issues_solved} solved / {d.issues_attempted} attempted")
+
+
+@app.command()
 def loop(
     interval: int = typer.Option(
         10,
