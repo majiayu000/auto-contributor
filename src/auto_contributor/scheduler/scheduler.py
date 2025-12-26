@@ -67,7 +67,7 @@ class ContributionScheduler:
         return self._container_available
 
     def _should_skip_local_tests(self, repo: str) -> bool:
-        """Check if we should skip local tests for this repo (complex dependencies)."""
+        """Check if we should skip local tests for this repo (pattern-based fallback)."""
         for pattern in self.settings.skip_local_test_patterns:
             if pattern.lower() in repo.lower():
                 logger.info(
@@ -77,6 +77,10 @@ class ContributionScheduler:
                 )
                 return True
         return False
+
+    async def _evaluate_project(self, repo_path: Path) -> dict:
+        """Use Claude to evaluate project complexity."""
+        return await self.solver.evaluate_project_complexity(repo_path)
 
     async def _run_tests(
         self,
@@ -310,27 +314,47 @@ class ContributionScheduler:
                 logger.info("=== PROCESSING ISSUE END (ABANDONED - solve failed) ===")
                 return
 
+            # Step 2.5: Evaluate project complexity using Claude
+            logger.info("step_2.5_evaluate_complexity", repo=issue.repo)
+            complexity = await self._evaluate_project(repo_path)
+            logger.info(
+                "complexity_evaluated",
+                is_complex=complexity.get("is_complex"),
+                can_test_locally=complexity.get("can_test_locally"),
+                reasons=complexity.get("reasons"),
+                recommended_cmd=complexity.get("recommended_test_command"),
+            )
+
             # Step 3: Hybrid Test Strategy
-            # If Claude reports tests passed, trust it (Claude ran tests in TEST-FIX LOOP)
-            # Only do external verification for complex projects or if Claude didn't report status
+            # Decision based on Claude's complexity evaluation + Claude's test status
             logger.info(
                 "step_3_test_strategy",
                 claude_tests_passed=solve_result.tests_passed,
+                can_test_locally=complexity.get("can_test_locally"),
                 repo=issue.repo,
             )
 
             tests_passed = False
+            skip_external_tests = (
+                complexity.get("is_complex") or
+                not complexity.get("can_test_locally") or
+                self._should_skip_local_tests(issue.repo)  # Pattern fallback
+            )
 
             if solve_result.tests_passed is True:
-                # Claude reported tests passed - trust it, but optionally verify for critical repos
+                # Claude reported tests passed - trust it
                 logger.info("claude_reported_tests_passed", trusting_claude=True)
 
-                # For skip-pattern repos, directly trust Claude (they rely on CI anyway)
-                if self._should_skip_local_tests(issue.repo):
+                if skip_external_tests:
+                    # Complex project or can't test locally - trust Claude completely
                     tests_passed = True
-                    logger.info("trusting_claude_for_complex_project", repo=issue.repo)
+                    logger.info(
+                        "trusting_claude_for_complex_project",
+                        repo=issue.repo,
+                        reasons=complexity.get("reasons"),
+                    )
                 else:
-                    # Optional: Do a quick verification for non-complex projects
+                    # Simple project - do optional verification
                     logger.info("optional_verification_start", repo=issue.repo)
                     test_result = await self._run_tests(
                         repo_path=repo_path,
@@ -343,13 +367,12 @@ class ContributionScheduler:
                         tests_passed = True
                         logger.info("external_verification_passed")
                     else:
-                        # External test disagrees with Claude - log warning but trust Claude
-                        # (External test may have different environment/dependencies)
+                        # External test disagrees - trust Claude (environment difference)
                         logger.warning(
                             "external_verification_failed_trusting_claude",
                             output=test_result.output[:300],
                         )
-                        tests_passed = True  # Trust Claude's assessment
+                        tests_passed = True
             else:
                 # Claude didn't report tests passed - run full external test cycle
                 max_test_retries = 3

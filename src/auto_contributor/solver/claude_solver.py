@@ -636,6 +636,78 @@ Fix for #{issue.issue_number}: {issue.title}
 - [x] All tests pass
 """
 
+    async def evaluate_project_complexity(
+        self,
+        repo_path: Path,
+        timeout: int = 60,
+    ) -> dict:
+        """
+        Use Claude to evaluate project complexity for testing strategy.
+
+        Returns:
+            dict with keys:
+                - is_complex: bool
+                - can_test_locally: bool
+                - reasons: list[str]
+                - recommended_test_command: str | None
+        """
+        prompt = """Analyze this project and evaluate its complexity for local testing.
+
+## Task
+
+Quickly scan the project structure and determine:
+
+1. **Can tests run locally without special setup?**
+   - Check if it needs GPU (torch, tensorflow, jax, cuda)
+   - Check if it needs external services (databases, APIs, cloud)
+   - Check if it has complex native dependencies (C extensions, Rust, etc.)
+   - Check if it requires specific OS or hardware
+
+2. **What's the recommended test command?**
+   - Find the test configuration (pytest.ini, setup.cfg, pyproject.toml, package.json, etc.)
+   - Determine the correct test command for this project
+
+## Output Format (JSON only)
+
+```json
+{
+  "is_complex": true/false,
+  "can_test_locally": true/false,
+  "reasons": ["reason1", "reason2"],
+  "recommended_test_command": "pytest tests/ -v" or null,
+  "dependencies_concern": "GPU required" or "None"
+}
+```
+
+Output ONLY the JSON, no other text.
+"""
+
+        try:
+            result = await self._run_claude_raw(prompt, repo_path, timeout)
+
+            # Parse JSON from output
+            import re
+            json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                logger.info(
+                    "project_complexity_evaluated",
+                    is_complex=data.get("is_complex"),
+                    can_test_locally=data.get("can_test_locally"),
+                    reasons=data.get("reasons"),
+                )
+                return data
+        except Exception as e:
+            logger.warning("complexity_evaluation_failed", error=str(e))
+
+        # Default: assume can test locally
+        return {
+            "is_complex": False,
+            "can_test_locally": True,
+            "reasons": ["evaluation failed, assuming simple"],
+            "recommended_test_command": None,
+        }
+
     async def fix_ci_failure(
         self,
         repo_path: Path,
