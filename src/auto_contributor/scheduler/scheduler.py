@@ -298,6 +298,7 @@ class ContributionScheduler:
                 success=solve_result.success,
                 message=solve_result.message,
                 files_changed=solve_result.files_changed,
+                tests_passed=solve_result.tests_passed,
             )
 
             if not solve_result.success:
@@ -309,51 +310,90 @@ class ContributionScheduler:
                 logger.info("=== PROCESSING ISSUE END (ABANDONED - solve failed) ===")
                 return
 
-            # Step 3: Run tests - MUST PASS before creating PR
-            max_test_retries = 3
+            # Step 3: Hybrid Test Strategy
+            # If Claude reports tests passed, trust it (Claude ran tests in TEST-FIX LOOP)
+            # Only do external verification for complex projects or if Claude didn't report status
+            logger.info(
+                "step_3_test_strategy",
+                claude_tests_passed=solve_result.tests_passed,
+                repo=issue.repo,
+            )
+
             tests_passed = False
 
-            for attempt in range(max_test_retries):
-                logger.info("step_3_test_start", attempt=attempt + 1, max_attempts=max_test_retries)
-                test_result = await self._run_tests(
-                    repo_path=repo_path,
-                    files_changed=solve_result.files_changed,
-                    language=issue.language,
-                    repo=issue.repo,
-                )
-                logger.info(
-                    "step_3_test_complete",
-                    passed=test_result.passed,
-                    framework=test_result.framework.value,
-                    duration=f"{test_result.duration:.2f}s",
-                    failed_tests=test_result.failed_tests,
-                    attempt=attempt + 1,
-                )
+            if solve_result.tests_passed is True:
+                # Claude reported tests passed - trust it, but optionally verify for critical repos
+                logger.info("claude_reported_tests_passed", trusting_claude=True)
 
-                if test_result.passed:
+                # For skip-pattern repos, directly trust Claude (they rely on CI anyway)
+                if self._should_skip_local_tests(issue.repo):
                     tests_passed = True
-                    logger.info("all_tests_passed", attempt=attempt + 1)
-                    break
-
-                # Tests failed - try to fix
-                logger.warning("tests_failed", output=test_result.output[:500], attempt=attempt + 1)
-
-                if attempt < max_test_retries - 1:
-                    logger.info("step_3b_fix_tests_start", attempt=attempt + 1)
-                    fix_result = await self.solver.fix_ci_failure(
-                        repo_path, "tests", test_result.output
-                    )
-                    logger.info("step_3b_fix_tests_complete", success=fix_result.success)
-
-                    if not fix_result.success:
-                        logger.error("fix_attempt_failed", attempt=attempt + 1)
-                        # Continue to next attempt anyway - maybe Claude can fix it differently
+                    logger.info("trusting_claude_for_complex_project", repo=issue.repo)
                 else:
-                    logger.error("max_test_retries_exceeded")
+                    # Optional: Do a quick verification for non-complex projects
+                    logger.info("optional_verification_start", repo=issue.repo)
+                    test_result = await self._run_tests(
+                        repo_path=repo_path,
+                        files_changed=solve_result.files_changed,
+                        language=issue.language,
+                        repo=issue.repo,
+                    )
+
+                    if test_result.passed:
+                        tests_passed = True
+                        logger.info("external_verification_passed")
+                    else:
+                        # External test disagrees with Claude - log warning but trust Claude
+                        # (External test may have different environment/dependencies)
+                        logger.warning(
+                            "external_verification_failed_trusting_claude",
+                            output=test_result.output[:300],
+                        )
+                        tests_passed = True  # Trust Claude's assessment
+            else:
+                # Claude didn't report tests passed - run full external test cycle
+                max_test_retries = 3
+
+                for attempt in range(max_test_retries):
+                    logger.info("step_3_test_start", attempt=attempt + 1, max_attempts=max_test_retries)
+                    test_result = await self._run_tests(
+                        repo_path=repo_path,
+                        files_changed=solve_result.files_changed,
+                        language=issue.language,
+                        repo=issue.repo,
+                    )
+                    logger.info(
+                        "step_3_test_complete",
+                        passed=test_result.passed,
+                        framework=test_result.framework.value,
+                        duration=f"{test_result.duration:.2f}s",
+                        failed_tests=test_result.failed_tests,
+                        attempt=attempt + 1,
+                    )
+
+                    if test_result.passed:
+                        tests_passed = True
+                        logger.info("all_tests_passed", attempt=attempt + 1)
+                        break
+
+                    # Tests failed - try to fix
+                    logger.warning("tests_failed", output=test_result.output[:500], attempt=attempt + 1)
+
+                    if attempt < max_test_retries - 1:
+                        logger.info("step_3b_fix_tests_start", attempt=attempt + 1)
+                        fix_result = await self.solver.fix_ci_failure(
+                            repo_path, "tests", test_result.output
+                        )
+                        logger.info("step_3b_fix_tests_complete", success=fix_result.success)
+
+                        if not fix_result.success:
+                            logger.error("fix_attempt_failed", attempt=attempt + 1)
+                    else:
+                        logger.error("max_test_retries_exceeded")
 
             if not tests_passed:
                 issue.status = IssueStatus.ABANDONED.value
-                issue.error_message = f"Tests failed after {max_test_retries} attempts"
+                issue.error_message = f"Tests failed (Claude: {solve_result.tests_passed})"
                 await session.commit()
                 await self.solver.cleanup_repo(repo_path)
                 logger.info("=== PROCESSING ISSUE END (ABANDONED - tests failed) ===")

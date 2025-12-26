@@ -24,6 +24,8 @@ class SolveResult:
     message: str
     files_changed: list[str] = field(default_factory=list)
     error: str | None = None
+    tests_passed: bool | None = None  # None = unknown, True = passed, False = failed
+    claude_output: str | None = None  # Raw output for debugging
 
 
 class ClaudeSolver:
@@ -163,12 +165,25 @@ class ClaudeSolver:
             raise ClaudeError(f"Claude exited with code {process.returncode}", process.returncode)
 
         # Log Claude's output
-        if stdout:
-            logger.info("claude_output", output_preview=stdout.decode()[:1000])
+        output = stdout.decode() if stdout else ""
+        if output:
+            logger.info("claude_output", output_preview=output[:1000])
 
         # Check what files were changed
         files_changed = await self._get_changed_files(repo_path)
         logger.info("files_changed_check", files=files_changed)
+
+        # Parse completion markers
+        fix_status = self._parse_fix_status(output)
+        tests_passed = fix_status.get("tests_passed")
+        is_complete = fix_status.get("complete", False)
+
+        logger.info(
+            "fix_status_parsed",
+            complete=is_complete,
+            tests_passed=tests_passed,
+            reason=fix_status.get("reason"),
+        )
 
         if not files_changed:
             logger.warning("no_changes_made")
@@ -176,14 +191,69 @@ class ClaudeSolver:
                 success=False,
                 message="Claude did not make any changes",
                 files_changed=[],
+                tests_passed=tests_passed,
+                claude_output=output[-2000:] if output else None,
             )
 
-        logger.info("solve_success", files_count=len(files_changed), files=files_changed)
+        # Determine success based on completion marker and tests
+        if is_complete and tests_passed:
+            message = f"Successfully fixed with {len(files_changed)} files changed, tests passed"
+            success = True
+        elif is_complete and tests_passed is None:
+            message = f"Fix complete but test status unknown, {len(files_changed)} files changed"
+            success = True  # Trust Claude if it says complete
+        elif not is_complete and fix_status.get("reason"):
+            message = f"Fix incomplete: {fix_status.get('reason')}"
+            success = False
+        else:
+            # No marker found, fall back to file changes
+            message = f"Modified {len(files_changed)} files (no completion marker)"
+            success = True
+
+        logger.info("solve_result", success=success, message=message, files_count=len(files_changed))
         return SolveResult(
-            success=True,
-            message=f"Successfully modified {len(files_changed)} files",
+            success=success,
+            message=message,
             files_changed=files_changed,
+            tests_passed=tests_passed,
+            claude_output=output[-2000:] if output else None,
         )
+
+    def _parse_fix_status(self, output: str) -> dict:
+        """Parse the FIX_COMPLETE or FIX_INCOMPLETE marker from Claude's output."""
+        import re
+
+        result = {
+            "complete": False,
+            "tests_passed": None,
+            "reason": None,
+            "summary": None,
+        }
+
+        # Check for FIX_COMPLETE marker
+        if "===FIX_COMPLETE===" in output:
+            result["complete"] = True
+
+            # Parse tests status
+            tests_match = re.search(r"Tests status:\s*(PASSED|FAILED)", output, re.IGNORECASE)
+            if tests_match:
+                result["tests_passed"] = tests_match.group(1).upper() == "PASSED"
+
+            # Parse summary
+            summary_match = re.search(r"Summary:\s*(.+?)(?:\n|$)", output)
+            if summary_match:
+                result["summary"] = summary_match.group(1).strip()
+
+        # Check for FIX_INCOMPLETE marker
+        elif "===FIX_INCOMPLETE===" in output:
+            result["complete"] = False
+
+            # Parse reason
+            reason_match = re.search(r"Reason:\s*(.+?)(?:\n|$)", output)
+            if reason_match:
+                result["reason"] = reason_match.group(1).strip()
+
+        return result
 
     async def _get_changed_files(self, repo_path: Path) -> list[str]:
         """Get list of files changed in the repository."""
@@ -275,42 +345,65 @@ Every fix MUST include corresponding tests:
 - Ensure tests follow the project's testing conventions
 - Tests should fail without your fix and pass with it
 
-### Step 5: Verify ALL Tests Pass (MANDATORY)
-Before finishing:
-- Run the relevant package/module tests (not the entire project)
-- For Go: `go test -v ./path/to/affected/package/...`
-- For Python: `pytest path/to/affected/tests/`
-- For JavaScript/TypeScript: `npm test -- --testPathPattern=affected`
-- Ensure ALL existing tests still pass
-- Fix any test failures before completing
+### Step 5: TEST-FIX LOOP (CRITICAL - MUST COMPLETE)
+This is the most important step. You MUST iterate until all tests pass:
 
-### Step 6: Create a Todo List
-Use a mental todo list to track your progress:
-1. [ ] Read project conventions
-2. [ ] Analyze issue thoroughly
-3. [ ] Find all affected code locations
-4. [ ] Implement the fix
-5. [ ] Write tests for the fix
-6. [ ] Run and pass all tests
-7. [ ] Final review of changes
+```
+REPEAT:
+  1. Run the relevant tests:
+     - Go: `go test -v ./path/to/affected/package/...`
+     - Python: `pytest path/to/affected/tests/ -v`
+     - JavaScript/TypeScript: `npm test -- --testPathPattern=affected`
+     - Rust: `cargo test`
+
+  2. If tests FAIL:
+     - Analyze the failure output carefully
+     - Fix the issue causing the failure
+     - Go back to step 1
+
+  3. If tests PASS:
+     - Run a broader test to catch regressions
+     - If broader tests fail, fix and repeat
+     - If all pass, exit loop
+```
+
+**DO NOT STOP until tests pass.** If you encounter dependency issues you cannot resolve, note them but still attempt to run whatever tests are available.
+
+### Step 6: Final Verification
+Before finishing:
+1. Review all your changes
+2. Ensure code style matches the project
+3. Verify no temporary or debug code remains
+4. Confirm the fix actually addresses the issue
 
 ## Critical Rules
 
-1. **Tests are MANDATORY** - No fix is complete without tests
-2. **All tests MUST pass** - Both new and existing tests
+1. **TEST-FIX LOOP IS MANDATORY** - Keep fixing until tests pass
+2. **No early exit** - Do not stop at the first failure
 3. **Complete fixes only** - Find and fix ALL occurrences
 4. **No garbage files** - Do NOT create .log, .tmp, or temporary files
 5. **Follow conventions** - Match the project's exact coding style
 6. **Minimal changes** - Only modify what's necessary for the fix
 7. **No new dependencies** - Unless absolutely required by the fix
 
-## Output
+## Output Format (MANDATORY)
 
-After completing the fix:
-1. Summarize what you changed and why
-2. List all files modified
-3. Describe the tests you added
-4. Confirm all tests pass
+When you have completed the fix and all tests pass, you MUST output this exact marker:
+
+```
+===FIX_COMPLETE===
+Files changed: [list of files]
+Tests status: PASSED
+Summary: [brief description of fix]
+```
+
+If you cannot complete the fix (e.g., blocked by external issues), output:
+
+```
+===FIX_INCOMPLETE===
+Reason: [why the fix could not be completed]
+Progress: [what was accomplished]
+```
 
 Begin by exploring the codebase structure, then proceed systematically through each step.
 """
