@@ -63,7 +63,7 @@ func Default() *Config {
 		IncludeLabels:     []string{"good first issue", "help wanted", "bug"},
 		ExcludeLabels:     []string{"wontfix", "duplicate", "invalid"},
 		ExcludeRepos:      []string{},
-		MinRepoStars:      100,
+		MinRepoStars:      10,
 		MaxIssueAgeDays:   30,
 		WebEnabled:        true,
 		WebPort:           8080,

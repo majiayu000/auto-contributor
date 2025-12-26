@@ -113,12 +113,14 @@ func initApp() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// Validate required config
-	if cfg.GitHubToken == "" {
-		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
-	}
+	// Get username from gh CLI if not set
 	if cfg.GitHubUsername == "" {
-		return fmt.Errorf("GITHUB_USERNAME environment variable is required")
+		ghClient = github.New(cfg)
+		username, err := ghClient.GetUsername(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to get GitHub username from gh CLI: %w", err)
+		}
+		cfg.GitHubUsername = username
 	}
 
 	// Initialize database
@@ -211,27 +213,20 @@ func solveSingle(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
 	// Fetch issue from GitHub
-	ghIssue, err := ghClient.GetIssue(ctx, repo, issueNum)
+	issue, err := ghClient.GetIssue(ctx, repo, issueNum)
 	if err != nil {
 		return fmt.Errorf("fetch issue: %w", err)
 	}
 
-	// Get repo info
+	// Get repo info for language
 	repoInfo, err := ghClient.GetRepoInfo(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("fetch repo info: %w", err)
 	}
 
-	// Create model issue
-	issue := &models.Issue{
-		Repo:            repo,
-		IssueNumber:     issueNum,
-		Title:           ghIssue.GetTitle(),
-		Body:            ghIssue.GetBody(),
-		Language:        repoInfo.Language,
-		DifficultyScore: 0.5,
-		Status:          models.IssueStatusDiscovered,
-	}
+	issue.Language = repoInfo.Language
+	issue.DifficultyScore = 0.5
+	issue.Status = models.IssueStatusDiscovered
 
 	// Save to database
 	database.CreateIssue(issue)

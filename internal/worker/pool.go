@@ -439,7 +439,7 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	}
 
 	// Fork and push
-	_, err = w.pool.ghClient.ForkRepo(w.pool.ctx, issue.Repo)
+	err = w.pool.ghClient.ForkRepo(w.pool.ctx, issue.Repo)
 	if err != nil && !isAlreadyForked(err) {
 		result.Error = fmt.Errorf("fork failed: %w", err)
 		return
@@ -472,7 +472,7 @@ This PR fixes #%d
 		formatChangedFiles(solveResult.FilesChanged))
 
 	head := fmt.Sprintf("%s:%s", w.pool.config.GitHubUsername, branchName)
-	pr, err := w.pool.ghClient.CreatePullRequest(w.pool.ctx, issue.Repo, prTitle, prBody, head, "main")
+	prURL, prNumber, err := w.pool.ghClient.CreatePullRequest(w.pool.ctx, issue.Repo, prTitle, prBody, head, "main")
 	if err != nil {
 		result.Error = fmt.Errorf("create PR failed: %w", err)
 		attempt.FailureReason = models.FailureReasonPRFailed
@@ -482,13 +482,13 @@ This PR fixes #%d
 	// Success!
 	result.Success = true
 	result.PRCreated = true
-	result.PRURL = pr.GetHTMLURL()
+	result.PRURL = prURL
 
 	// Save PR to database
 	prRecord := &models.PullRequest{
 		IssueID:    issue.ID,
-		PRURL:      result.PRURL,
-		PRNumber:   pr.GetNumber(),
+		PRURL:      prURL,
+		PRNumber:   prNumber,
 		BranchName: branchName,
 		Status:     models.PRStatusOpen,
 		CIStatus:   "pending",
