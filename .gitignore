@@ -1,29 +1,20 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
+# Binaries
+/auto-contributor
+/bin/
+*.exe
+*.exe~
+*.dll
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+*.dylib
 
-# Virtual environments
-.venv/
-venv/
-ENV/
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+
+# Dependency directories
+/vendor/
 
 # IDE
 .idea/
@@ -31,37 +22,23 @@ ENV/
 *.swp
 *.swo
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Type checking
-.mypy_cache/
-
-# Linting
-.ruff_cache/
-
 # Environment
 .env
 .env.local
 
 # Database
 *.db
-*.sqlite
-*.sqlite3
-
-# Workspace (repos cloned for processing)
-workspace/
-
-# Logs
-*.log
+*.db-journal
 
 # OS
 .DS_Store
 Thumbs.db
 
-# uv
-.python-version
+# Build
+/dist/
+
+# Logs
+*.log
+
+# Workspace (repos cloned for processing)
+workspace/

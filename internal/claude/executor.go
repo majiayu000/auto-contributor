@@ -1,0 +1,442 @@
+package claude
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/majiayu000/auto-contributor/internal/config"
+	"github.com/majiayu000/auto-contributor/pkg/models"
+)
+
+// Result holds the output from Claude Code execution
+type Result struct {
+	Success           bool
+	FixComplete       bool
+	TestsPassed       *bool
+	IsComplex         *bool
+	CanTestLocally    *bool
+	ComplexityReasons []string
+	FilesChanged      []string
+	Output            string
+	Duration          time.Duration
+	Error             error
+}
+
+// ComplexityResult holds the complexity evaluation output
+type ComplexityResult struct {
+	IsComplex      bool     `json:"is_complex"`
+	CanTestLocally bool     `json:"can_test_locally"`
+	Reasons        []string `json:"reasons"`
+	TestFramework  string   `json:"test_framework"`
+}
+
+// Executor runs Claude Code to solve issues
+type Executor struct {
+	config      *config.Config
+	outputChan  chan string
+	outputMu    sync.Mutex
+	lastOutput  string
+}
+
+// New creates a new Claude executor
+func New(cfg *config.Config) *Executor {
+	return &Executor{
+		config:     cfg,
+		outputChan: make(chan string, 100),
+	}
+}
+
+// GetLastOutput returns the most recent output line
+func (e *Executor) GetLastOutput() string {
+	e.outputMu.Lock()
+	defer e.outputMu.Unlock()
+	return e.lastOutput
+}
+
+// OutputChannel returns the channel for streaming output
+func (e *Executor) OutputChannel() <-chan string {
+	return e.outputChan
+}
+
+// EvaluateComplexity asks Claude to evaluate project complexity
+func (e *Executor) EvaluateComplexity(ctx context.Context, repoDir string, issue *models.Issue) (*ComplexityResult, error) {
+	prompt := fmt.Sprintf(`Analyze this project and determine if the issue can be solved with local testing.
+
+Issue #%d: %s
+%s
+
+Evaluate:
+1. Is this a complex issue requiring external dependencies (APIs, databases, cloud services)?
+2. Can tests be run locally with standard tools?
+3. What test framework does this project use?
+
+Respond ONLY with JSON:
+{
+  "is_complex": true/false,
+  "can_test_locally": true/false,
+  "reasons": ["reason1", "reason2"],
+  "test_framework": "pytest/jest/go test/etc"
+}`, issue.IssueNumber, issue.Title, issue.Body)
+
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
+	cmd.Dir = repoDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("claude evaluation failed: %w", err)
+	}
+
+	// Parse JSON from output
+	result := &ComplexityResult{}
+	outputStr := string(output)
+
+	// Find JSON in output
+	jsonStart := strings.Index(outputStr, "{")
+	jsonEnd := strings.LastIndex(outputStr, "}")
+	if jsonStart >= 0 && jsonEnd > jsonStart {
+		jsonStr := outputStr[jsonStart : jsonEnd+1]
+		if err := json.Unmarshal([]byte(jsonStr), result); err != nil {
+			// Default to conservative estimate
+			result.IsComplex = true
+			result.CanTestLocally = false
+		}
+	}
+
+	return result, nil
+}
+
+// Solve runs Claude Code to fix an issue
+func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issue, complexity *ComplexityResult) (*Result, error) {
+	startTime := time.Now()
+
+	prompt := e.buildSolvePrompt(issue, complexity)
+
+	// Create timeout context
+	timeout := e.config.ClaudeTimeout
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude", "-p", prompt, "--output-format", "text")
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "CLAUDE_AUTO_ACCEPT=1")
+
+	// Capture output
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude: %w", err)
+	}
+
+	// Read output in background
+	var outputBuilder strings.Builder
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputBuilder.WriteString(line + "\n")
+			e.outputMu.Lock()
+			e.lastOutput = line
+			e.outputMu.Unlock()
+			select {
+			case e.outputChan <- line:
+			default:
+				// Channel full, skip
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			outputBuilder.WriteString("[stderr] " + line + "\n")
+		}
+	}()
+
+	// Wait for command to finish
+	cmdErr := cmd.Wait()
+	wg.Wait()
+
+	output := outputBuilder.String()
+	duration := time.Since(startTime)
+
+	result := &Result{
+		Output:   output,
+		Duration: duration,
+	}
+
+	// Parse markers from output
+	result.FixComplete = strings.Contains(output, "FIX_COMPLETE")
+	if strings.Contains(output, "FIX_INCOMPLETE") {
+		result.FixComplete = false
+	}
+
+	// Parse test results
+	if strings.Contains(output, "TESTS_PASSED: true") {
+		passed := true
+		result.TestsPassed = &passed
+	} else if strings.Contains(output, "TESTS_PASSED: false") {
+		passed := false
+		result.TestsPassed = &passed
+	}
+
+	// Set complexity info
+	if complexity != nil {
+		result.IsComplex = &complexity.IsComplex
+		result.CanTestLocally = &complexity.CanTestLocally
+		result.ComplexityReasons = complexity.Reasons
+	}
+
+	// Get changed files
+	result.FilesChanged = e.getChangedFiles(repoDir)
+
+	// Determine success
+	if cmdErr != nil {
+		result.Error = cmdErr
+		result.Success = false
+	} else {
+		result.Success = result.FixComplete && len(result.FilesChanged) > 0
+	}
+
+	return result, nil
+}
+
+// buildSolvePrompt constructs the prompt for solving an issue
+func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityResult) string {
+	var testInstructions string
+
+	if complexity != nil && complexity.CanTestLocally {
+		testInstructions = fmt.Sprintf(`
+## TEST-FIX LOOP (CRITICAL)
+After implementing the fix:
+1. Run the project's test suite using: %s
+2. If tests fail, fix the issues and re-run
+3. Continue until ALL tests pass
+4. Output: TESTS_PASSED: true/false`, complexity.TestFramework)
+	} else {
+		testInstructions = `
+## TESTING
+This project requires external dependencies for full testing.
+Focus on code correctness and run any available unit tests.
+Output: TESTS_PASSED: true/false (based on available tests)`
+	}
+
+	return fmt.Sprintf(`You are solving GitHub issue #%d.
+
+## Issue
+**Title:** %s
+**Body:**
+%s
+
+## Instructions
+1. Read and understand the issue completely
+2. Explore the codebase to understand the context
+3. Implement a minimal, focused fix
+4. Follow existing code style and patterns
+%s
+
+## Output Format
+When complete, output ONE of these markers on its own line:
+- FIX_COMPLETE - if the fix is complete and tests pass
+- FIX_INCOMPLETE - if you cannot complete the fix
+
+Also output: TESTS_PASSED: true/false
+
+Be concise. Focus only on fixing this specific issue.`,
+		issue.IssueNumber, issue.Title, issue.Body, testInstructions)
+}
+
+// getChangedFiles returns list of modified files using git
+func (e *Executor) getChangedFiles(repoDir string) []string {
+	cmd := exec.Command("git", "diff", "--name-only")
+	cmd.Dir = repoDir
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var files []string
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+
+	// Also check staged files
+	cmd = exec.Command("git", "diff", "--name-only", "--staged")
+	cmd.Dir = repoDir
+	output, err = cmd.Output()
+	if err == nil {
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !contains(files, line) {
+				files = append(files, line)
+			}
+		}
+	}
+
+	// Also check untracked files
+	cmd = exec.Command("git", "ls-files", "--others", "--exclude-standard")
+	cmd.Dir = repoDir
+	output, err = cmd.Output()
+	if err == nil {
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !contains(files, line) {
+				files = append(files, line)
+			}
+		}
+	}
+
+	return files
+}
+
+// RunTests executes tests in the repository
+func (e *Executor) RunTests(ctx context.Context, repoDir string, framework string) (bool, string, time.Duration, error) {
+	startTime := time.Now()
+
+	var cmd *exec.Cmd
+	switch strings.ToLower(framework) {
+	case "pytest", "python":
+		cmd = exec.CommandContext(ctx, "pytest", "-v", "--tb=short")
+	case "jest", "npm", "javascript", "typescript":
+		cmd = exec.CommandContext(ctx, "npm", "test")
+	case "go", "go test":
+		cmd = exec.CommandContext(ctx, "go", "test", "./...")
+	case "cargo", "rust":
+		cmd = exec.CommandContext(ctx, "cargo", "test")
+	default:
+		// Try to detect
+		if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
+			cmd = exec.CommandContext(ctx, "go", "test", "./...")
+		} else if _, err := os.Stat(filepath.Join(repoDir, "package.json")); err == nil {
+			cmd = exec.CommandContext(ctx, "npm", "test")
+		} else if _, err := os.Stat(filepath.Join(repoDir, "pytest.ini")); err == nil {
+			cmd = exec.CommandContext(ctx, "pytest", "-v")
+		} else if _, err := os.Stat(filepath.Join(repoDir, "Cargo.toml")); err == nil {
+			cmd = exec.CommandContext(ctx, "cargo", "test")
+		} else {
+			return false, "Unknown test framework", 0, fmt.Errorf("unknown test framework")
+		}
+	}
+
+	cmd.Dir = repoDir
+	output, err := cmd.CombinedOutput()
+	duration := time.Since(startTime)
+
+	passed := err == nil
+	return passed, string(output), duration, nil
+}
+
+// CommitChanges commits all changes with a message
+func (e *Executor) CommitChanges(repoDir, message string) error {
+	// Add all changes
+	cmd := exec.Command("git", "add", "-A")
+	cmd.Dir = repoDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+
+	// Commit
+	cmd = exec.Command("git", "commit", "-m", message)
+	cmd.Dir = repoDir
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+
+	return nil
+}
+
+// CreateBranch creates and switches to a new branch
+func (e *Executor) CreateBranch(repoDir, branchName string) error {
+	cmd := exec.Command("git", "checkout", "-b", branchName)
+	cmd.Dir = repoDir
+	return cmd.Run()
+}
+
+// PushBranch pushes a branch to remote
+func (e *Executor) PushBranch(repoDir, remote, branchName string) error {
+	cmd := exec.Command("git", "push", "-u", remote, branchName)
+	cmd.Dir = repoDir
+	return cmd.Run()
+}
+
+// CloneRepo clones a repository
+func (e *Executor) CloneRepo(ctx context.Context, repoURL, destDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", repoURL, destDir)
+	return cmd.Run()
+}
+
+// SetupGitConfig configures git user for commits
+func (e *Executor) SetupGitConfig(repoDir string) error {
+	cmds := [][]string{
+		{"git", "config", "user.name", e.config.GitHubUsername},
+		{"git", "config", "user.email", e.config.GitHubEmail},
+	}
+
+	for _, args := range cmds {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = repoDir
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ExtractIssueRef extracts issue reference for PR body
+func ExtractIssueRef(repo string, issueNum int) string {
+	return fmt.Sprintf("Fixes %s#%d", repo, issueNum)
+}
+
+// SanitizeBranchName creates a valid branch name from issue title
+func SanitizeBranchName(issueNum int, title string) string {
+	// Remove special characters
+	reg := regexp.MustCompile(`[^a-zA-Z0-9\s-]`)
+	clean := reg.ReplaceAllString(title, "")
+
+	// Replace spaces with dashes
+	clean = strings.ReplaceAll(clean, " ", "-")
+
+	// Lowercase and truncate
+	clean = strings.ToLower(clean)
+	if len(clean) > 40 {
+		clean = clean[:40]
+	}
+
+	return fmt.Sprintf("fix-%d-%s", issueNum, clean)
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
