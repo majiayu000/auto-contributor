@@ -81,13 +81,15 @@ uses Claude Code to create fixes, and submits pull requests.`,
 		RunE:  showStatus,
 	}
 
-	// Loop command - continuous operation
+	// Loop command - continuous operation with smart discovery
 	loopCmd := &cobra.Command{
 		Use:   "loop",
-		Short: "Run continuously with intervals",
+		Short: "Run continuously with Claude smart discovery",
 		RunE:  runLoop,
 	}
-	loopCmd.Flags().IntP("interval", "n", 10, "Minutes between runs")
+	loopCmd.Flags().IntP("interval", "n", 30, "Minutes between runs (default 30 for smart discovery)")
+	loopCmd.Flags().StringP("topic", "t", "golang", "Topic to search (e.g., 'golang', 'ai', 'web')")
+	loopCmd.Flags().StringP("depth", "d", "deep", "Analysis depth: quick, deep, ultrathink")
 
 	// Version command
 	versionCmd := &cobra.Command{
@@ -320,10 +322,24 @@ func showStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// loopConfig holds configuration for the loop command
+type loopConfig struct {
+	topic string
+	depth string
+}
+
+var loopCfg loopConfig
+
 func runLoop(cmd *cobra.Command, args []string) error {
 	interval, _ := cmd.Flags().GetInt("interval")
+	loopCfg.topic, _ = cmd.Flags().GetString("topic")
+	loopCfg.depth, _ = cmd.Flags().GetString("depth")
 
-	fmt.Printf("Running in loop mode (interval: %d minutes)\n", interval)
+	fmt.Printf("Running in loop mode with Claude smart discovery\n")
+	fmt.Printf("  Interval: %d minutes\n", interval)
+	fmt.Printf("  Topic: %s\n", loopCfg.topic)
+	fmt.Printf("  Depth: %s\n", loopCfg.depth)
+	fmt.Println()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -363,24 +379,73 @@ func runLoop(cmd *cobra.Command, args []string) error {
 }
 
 func runCycle(ctx context.Context) {
-	fmt.Printf("[%s] Starting cycle...\n", time.Now().Format("15:04:05"))
+	topic := loopCfg.topic
+	if topic == "" {
+		topic = "golang"
+	}
+	depth := loopCfg.depth
+	if depth == "" {
+		depth = "deep"
+	}
 
-	// Discover new issues
-	issues, err := ghClient.SearchIssues(ctx, 5)
+	fmt.Printf("[%s] Starting cycle with Claude smart discovery (topic: %s)...\n",
+		time.Now().Format("15:04:05"), topic)
+
+	// Use Claude-powered smart discovery instead of dumb GitHub search
+	req := discovery.DiscoveryRequest{
+		Topic:         topic,
+		Languages:     cfg.Languages,
+		MinStars:      50,
+		Labels:        cfg.IncludeLabels,
+		MaxAgeDays:    cfg.MaxIssueAgeDays,
+		ExcludeRepos:  cfg.ExcludeRepos,
+		Limit:         5,
+		AnalysisDepth: depth,
+	}
+
+	discoverer := discovery.NewClaudeDiscoverer(10 * time.Minute)
+	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
-		fmt.Printf("Error discovering issues: %v\n", err)
+		fmt.Printf("Error in smart discovery: %v\n", err)
 		return
 	}
 
-	// Submit issues to queue
-	for _, issue := range issues {
-		database.CreateIssue(issue)
-		if err := pool.Submit(issue); err != nil {
-			fmt.Printf("Queue full, skipping %s#%d\n", issue.Repo, issue.IssueNumber)
+	fmt.Printf("Claude found %d suitable issues (analyzed %d candidates)\n",
+		len(result.Issues), result.Metadata.TotalCandidates)
+
+	// Submit high-scoring issues to queue
+	submitted := 0
+	for _, issue := range result.Issues {
+		// Only submit issues with score >= 0.6
+		if issue.SuitabilityScore < 0.6 {
+			fmt.Printf("  Skipping %s#%d (score %.2f too low)\n",
+				issue.Repo, issue.IssueNumber, issue.SuitabilityScore)
+			continue
+		}
+
+		dbIssue := &models.Issue{
+			Repo:            issue.Repo,
+			IssueNumber:     issue.IssueNumber,
+			Title:           issue.Title,
+			Body:            issue.Analysis.Recommendation,
+			Language:        cfg.Languages[0],
+			DifficultyScore: 1.0 - issue.SuitabilityScore,
+			Status:          models.IssueStatusDiscovered,
+			DiscoveredAt:    time.Now(),
+			UpdatedAt:       time.Now(),
+		}
+
+		database.CreateIssue(dbIssue)
+		if err := pool.Submit(dbIssue); err != nil {
+			fmt.Printf("  Queue full, skipping %s#%d\n", issue.Repo, issue.IssueNumber)
+		} else {
+			fmt.Printf("  ✓ Queued %s#%d (score %.2f, %s)\n",
+				issue.Repo, issue.IssueNumber, issue.SuitabilityScore, issue.Analysis.FixType)
+			submitted++
 		}
 	}
 
-	fmt.Printf("Submitted %d issues to queue\n", len(issues))
+	fmt.Printf("Submitted %d issues to queue\n", submitted)
 }
 
 func handleResults(ctx context.Context) {

@@ -51,7 +51,7 @@ func Default() *Config {
 	dataDir := filepath.Join(homeDir, ".auto-contributor")
 
 	return &Config{
-		GitHubEmail:       "noreply@github.com",
+		GitHubEmail:       "1835304752@qq.com",
 		ClaudeTimeout:     15 * time.Minute,
 		ClaudeMaxRetries:  3,
 		WorkerCount:       10,
