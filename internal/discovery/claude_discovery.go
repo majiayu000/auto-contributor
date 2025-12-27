@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/majiayu000/auto-contributor/pkg/logger"
 )
 
 // DiscoveryRequest defines input for Claude-powered discovery
@@ -23,14 +25,14 @@ type DiscoveryRequest struct {
 
 // IssueAnalysis contains Claude's analysis of an issue
 type IssueAnalysis struct {
-	IsWellDefined       bool     `json:"is_well_defined"`
-	HasReproductionSteps bool    `json:"has_reproduction_steps"`
-	IsSelfContained     bool     `json:"is_self_contained"`
-	FixType             string   `json:"fix_type"`      // bug, docs, feature, refactor
-	Complexity          string   `json:"complexity"`    // low, medium, high
-	EstimatedFiles      int      `json:"estimated_files"`
-	Blockers            []string `json:"blockers"`
-	Recommendation      string   `json:"recommendation"`
+	IsWellDefined        bool     `json:"is_well_defined"`
+	HasReproductionSteps bool     `json:"has_reproduction_steps"`
+	IsSelfContained      bool     `json:"is_self_contained"`
+	FixType              string   `json:"fix_type"`      // bug, docs, feature, refactor
+	Complexity           string   `json:"complexity"`    // low, medium, high
+	EstimatedFiles       int      `json:"estimated_files"`
+	Blockers             []string `json:"blockers"`
+	Recommendation       string   `json:"recommendation"`
 }
 
 // RepoContext contains repository metadata
@@ -44,13 +46,15 @@ type RepoContext struct {
 
 // DiscoveredIssue represents a discovered and analyzed issue
 type DiscoveredIssue struct {
-	Repo             string        `json:"repo"`
-	IssueNumber      int           `json:"issue_number"`
-	Title            string        `json:"title"`
-	URL              string        `json:"url"`
-	SuitabilityScore float64       `json:"suitability_score"`
-	Analysis         IssueAnalysis `json:"analysis"`
-	RepoContext      RepoContext   `json:"repo_context"`
+	Repo               string        `json:"repo"`
+	IssueNumber        int           `json:"issue_number"`
+	Title              string        `json:"title"`
+	URL                string        `json:"url"`
+	SuitabilityScore   float64       `json:"suitability_score"`
+	VerifiedNoPR       bool          `json:"verified_no_pr"`
+	VerificationMethod string        `json:"verification_method"`
+	Analysis           IssueAnalysis `json:"analysis"`
+	RepoContext        RepoContext   `json:"repo_context"`
 }
 
 // DiscoveryResult is the complete output of discovery
@@ -59,7 +63,9 @@ type DiscoveryResult struct {
 	Metadata struct {
 		TotalCandidates      int `json:"total_candidates"`
 		Analyzed             int `json:"analyzed"`
+		IssuesWithPR         int `json:"issues_with_pr"`
 		Selected             int `json:"selected"`
+		StarThresholdUsed    int `json:"star_threshold_used"`
 		DiscoveryTimeSeconds int `json:"discovery_time_seconds"`
 	} `json:"metadata"`
 }
@@ -67,138 +73,175 @@ type DiscoveryResult struct {
 // ClaudeDiscoverer uses Claude to find and analyze issues
 type ClaudeDiscoverer struct {
 	timeout time.Duration
+	log     *logger.ComponentLogger
 }
 
 // NewClaudeDiscoverer creates a new discoverer
 func NewClaudeDiscoverer(timeout time.Duration) *ClaudeDiscoverer {
-	return &ClaudeDiscoverer{timeout: timeout}
+	return &ClaudeDiscoverer{
+		timeout: timeout,
+		log:     logger.NewComponent("discovery"),
+	}
 }
 
 // Discover finds and analyzes issues using Claude
 func (d *ClaudeDiscoverer) Discover(ctx context.Context, req DiscoveryRequest) (*DiscoveryResult, error) {
 	startTime := time.Now()
 
+	d.log.Info("starting claude discovery",
+		"topic", req.Topic,
+		"min_stars", req.MinStars,
+		"limit", req.Limit,
+		"depth", req.AnalysisDepth,
+	)
+
 	// Build the prompt for Claude
 	prompt := d.buildDiscoveryPrompt(req)
+	d.log.Debug("prompt built", "length", len(prompt))
 
 	// Run Claude Code
+	d.log.Info("calling claude code", "timeout", d.timeout.String())
 	output, err := d.runClaude(ctx, prompt)
 	if err != nil {
+		d.log.Error("claude discovery failed", "error", err)
 		return nil, fmt.Errorf("claude discovery failed: %w", err)
 	}
+
+	elapsed := time.Since(startTime)
+	d.log.Info("claude returned", "output_length", len(output), "elapsed", elapsed.String())
 
 	// Parse the result
 	result, err := d.parseDiscoveryResult(output)
 	if err != nil {
+		// Log first 500 chars of output for debugging
+		preview := output
+		if len(preview) > 500 {
+			preview = preview[:500] + "..."
+		}
+		d.log.Error("parse error", "error", err, "output_preview", preview)
 		return nil, fmt.Errorf("failed to parse result: %w", err)
 	}
 
-	result.Metadata.DiscoveryTimeSeconds = int(time.Since(startTime).Seconds())
+	result.Metadata.DiscoveryTimeSeconds = int(elapsed.Seconds())
+	d.log.Info("discovery complete",
+		"issues_found", len(result.Issues),
+		"issues_with_pr", result.Metadata.IssuesWithPR,
+		"star_threshold", result.Metadata.StarThresholdUsed,
+		"duration_seconds", result.Metadata.DiscoveryTimeSeconds,
+	)
 	return result, nil
 }
 
 func (d *ClaudeDiscoverer) buildDiscoveryPrompt(req DiscoveryRequest) string {
-	labelsStr := strings.Join(req.Labels, ", ")
-	languagesStr := strings.Join(req.Languages, ", ")
-	excludeStr := strings.Join(req.ExcludeRepos, ", ")
-
-	analysisInstructions := ""
-	switch req.AnalysisDepth {
-	case "quick":
-		analysisInstructions = "Do a quick assessment based on title and labels only."
-	case "deep":
-		analysisInstructions = "Read the full issue body and analyze thoroughly."
-	case "ultrathink":
-		analysisInstructions = `Use extended thinking to deeply analyze each issue:
-- Read the full issue body and all comments
-- Check if there's already a PR addressing this issue
-- Look at the repo's CONTRIBUTING.md and code structure
-- Evaluate if this can realistically be solved automatically
-- Consider edge cases and potential complications`
+	lang := "go"
+	if len(req.Languages) > 0 {
+		lang = req.Languages[0]
 	}
 
-	return fmt.Sprintf(`You are an expert at finding GitHub issues suitable for automated solving.
+	excludeRepos := ""
+	if len(req.ExcludeRepos) > 0 {
+		excludeRepos = fmt.Sprintf("\n排除这些仓库: %s", strings.Join(req.ExcludeRepos, ", "))
+	}
 
-## Task
-Find and analyze GitHub issues that can be automatically fixed using Claude Code.
+	return fmt.Sprintf(`你是一个GitHub贡献顾问。你的任务是找到真正可以贡献的issue。
 
-## Search Criteria
-- Topic/Focus: %s
-- Languages: %s
-- Minimum Stars: %d
-- Labels to look for: %s
-- Maximum issue age: %d days
-- Repos to exclude: %s
-- Number of issues to return: %d
+## 搜索策略
 
-## Analysis Depth
+### 第一步：搜索热门库
+使用ultrathink思考搜索策略，然后执行：
+
+# 搜索AI相关的trending库
+gh search repos "ai OR llm OR agent OR machine-learning" --language=%s --stars=">1000" --sort=updated --json name,owner,stargazersCount,updatedAt --limit 20
+
+# 也搜索工具类库
+gh search repos "cli OR tool OR framework" --language=%s --stars=">1000" --sort=updated --json name,owner,stargazersCount,updatedAt --limit 10
 %s
 
-## Instructions
+### 第二步：对每个库检查issue
+对于每个找到的库，执行：
+gh issue list --repo <owner/repo> --state open --label "good first issue,help wanted,bug" --json number,title,createdAt --limit 15
 
-1. **Search Phase**: Use GitHub to search for issues matching the criteria:
-   - Search with: gh search issues "label:\"good first issue\" language:go" --limit 50
-   - Or browse trending repos in the topic area
+### 第三步：关键！验证issue没有关联的PR
+对于每个候选issue，**必须**验证没有PR：
 
-2. **Filter Phase**: For each candidate issue, check:
-   - Does it already have a linked PR? (skip if yes)
-   - Is the repo actively maintained? (recent commits)
-   - Is the issue clear and well-defined?
+# 方法1：搜索是否有PR提到这个issue
+gh pr list --repo <owner/repo> --state open --search "fixes #<number> OR closes #<number> OR resolves #<number>"
 
-3. **Analysis Phase**: For promising issues, analyze deeply:
-   - Read the full issue description
-   - Check for reproduction steps or code examples
-   - Evaluate complexity (lines of code, files affected)
-   - Identify potential blockers (needs domain knowledge, external services, etc.)
-   - Assess likelihood of successful automated fix
+# 方法2：搜索PR标题是否包含issue关键词
+gh pr list --repo <owner/repo> --state open --search "<issue标题关键词>"
 
-4. **Scoring**: Rate each issue 0.0-1.0 based on:
-   - 0.9-1.0: Perfect for automation (clear bug, single file, has test)
-   - 0.7-0.9: Good candidate (well-defined, low complexity)
-   - 0.5-0.7: Possible but challenging (medium complexity)
-   - 0.3-0.5: Difficult (high complexity or unclear)
-   - 0.0-0.3: Not suitable (requires human judgment)
+# 方法3：查看issue详情，看是否有人评论说在处理
+gh issue view <number> --repo <owner/repo> --json comments
 
-## Output Format
+### 第四步：递归降级搜索
+如果高星库(>1000)的issue都有PR了，自动降级：
 
-Return ONLY valid JSON in this exact format (no markdown, no explanation):
+# 第一次降级: 500-1000 stars
+gh search repos "ai OR llm OR agent" --language=%s --stars="500..1000" --sort=updated --limit 15
 
+# 第二次降级: 100-500 stars
+gh search repos "ai OR llm OR agent" --language=%s --stars="100..500" --sort=updated --limit 15
+
+# 第三次降级: 50-100 stars
+gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=updated --limit 15
+
+重复第二、三步，直到找到%d个确认没有PR的issue。
+
+## 使用ultrathink分析
+对每个候选issue，深度分析：
+1. issue是否定义清晰？
+2. 修复范围是否明确？（修改哪些文件）
+3. 是否需要添加测试？
+4. 预估复杂度？（low/medium/high）
+5. 是否有阻塞因素？（需要外部服务、权限等）
+
+## 重要规则
+1. **必须验证**：每个issue都要确认没有关联PR
+2. **不要猜测**：如果无法确认，跳过这个issue
+3. **递归搜索**：如果高星库没有可用issue，自动降级到低星库
+4. **最终结果**：至少找到%d个确认没有PR的issue
+
+## 输出格式（仅JSON，不要markdown代码块）
 {
   "issues": [
     {
       "repo": "owner/repo",
       "issue_number": 123,
-      "title": "Issue title here",
+      "title": "Issue title",
       "url": "https://github.com/owner/repo/issues/123",
       "suitability_score": 0.85,
+      "verified_no_pr": true,
+      "verification_method": "searched PRs with 'fixes #123', no results",
       "analysis": {
         "is_well_defined": true,
         "has_reproduction_steps": true,
         "is_self_contained": true,
         "fix_type": "bug",
         "complexity": "low",
-        "estimated_files": 1,
+        "estimated_files": 2,
         "blockers": [],
-        "recommendation": "Clear bug with stack trace, single file fix likely"
+        "recommendation": "Clear bug with reproduction steps, good first contribution"
       },
       "repo_context": {
-        "stars": 1234,
+        "stars": 1500,
         "has_contributing": true,
         "has_claude_md": false,
-        "test_framework": "go test",
-        "ci_system": "GitHub Actions"
+        "test_framework": "pytest",
+        "ci_system": "github-actions"
       }
     }
   ],
   "metadata": {
     "total_candidates": 50,
-    "analyzed": 15,
-    "selected": 10
+    "analyzed": 50,
+    "issues_with_pr": 45,
+    "selected": %d,
+    "star_threshold_used": 1000
   }
 }
 
-Begin discovery now. Search GitHub, analyze issues, and return the JSON result.
-`, req.Topic, languagesStr, req.MinStars, labelsStr, req.MaxAgeDays, excludeStr, req.Limit, analysisInstructions)
+开始搜索！返回JSON。
+`, lang, lang, excludeRepos, lang, lang, lang, req.Limit, req.Limit, req.Limit)
 }
 
 func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string, error) {
@@ -213,11 +256,43 @@ func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string
 
 	cmd.Stdin = strings.NewReader(prompt)
 
-	output, err := cmd.Output()
+	// Start progress logger
+	startTime := time.Now()
+	done := make(chan bool)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				elapsed := time.Since(startTime)
+				d.log.Info("discovery still running...", "elapsed", elapsed.Round(time.Second).String())
+			}
+		}
+	}()
+
+	// Use CombinedOutput to capture stderr as well
+	output, err := cmd.CombinedOutput()
+	close(done) // Stop progress logger
+
 	if err != nil {
-		return "", err
+		// Log stderr for debugging
+		if len(output) > 0 {
+			preview := string(output)
+			if len(preview) > 1000 {
+				preview = preview[:1000] + "..."
+			}
+			d.log.Error("claude error output", "output", preview)
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("claude timed out after %v", d.timeout)
+		}
+		return "", fmt.Errorf("claude command failed: %w", err)
 	}
 
+	d.log.Info("claude finished", "elapsed", time.Since(startTime).Round(time.Second).String(), "output_bytes", len(output))
 	return string(output), nil
 }
 
