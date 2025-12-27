@@ -403,7 +403,7 @@ func runCycle(ctx context.Context) {
 		AnalysisDepth: depth,
 	}
 
-	discoverer := discovery.NewClaudeDiscoverer(10 * time.Minute)
+	discoverer := discovery.NewClaudeDiscoverer(1 * time.Hour) // 1 hour timeout for all operations
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
 		fmt.Printf("Error in smart discovery: %v\n", err)
@@ -524,10 +524,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create discoverer with timeout
-	timeout := 10 * time.Minute
-	if depth == "ultrathink" {
-		timeout = 20 * time.Minute
-	}
+	timeout := 1 * time.Hour // All operations get 1 hour timeout
 	discoverer := discovery.NewClaudeDiscoverer(timeout)
 
 	fmt.Println("⏳ Running Claude discovery (this may take a few minutes)...")
