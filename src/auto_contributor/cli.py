@@ -584,9 +584,9 @@ def loop(
             console.print(f"[cyan]{'='*50}[/cyan]")
 
             try:
-                # Step 1: Process one issue
+                # Step 1: Process one issue (don't close finder - we're in a loop)
                 console.print(f"\n[yellow]>>> Step 1: Solving one issue...[/yellow]")
-                await scheduler.run_once(dry_run=False, limit=1, topic=topic)
+                await scheduler.run_once(dry_run=False, limit=1, topic=topic, close_finder=False)
 
                 # Step 2: Check CI status of open PRs
                 if check_ci:
@@ -612,6 +612,8 @@ def loop(
                                     # Update PR status in database
                                     if ci_status.all_passed:
                                         pr.ci_status = "success"
+                                        pr.status = PRStatus.READY.value  # Mark as ready, stop monitoring
+                                        console.print(f"    [green]PR marked as READY[/green]")
                                     elif ci_status.has_failures:
                                         pr.ci_status = "failure"
                                     else:
@@ -623,6 +625,32 @@ def loop(
                             await session.commit()
                         else:
                             console.print("  No open PRs to check")
+
+                # Step 3: Check for stale PRs (open for too long without activity)
+                console.print(f"\n[yellow]>>> Step 3: Checking for stale PRs...[/yellow]")
+                stale_days = 7  # PRs open for more than 7 days are considered stale
+                async with session_factory() as session:
+                    from datetime import timedelta
+                    stale_threshold = datetime.utcnow() - timedelta(days=stale_days)
+                    result = await session.execute(
+                        select(PullRequest)
+                        .where(
+                            PullRequest.status == PRStatus.OPEN.value,
+                            PullRequest.created_at < stale_threshold,
+                        )
+                    )
+                    stale_prs = result.scalars().all()
+
+                    if stale_prs:
+                        console.print(f"  Found {len(stale_prs)} stale PRs (>{stale_days} days old)")
+                        for pr in stale_prs:
+                            age_days = (datetime.utcnow() - pr.created_at).days
+                            console.print(f"    [yellow]Stale: {pr.pr_url} ({age_days} days old)[/yellow]")
+                            # Mark as stale but don't close - maintainer might still review
+                            pr.ci_status = "stale"
+                        await session.commit()
+                    else:
+                        console.print("  No stale PRs found")
 
                 console.print(f"\n[green]Cycle {cycle} complete. Sleeping {interval} minutes...[/green]")
 

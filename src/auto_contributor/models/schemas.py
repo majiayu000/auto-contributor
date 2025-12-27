@@ -23,6 +23,7 @@ class PRStatus(str, Enum):
     """Status of a pull request."""
 
     OPEN = "open"
+    READY = "ready"  # CI passed, waiting for maintainer review/merge
     MERGED = "merged"
     CLOSED = "closed"
 

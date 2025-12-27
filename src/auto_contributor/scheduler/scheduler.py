@@ -609,7 +609,9 @@ class ContributionScheduler:
 
             if ci_status.all_passed:
                 pr.ci_status = "success"
-                logger.info("ci_passed", pr=pr.pr_url)
+                # Mark PR as ready - no more monitoring needed
+                pr.status = PRStatus.READY.value
+                logger.info("ci_passed_pr_ready", pr=pr.pr_url)
 
             elif ci_status.has_failures:
                 pr.ci_status = "failure"
@@ -657,12 +659,25 @@ class ContributionScheduler:
         limit: int = 1,
         topic: str | None = None,
         use_claude: bool = False,
+        close_finder: bool = True,
     ) -> None:
-        """Run the pipeline once (for testing)."""
+        """Run the pipeline once (for testing).
+
+        Args:
+            dry_run: If True, only discover issues without processing
+            limit: Max issues to process
+            topic: Optional topic to search for
+            use_claude: Use Claude for repo discovery
+            close_finder: If True, close the HTTP client after run (default True for backwards compat)
+                         Set to False when running in a loop to reuse the client
+        """
         logger.info("running_once", dry_run=dry_run, limit=limit, topic=topic, use_claude=use_claude)
 
         await init_db()
         self._session_factory = get_session_factory()
+
+        # Ensure finder client is open (recreate if closed)
+        await self._ensure_finder_client()
 
         if topic:
             # Search by topic
@@ -673,7 +688,15 @@ class ContributionScheduler:
         if not dry_run:
             await self.process_queue(limit=limit)
 
-        await self.finder.close()
+        if close_finder:
+            await self.finder.close()
+
+    async def _ensure_finder_client(self) -> None:
+        """Ensure the finder's HTTP client is open, recreate if closed."""
+        if self.finder.client.is_closed:
+            logger.info("recreating_finder_client", reason="client was closed")
+            # Recreate the finder with fresh client
+            self.finder = IssueFinder(self.settings)
 
     async def discover_issues_by_topic(self, topic: str, use_claude: bool = False) -> None:
         """Discover issues from trending repos by topic."""
