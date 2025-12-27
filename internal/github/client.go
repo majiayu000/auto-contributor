@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -87,6 +88,12 @@ func (c *Client) SearchIssues(ctx context.Context, limit int) ([]*models.Issue, 
 		// Check if repo is excluded
 		if c.isExcludedRepo(repo) {
 			continue
+		}
+
+		// Check if issue already has a linked PR (skip if so)
+		hasPR, err := c.HasExistingPR(ctx, repo, r.Number)
+		if err == nil && hasPR {
+			continue // Skip issues that already have PRs
 		}
 
 		// Get repo info
@@ -340,6 +347,68 @@ func (c *Client) isExcludedRepo(repo string) bool {
 		}
 	}
 	return false
+}
+
+// GetContributingGuide fetches CONTRIBUTING.md content from a repo
+func (c *Client) GetContributingGuide(ctx context.Context, repoFullName string) (string, error) {
+	// Try common locations for contribution guide
+	paths := []string{
+		"CONTRIBUTING.md",
+		".github/CONTRIBUTING.md",
+		"docs/CONTRIBUTING.md",
+	}
+
+	for _, path := range paths {
+		cmd := exec.CommandContext(ctx, "gh", "api",
+			fmt.Sprintf("repos/%s/contents/%s", repoFullName, path),
+			"--jq", ".content")
+
+		output, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+
+		// Content is base64 encoded
+		content := strings.TrimSpace(string(output))
+		if content == "" || content == "null" {
+			continue
+		}
+
+		// Decode base64
+		decoded, err := decodeBase64(content)
+		if err != nil {
+			continue
+		}
+
+		// Truncate if too long (keep first 4000 chars)
+		if len(decoded) > 4000 {
+			decoded = decoded[:4000] + "\n... (truncated)"
+		}
+
+		return decoded, nil
+	}
+
+	return "", fmt.Errorf("no CONTRIBUTING.md found")
+}
+
+// decodeBase64 decodes a base64 string
+func decodeBase64(s string) (string, error) {
+	// GitHub API returns base64 with possible line breaks
+	s = strings.ReplaceAll(s, "\\n", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\"", "")
+
+	// Use encoding/base64 to decode
+	decoded, err := base64Decode(s)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
+
+// base64Decode decodes base64 string using standard library
+func base64Decode(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(s)
 }
 
 // estimateDifficulty provides initial difficulty estimate

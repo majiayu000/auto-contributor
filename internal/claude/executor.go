@@ -358,7 +358,288 @@ func (e *Executor) RunTests(ctx context.Context, repoDir string, framework strin
 	return passed, string(output), duration, nil
 }
 
-// CommitChanges commits all changes with a message
+// ValidationResult holds the result of code validation
+type ValidationResult struct {
+	Passed   bool
+	Language string
+	Errors   []string
+	Warnings []string
+}
+
+// ValidateCode runs language-specific linters and formatters before commit
+func (e *Executor) ValidateCode(ctx context.Context, repoDir string) (*ValidationResult, error) {
+	result := &ValidationResult{Passed: true}
+
+	// Detect project language
+	if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
+		result.Language = "go"
+		if err := e.validateGo(ctx, repoDir, result); err != nil {
+			return result, err
+		}
+	} else if _, err := os.Stat(filepath.Join(repoDir, "package.json")); err == nil {
+		result.Language = "javascript"
+		if err := e.validateJS(ctx, repoDir, result); err != nil {
+			return result, err
+		}
+	} else if _, err := os.Stat(filepath.Join(repoDir, "pyproject.toml")); err == nil {
+		result.Language = "python"
+		if err := e.validatePython(ctx, repoDir, result); err != nil {
+			return result, err
+		}
+	} else if _, err := os.Stat(filepath.Join(repoDir, "Cargo.toml")); err == nil {
+		result.Language = "rust"
+		if err := e.validateRust(ctx, repoDir, result); err != nil {
+			return result, err
+		}
+	}
+
+	return result, nil
+}
+
+// validateGo runs Go-specific validation
+func (e *Executor) validateGo(ctx context.Context, repoDir string, result *ValidationResult) error {
+	// Run gofmt to check formatting
+	cmd := exec.CommandContext(ctx, "gofmt", "-l", ".")
+	cmd.Dir = repoDir
+	output, err := cmd.Output()
+	if err != nil {
+		result.Warnings = append(result.Warnings, "gofmt check failed: "+err.Error())
+	} else if len(strings.TrimSpace(string(output))) > 0 {
+		// Files need formatting - auto-fix them
+		fixCmd := exec.CommandContext(ctx, "gofmt", "-w", ".")
+		fixCmd.Dir = repoDir
+		if fixErr := fixCmd.Run(); fixErr != nil {
+			result.Errors = append(result.Errors, "gofmt fix failed: "+fixErr.Error())
+			result.Passed = false
+		} else {
+			result.Warnings = append(result.Warnings, "gofmt: auto-fixed formatting issues")
+		}
+	}
+
+	// Run golangci-lint if available
+	cmd = exec.CommandContext(ctx, "golangci-lint", "run", "./...")
+	cmd.Dir = repoDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		// Check if golangci-lint is not installed
+		if strings.Contains(err.Error(), "executable file not found") {
+			result.Warnings = append(result.Warnings, "golangci-lint not installed, skipping lint check")
+		} else {
+			// Lint errors found
+			outputStr := string(output)
+			lines := strings.Split(outputStr, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line != "" && !strings.HasPrefix(line, "level=") {
+					result.Errors = append(result.Errors, line)
+				}
+			}
+			result.Passed = false
+		}
+	}
+
+	// Run go vet
+	cmd = exec.CommandContext(ctx, "go", "vet", "./...")
+	cmd.Dir = repoDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		result.Errors = append(result.Errors, "go vet: "+string(output))
+		result.Passed = false
+	}
+
+	return nil
+}
+
+// validateJS runs JavaScript/TypeScript validation
+func (e *Executor) validateJS(ctx context.Context, repoDir string, result *ValidationResult) error {
+	// Check for eslint
+	cmd := exec.CommandContext(ctx, "npx", "eslint", ".", "--ext", ".js,.jsx,.ts,.tsx", "--max-warnings", "0")
+	cmd.Dir = repoDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if !strings.Contains(err.Error(), "executable file not found") {
+			result.Errors = append(result.Errors, "eslint: "+string(output))
+			result.Passed = false
+		}
+	}
+
+	// Check for prettier
+	cmd = exec.CommandContext(ctx, "npx", "prettier", "--check", ".")
+	cmd.Dir = repoDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(output), "Forgot to run Prettier") {
+			// Auto-fix
+			fixCmd := exec.CommandContext(ctx, "npx", "prettier", "--write", ".")
+			fixCmd.Dir = repoDir
+			if fixErr := fixCmd.Run(); fixErr != nil {
+				result.Errors = append(result.Errors, "prettier fix failed")
+				result.Passed = false
+			} else {
+				result.Warnings = append(result.Warnings, "prettier: auto-fixed formatting")
+			}
+		}
+	}
+
+	return nil
+}
+
+// validatePython runs Python validation
+func (e *Executor) validatePython(ctx context.Context, repoDir string, result *ValidationResult) error {
+	// Run ruff if available
+	cmd := exec.CommandContext(ctx, "ruff", "check", ".")
+	cmd.Dir = repoDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if !strings.Contains(err.Error(), "executable file not found") {
+			result.Errors = append(result.Errors, "ruff: "+string(output))
+			result.Passed = false
+		}
+	}
+
+	// Run ruff format check
+	cmd = exec.CommandContext(ctx, "ruff", "format", "--check", ".")
+	cmd.Dir = repoDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		if !strings.Contains(err.Error(), "executable file not found") {
+			// Auto-fix
+			fixCmd := exec.CommandContext(ctx, "ruff", "format", ".")
+			fixCmd.Dir = repoDir
+			if fixErr := fixCmd.Run(); fixErr != nil {
+				result.Errors = append(result.Errors, "ruff format failed")
+				result.Passed = false
+			} else {
+				result.Warnings = append(result.Warnings, "ruff: auto-fixed formatting")
+			}
+		}
+	}
+
+	return nil
+}
+
+// validateRust runs Rust validation
+func (e *Executor) validateRust(ctx context.Context, repoDir string, result *ValidationResult) error {
+	// Run cargo fmt check
+	cmd := exec.CommandContext(ctx, "cargo", "fmt", "--", "--check")
+	cmd.Dir = repoDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Auto-fix
+		fixCmd := exec.CommandContext(ctx, "cargo", "fmt")
+		fixCmd.Dir = repoDir
+		if fixErr := fixCmd.Run(); fixErr != nil {
+			result.Errors = append(result.Errors, "cargo fmt failed: "+string(output))
+			result.Passed = false
+		} else {
+			result.Warnings = append(result.Warnings, "cargo fmt: auto-fixed formatting")
+		}
+	}
+
+	// Run cargo clippy
+	cmd = exec.CommandContext(ctx, "cargo", "clippy", "--", "-D", "warnings")
+	cmd.Dir = repoDir
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		result.Errors = append(result.Errors, "cargo clippy: "+string(output))
+		result.Passed = false
+	}
+
+	return nil
+}
+
+// binaryExtensions contains file extensions that are typically binary
+var binaryExtensions = map[string]bool{
+	".exe": true, ".bin": true, ".so": true, ".dylib": true, ".dll": true,
+	".o": true, ".a": true, ".lib": true, ".obj": true,
+	".pyc": true, ".pyo": true, ".class": true,
+	".jar": true, ".war": true, ".ear": true,
+	".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".ico": true,
+	".pdf": true, ".doc": true, ".docx": true,
+	".wasm": true,
+}
+
+// isBinaryFile checks if a file is binary by reading its first bytes
+func isBinaryFile(filePath string) bool {
+	// Check extension first
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if binaryExtensions[ext] {
+		return true
+	}
+
+	// Check if file has no extension and might be a compiled binary
+	if ext == "" {
+		info, err := os.Stat(filePath)
+		if err != nil {
+			return false
+		}
+		// If file is executable and has no extension, likely a binary
+		if info.Mode()&0111 != 0 {
+			// Read first few bytes to check for ELF/Mach-O/PE headers
+			f, err := os.Open(filePath)
+			if err != nil {
+				return false
+			}
+			defer f.Close()
+
+			header := make([]byte, 4)
+			n, err := f.Read(header)
+			if err != nil || n < 4 {
+				return false
+			}
+
+			// Check for common binary headers
+			// ELF: 0x7f 'E' 'L' 'F'
+			if header[0] == 0x7f && header[1] == 'E' && header[2] == 'L' && header[3] == 'F' {
+				return true
+			}
+			// Mach-O: 0xfe 0xed 0xfa 0xce (32-bit) or 0xfe 0xed 0xfa 0xcf (64-bit)
+			if header[0] == 0xfe && header[1] == 0xed && header[2] == 0xfa {
+				return true
+			}
+			// Mach-O universal: 0xca 0xfe 0xba 0xbe
+			if header[0] == 0xca && header[1] == 0xfe && header[2] == 0xba && header[3] == 0xbe {
+				return true
+			}
+			// PE (Windows): 'M' 'Z'
+			if header[0] == 'M' && header[1] == 'Z' {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// filterBinaryFiles removes binary files from the staging area
+func (e *Executor) filterBinaryFiles(repoDir string) error {
+	// Get list of staged files
+	cmd := exec.Command("git", "diff", "--cached", "--name-only")
+	cmd.Dir = repoDir
+	output, err := cmd.Output()
+	if err != nil {
+		return nil // Not critical, continue
+	}
+
+	files := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, file := range files {
+		if file == "" {
+			continue
+		}
+		fullPath := filepath.Join(repoDir, file)
+		if isBinaryFile(fullPath) {
+			// Remove from staging
+			unstageCmd := exec.Command("git", "reset", "HEAD", "--", file)
+			unstageCmd.Dir = repoDir
+			unstageCmd.Run() // Ignore errors
+		}
+	}
+
+	return nil
+}
+
+// CommitChanges commits all changes with DCO sign-off
 func (e *Executor) CommitChanges(repoDir, message string) error {
 	// Add all changes
 	cmd := exec.Command("git", "add", "-A")
@@ -367,8 +648,14 @@ func (e *Executor) CommitChanges(repoDir, message string) error {
 		return fmt.Errorf("git add: %w", err)
 	}
 
-	// Commit
-	cmd = exec.Command("git", "commit", "-m", message)
+	// Filter out binary files before committing
+	if err := e.filterBinaryFiles(repoDir); err != nil {
+		// Log but don't fail
+		fmt.Printf("Warning: failed to filter binary files: %v\n", err)
+	}
+
+	// Commit with DCO sign-off (-s)
+	cmd = exec.Command("git", "commit", "-s", "-m", message)
 	cmd.Dir = repoDir
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git commit: %w", err)

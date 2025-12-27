@@ -21,11 +21,12 @@ import (
 type WorkerPhase string
 
 const (
-	PhaseIdle      WorkerPhase = "idle"
-	PhaseCloning   WorkerPhase = "cloning"
+	PhaseIdle       WorkerPhase = "idle"
+	PhaseCloning    WorkerPhase = "cloning"
 	PhaseEvaluating WorkerPhase = "evaluating"
-	PhaseSolving   WorkerPhase = "solving"
-	PhaseTesting   WorkerPhase = "testing"
+	PhaseSolving    WorkerPhase = "solving"
+	PhaseTesting    WorkerPhase = "testing"
+	PhaseValidating WorkerPhase = "validating"
 	PhaseCreatingPR WorkerPhase = "creating_pr"
 )
 
@@ -407,9 +408,35 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		return
 	}
 
-	// Phase 4: Run external tests (if applicable)
+	// Phase 4: Validate code (lint, format) - BEFORE testing
+	w.updateStatus(PhaseValidating, 0.65, "Validating code (lint, format)...")
+
+	validationResult, err := w.pool.executor.ValidateCode(w.pool.ctx, repoDir)
+	if err != nil {
+		result.Error = fmt.Errorf("validation error: %w", err)
+		return
+	}
+
+	// Log validation warnings
+	for _, warning := range validationResult.Warnings {
+		w.updateStatus(PhaseValidating, 0.7, fmt.Sprintf("Warning: %s", warning))
+	}
+
+	// If validation failed, abort
+	if !validationResult.Passed {
+		errorMsg := "Validation failed:\n"
+		for _, e := range validationResult.Errors {
+			errorMsg += fmt.Sprintf("  - %s\n", e)
+		}
+		result.Error = fmt.Errorf("validation failed: %s", errorMsg)
+		attempt.FailureReason = models.FailureReasonTestsFailed
+		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Code validation failed")
+		return
+	}
+
+	// Phase 5: Run external tests (if applicable) - AFTER validation
 	if complexity.CanTestLocally {
-		w.updateStatus(PhaseTesting, 0.7, "Running tests...")
+		w.updateStatus(PhaseTesting, 0.75, "Running tests...")
 
 		testPassed, testOutput, testDuration, _ := w.pool.executor.RunTests(w.pool.ctx, repoDir, complexity.TestFramework)
 
@@ -429,11 +456,11 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		}
 	}
 
-	// Phase 5: Create PR
+	// Phase 6: Create PR
 	w.updateStatus(PhaseCreatingPR, 0.9, "Creating pull request...")
 
 	// Commit changes
-	commitMsg := fmt.Sprintf("Fix: %s\n\nFixes #%d\n\n🤖 Generated with Claude Code", issue.Title, issue.IssueNumber)
+	commitMsg := fmt.Sprintf("fix: %s\n\nFixes #%d", issue.Title, issue.IssueNumber)
 	if err := w.pool.executor.CommitChanges(repoDir, commitMsg); err != nil {
 		result.Error = fmt.Errorf("commit failed: %w", err)
 		return
@@ -460,15 +487,12 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	}
 
 	// Create PR
-	prTitle := fmt.Sprintf("Fix: %s", issue.Title)
+	prTitle := fmt.Sprintf("fix: %s", issue.Title)
 	prBody := fmt.Sprintf(`## Summary
 This PR fixes #%d
 
 ## Changes
-%s
-
----
-🤖 Generated with [Claude Code](https://claude.com/claude-code)`,
+%s`,
 		issue.IssueNumber,
 		formatChangedFiles(solveResult.FilesChanged))
 
