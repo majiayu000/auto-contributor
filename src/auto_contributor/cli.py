@@ -534,16 +534,21 @@ def stats(
 @app.command()
 def loop(
     interval: int = typer.Option(
-        10,
+        30,
         "--interval",
         "-i",
-        help="Interval in minutes between each cycle",
+        help="Interval in minutes between each cycle (default 30 for smart discovery)",
     ),
     topic: str = typer.Option(
-        None,
+        "golang",
         "--topic",
         "-t",
-        help="Search trending repos by topic",
+        help="Topic to search (e.g., 'golang', 'ai', 'web')",
+    ),
+    use_claude: bool = typer.Option(
+        True,
+        "--use-claude/--no-use-claude",
+        help="Use Claude smart discovery (RECOMMENDED, default: True)",
     ),
     check_ci: bool = typer.Option(
         True,
@@ -551,7 +556,7 @@ def loop(
         help="Check CI status of existing PRs",
     ),
 ) -> None:
-    """Run contribution loop: solve issues and check PRs every N minutes."""
+    """Run contribution loop with Claude smart discovery."""
     import logging
     from datetime import datetime
     from auto_contributor.monitor import CIMonitor
@@ -563,8 +568,11 @@ def loop(
     scheduler = ContributionScheduler(settings)
     ci_monitor = CIMonitor(settings, scheduler.solver)
 
-    console.print(f"[green]Starting contribution loop (every {interval} minutes)...[/green]")
-    console.print(f"  Topic: {topic or 'default search'}")
+    discovery_mode = "Claude Smart Discovery" if use_claude else "GitHub API"
+    console.print(f"[green]Starting contribution loop with {discovery_mode}[/green]")
+    console.print(f"  Interval: {interval} minutes")
+    console.print(f"  Topic: {topic}")
+    console.print(f"  Use Claude: {use_claude}")
     console.print(f"  Check CI: {check_ci}")
     console.print(f"  Press Ctrl+C to stop\n")
 
@@ -580,13 +588,14 @@ def loop(
             cycle += 1
             now = datetime.now().strftime("%H:%M:%S")
             console.print(f"\n[cyan]{'='*50}[/cyan]")
-            console.print(f"[cyan]Cycle {cycle} started at {now}[/cyan]")
+            console.print(f"[cyan]Cycle {cycle} started at {now} (topic: {topic})[/cyan]")
             console.print(f"[cyan]{'='*50}[/cyan]")
 
             try:
-                # Step 1: Process one issue (don't close finder - we're in a loop)
-                console.print(f"\n[yellow]>>> Step 1: Solving one issue...[/yellow]")
-                await scheduler.run_once(dry_run=False, limit=1, topic=topic, close_finder=False)
+                # Step 1: Discover and process issues using Claude smart discovery
+                mode_str = "Claude smart discovery" if use_claude else "GitHub API"
+                console.print(f"\n[yellow]>>> Step 1: Finding issues with {mode_str}...[/yellow]")
+                await scheduler.run_once(dry_run=False, limit=1, topic=topic, use_claude=use_claude, close_finder=False)
 
                 # Step 2: Check CI status of open PRs
                 if check_ci:

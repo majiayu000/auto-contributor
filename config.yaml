@@ -1,0 +1,41 @@
+# Auto-contributor configuration
+github_username: majiayu000
+github_email: 1835304752@qq.com
+
+# Claude settings
+claude_timeout: 15m
+claude_max_retries: 3
+
+# Worker settings
+worker_count: 1
+worker_queue_size: 10
+issue_check_interval: 60m
+
+# Paths
+workspace_dir: ~/.auto-contributor/workspace
+database_path: ~/.auto-contributor/data.db
+
+# Filters - target Go repositories
+languages:
+  - go
+
+include_labels:
+  - good first issue
+  - help wanted
+  - bug
+
+exclude_labels:
+  - wontfix
+  - duplicate
+  - invalid
+  - in progress
+
+min_repo_stars: 10
+max_issue_age_days: 90
+
+# Web UI
+web_enabled: false
+web_port: 8080
+
+# Logging
+log_level: info

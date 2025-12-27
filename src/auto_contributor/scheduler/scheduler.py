@@ -699,58 +699,129 @@ class ContributionScheduler:
             self.finder = IssueFinder(self.settings)
 
     async def discover_issues_by_topic(self, topic: str, use_claude: bool = False) -> None:
-        """Discover issues from trending repos by topic."""
+        """Discover issues from trending repos by topic.
+
+        Args:
+            topic: Topic to search (e.g., "golang", "ai", "web")
+            use_claude: If True, use Claude smart discovery (RECOMMENDED).
+                       If False, use dumb GitHub API search.
+        """
         logger.info("starting_topic_discovery", topic=topic, use_claude=use_claude)
 
         try:
             if use_claude:
-                # Use Claude Code to discover repos
-                repos = await self.solver.discover_repos(topic)
+                # Use Claude-powered SMART discovery (the good way!)
+                logger.info("using_claude_smart_discovery", topic=topic)
+                discovered_issues = await self.solver.smart_discover_issues(
+                    topic=topic,
+                    languages=self.settings.filter_languages,
+                    min_stars=50,
+                    limit=5,
+                    depth="deep",
+                )
+
+                logger.info("smart_discovery_found", count=len(discovered_issues))
+
+                if not discovered_issues:
+                    logger.warning("no_issues_from_smart_discovery", topic=topic)
+                    return
+
+                # Save high-scoring issues to database
+                async with self._session_factory() as session:
+                    saved_count = 0
+                    for disc_issue in discovered_issues:
+                        # Only save issues with score >= 0.6
+                        score = disc_issue.get("suitability_score", 0)
+                        if score < 0.6:
+                            logger.info(
+                                "skipping_low_score_issue",
+                                repo=disc_issue.get("repo"),
+                                issue=disc_issue.get("issue_number"),
+                                score=score,
+                            )
+                            continue
+
+                        # Check if issue already exists
+                        existing = await session.execute(
+                            select(Issue).where(
+                                Issue.repo == disc_issue.get("repo"),
+                                Issue.issue_number == disc_issue.get("issue_number"),
+                            )
+                        )
+                        if existing.scalar_one_or_none():
+                            continue
+
+                        # Save to database
+                        analysis = disc_issue.get("analysis", {})
+                        issue = Issue(
+                            repo=disc_issue.get("repo"),
+                            issue_number=disc_issue.get("issue_number"),
+                            title=disc_issue.get("title", ""),
+                            body=analysis.get("recommendation", ""),
+                            labels=analysis.get("fix_type", ""),
+                            language=self.settings.filter_languages[0] if self.settings.filter_languages else "go",
+                            difficulty_score=1.0 - score,  # Invert score for difficulty
+                            status=IssueStatus.DISCOVERED.value,
+                        )
+                        session.add(issue)
+                        saved_count += 1
+                        logger.info(
+                            "saved_smart_discovered_issue",
+                            repo=disc_issue.get("repo"),
+                            issue=disc_issue.get("issue_number"),
+                            score=score,
+                            fix_type=analysis.get("fix_type"),
+                        )
+
+                    await session.commit()
+
+                logger.info("smart_discovery_complete", saved=saved_count, total=len(discovered_issues))
+
             else:
-                # Use GitHub API
+                # Old dumb way - use GitHub API (NOT RECOMMENDED)
                 repos = await self.finder.search_trending_repos(topic=topic, min_stars=1000, limit=30)
 
-            logger.info("found_repos", count=len(repos))
+                logger.info("found_repos", count=len(repos))
 
-            if not repos:
-                logger.warning("no_repos_found", topic=topic)
-                return
+                if not repos:
+                    logger.warning("no_repos_found", topic=topic)
+                    return
 
-            # Find issues in these repos
-            candidates = await self.finder.find_issues_in_repos(repos=repos, limit=50)
-            logger.info("issues_found", count=len(candidates))
+                # Find issues in these repos
+                candidates = await self.finder.find_issues_in_repos(repos=repos, limit=50)
+                logger.info("issues_found", count=len(candidates))
 
-            async with self._session_factory() as session:
-                for candidate in candidates:
-                    # Check if issue already exists
-                    existing = await session.execute(
-                        select(Issue).where(
-                            Issue.repo == candidate.repo,
-                            Issue.issue_number == candidate.issue_number,
+                async with self._session_factory() as session:
+                    for candidate in candidates:
+                        # Check if issue already exists
+                        existing = await session.execute(
+                            select(Issue).where(
+                                Issue.repo == candidate.repo,
+                                Issue.issue_number == candidate.issue_number,
+                            )
                         )
-                    )
-                    if existing.scalar_one_or_none():
-                        continue
+                        if existing.scalar_one_or_none():
+                            continue
 
-                    # Enrich with repo info
-                    candidate = await self.finder.enrich_with_repo_info(candidate)
+                        # Enrich with repo info
+                        candidate = await self.finder.enrich_with_repo_info(candidate)
 
-                    # Save to database
-                    issue = Issue(
-                        repo=candidate.repo,
-                        issue_number=candidate.issue_number,
-                        title=candidate.title,
-                        body=candidate.body,
-                        labels=",".join(candidate.labels),
-                        language=candidate.language,
-                        difficulty_score=candidate.difficulty_score,
-                        status=IssueStatus.DISCOVERED.value,
-                    )
-                    session.add(issue)
+                        # Save to database
+                        issue = Issue(
+                            repo=candidate.repo,
+                            issue_number=candidate.issue_number,
+                            title=candidate.title,
+                            body=candidate.body,
+                            labels=",".join(candidate.labels),
+                            language=candidate.language,
+                            difficulty_score=candidate.difficulty_score,
+                            status=IssueStatus.DISCOVERED.value,
+                        )
+                        session.add(issue)
 
-                await session.commit()
+                    await session.commit()
 
-            logger.info("topic_discovery_complete", new_issues=len(candidates))
+                logger.info("topic_discovery_complete", new_issues=len(candidates))
 
         except Exception as e:
             logger.error("topic_discovery_failed", error=str(e))

@@ -762,3 +762,172 @@ Focus only on fixing the CI failure. Do not make unrelated changes.
                 message=str(e),
                 error="CI_FIX_FAILED",
             )
+
+    async def smart_discover_issues(
+        self,
+        topic: str = "golang",
+        languages: list[str] | None = None,
+        min_stars: int = 50,
+        limit: int = 5,
+        depth: str = "deep",
+        timeout: int | None = None,
+    ) -> list[dict]:
+        """
+        Use Claude to intelligently discover and analyze GitHub issues.
+
+        This uses Claude Code to:
+        1. Search GitHub for issues matching criteria
+        2. Check if issues already have linked PRs
+        3. Analyze each issue for suitability
+        4. Score and rank issues
+
+        Args:
+            topic: Topic to search (e.g., "golang", "ai", "web")
+            languages: Languages to filter (e.g., ["go", "python"])
+            min_stars: Minimum repo stars
+            limit: Max issues to return
+            depth: Analysis depth ("quick", "deep", "ultrathink")
+            timeout: Optional timeout (default 10 min, 20 min for ultrathink)
+
+        Returns:
+            List of discovered issues with analysis
+        """
+        if timeout is None:
+            timeout = 20 * 60 if depth == "ultrathink" else 10 * 60
+
+        languages = languages or self.settings.filter_languages
+        languages_str = ", ".join(languages)
+
+        depth_instructions = {
+            "quick": "Do a quick assessment based on title and labels only.",
+            "deep": "Read the full issue body and analyze thoroughly.",
+            "ultrathink": """Use extended thinking to deeply analyze each issue:
+- Read the full issue body and all comments
+- Check if there's already a PR addressing this issue
+- Look at the repo's CONTRIBUTING.md and code structure
+- Evaluate if this can realistically be solved automatically
+- Consider edge cases and potential complications""",
+        }
+
+        prompt = f"""You are an expert at finding GitHub issues suitable for automated solving.
+
+## Task
+Find and analyze GitHub issues that can be automatically fixed using Claude Code.
+
+## Search Criteria
+- Topic/Focus: {topic}
+- Languages: {languages_str}
+- Minimum Stars: {min_stars}
+- Labels to look for: good first issue, help wanted, bug
+- Maximum issue age: 30 days
+- Number of issues to return: {limit}
+
+## Analysis Depth
+{depth_instructions.get(depth, depth_instructions["deep"])}
+
+## Instructions
+
+1. **Search Phase**: Use GitHub to search for issues matching the criteria:
+   - Search with: gh search issues "label:\\"good first issue\\" language:go" --limit 50
+   - Or browse trending repos in the topic area
+
+2. **Filter Phase**: For each candidate issue, check:
+   - Does it already have a linked PR? (skip if yes)
+   - Is the repo actively maintained? (recent commits)
+   - Is the issue clear and well-defined?
+
+3. **Analysis Phase**: For promising issues, analyze deeply:
+   - Read the full issue description
+   - Check for reproduction steps or code examples
+   - Evaluate complexity (lines of code, files affected)
+   - Identify potential blockers (needs domain knowledge, external services, etc.)
+   - Assess likelihood of successful automated fix
+
+4. **Scoring**: Rate each issue 0.0-1.0 based on:
+   - 0.9-1.0: Perfect for automation (clear bug, single file, has test)
+   - 0.7-0.9: Good candidate (well-defined, low complexity)
+   - 0.5-0.7: Possible but challenging (medium complexity)
+   - 0.3-0.5: Difficult (high complexity or unclear)
+   - 0.0-0.3: Not suitable (requires human judgment)
+
+## Output Format
+
+Return ONLY valid JSON in this exact format (no markdown, no explanation):
+
+{{
+  "issues": [
+    {{
+      "repo": "owner/repo",
+      "issue_number": 123,
+      "title": "Issue title here",
+      "url": "https://github.com/owner/repo/issues/123",
+      "suitability_score": 0.85,
+      "analysis": {{
+        "is_well_defined": true,
+        "has_reproduction_steps": true,
+        "is_self_contained": true,
+        "fix_type": "bug",
+        "complexity": "low",
+        "estimated_files": 1,
+        "blockers": [],
+        "recommendation": "Clear bug with stack trace, single file fix likely"
+      }},
+      "repo_context": {{
+        "stars": 1234,
+        "has_contributing": true,
+        "has_claude_md": false,
+        "test_framework": "go test",
+        "ci_system": "GitHub Actions"
+      }}
+    }}
+  ],
+  "metadata": {{
+    "total_candidates": 50,
+    "analyzed": 15,
+    "selected": {limit}
+  }}
+}}
+
+Begin discovery now. Search GitHub, analyze issues, and return the JSON result.
+"""
+
+        logger.info(
+            "smart_discovery_starting",
+            topic=topic,
+            languages=languages,
+            min_stars=min_stars,
+            limit=limit,
+            depth=depth,
+        )
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                result = await self._run_claude_raw(prompt, Path(tmpdir), timeout)
+
+                # Parse JSON from output
+                import re
+                # Find the JSON object
+                start = result.find("{")
+                end = result.rfind("}") + 1
+                if start >= 0 and end > start:
+                    json_str = result[start:end]
+                    data = json.loads(json_str)
+                    issues = data.get("issues", [])
+                    metadata = data.get("metadata", {})
+
+                    logger.info(
+                        "smart_discovery_complete",
+                        issues_found=len(issues),
+                        total_candidates=metadata.get("total_candidates"),
+                        analyzed=metadata.get("analyzed"),
+                    )
+
+                    return issues
+                else:
+                    logger.warning("no_json_in_discovery_output", output=result[:500])
+                    return []
+
+            except Exception as e:
+                logger.error("smart_discovery_failed", error=str(e))
+                return []
