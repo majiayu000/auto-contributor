@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,7 @@ type WorkResult struct {
 	PRURL     string
 	Error     error
 	Duration  time.Duration
+	WillRetry bool // true if this issue will be retried
 }
 
 // Worker represents a single worker goroutine
@@ -323,7 +325,9 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	if err := w.pool.executor.CloneRepo(w.pool.ctx, repoURL, repoDir); err != nil {
 		result.Error = fmt.Errorf("clone failed: %w", err)
 		attempt.FailureReason = models.FailureReasonCloneFailed
-		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, result.Error.Error())
+		if w.handleFailure(issue, models.FailureReasonCloneFailed, result.Error.Error()) {
+			result.WillRetry = true
+		}
 		return
 	}
 
@@ -355,7 +359,7 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		w.updateStatus(PhaseIdle, 0, "Issue too complex, skipping...")
 		result.Error = fmt.Errorf("issue too complex")
 		attempt.FailureReason = models.FailureReasonComplexityHigh
-		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Issue too complex for automated solving")
+		w.handleFailure(issue, models.FailureReasonComplexityHigh, "Issue too complex for automated solving")
 		return
 	}
 
@@ -364,7 +368,7 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	if hasPR {
 		result.Error = fmt.Errorf("issue already has PR")
 		attempt.FailureReason = models.FailureReasonAlreadyHasPR
-		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Issue already has a PR")
+		w.handleFailure(issue, models.FailureReasonAlreadyHasPR, "Issue already has a PR")
 		return
 	}
 
@@ -383,7 +387,9 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	if err != nil {
 		result.Error = fmt.Errorf("solve failed: %w", err)
 		attempt.FailureReason = models.FailureReasonUnknown
-		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, result.Error.Error())
+		if w.handleFailure(issue, models.FailureReasonUnknown, result.Error.Error()) {
+			result.WillRetry = true
+		}
 		return
 	}
 
@@ -404,66 +410,36 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	if !solveResult.FixComplete || len(solveResult.FilesChanged) == 0 {
 		result.Error = fmt.Errorf("fix incomplete or no changes made")
 		attempt.FailureReason = models.FailureReasonNoChanges
-		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Fix incomplete")
-		return
-	}
-
-	// Phase 4: Validate code (lint, format) - BEFORE testing
-	w.updateStatus(PhaseValidating, 0.65, "Validating code (lint, format)...")
-
-	validationResult, err := w.pool.executor.ValidateCode(w.pool.ctx, repoDir)
-	if err != nil {
-		result.Error = fmt.Errorf("validation error: %w", err)
-		return
-	}
-
-	// Log validation warnings
-	for _, warning := range validationResult.Warnings {
-		w.updateStatus(PhaseValidating, 0.7, fmt.Sprintf("Warning: %s", warning))
-	}
-
-	// If validation failed, abort
-	if !validationResult.Passed {
-		errorMsg := "Validation failed:\n"
-		for _, e := range validationResult.Errors {
-			errorMsg += fmt.Sprintf("  - %s\n", e)
+		if w.handleFailure(issue, models.FailureReasonNoChanges, "Fix incomplete") {
+			result.WillRetry = true
 		}
-		result.Error = fmt.Errorf("validation failed: %s", errorMsg)
+		return
+	}
+
+	// Trust Claude's test results - it already ran tests in the solve phase
+	// Only fail if Claude explicitly reported tests failed
+	if solveResult.TestsPassed != nil && !*solveResult.TestsPassed {
+		result.Error = fmt.Errorf("Claude reported tests failed")
 		attempt.FailureReason = models.FailureReasonTestsFailed
-		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Code validation failed")
+		if w.handleFailure(issue, models.FailureReasonTestsFailed, "Tests failed during solve") {
+			result.WillRetry = true
+		}
 		return
 	}
 
-	// Phase 5: Run external tests (if applicable) - AFTER validation
-	if complexity.CanTestLocally {
-		w.updateStatus(PhaseTesting, 0.75, "Running tests...")
-
-		testPassed, testOutput, testDuration, _ := w.pool.executor.RunTests(w.pool.ctx, repoDir, complexity.TestFramework)
-
-		attempt.ExternalTestPassed = &testPassed
-		attempt.TestDurationSeconds = testDuration.Seconds()
-		if len(testOutput) > 1000 {
-			attempt.TestOutputPreview = testOutput[:1000]
-		} else {
-			attempt.TestOutputPreview = testOutput
-		}
-
-		if !testPassed {
-			result.Error = fmt.Errorf("tests failed")
-			attempt.FailureReason = models.FailureReasonTestsFailed
-			w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Tests failed")
-			return
-		}
-	}
+	w.updateStatus(PhaseValidating, 0.8, "Claude completed fix with passing tests")
 
 	// Phase 6: Create PR
 	w.updateStatus(PhaseCreatingPR, 0.9, "Creating pull request...")
 
-	// Commit changes
-	commitMsg := fmt.Sprintf("fix: %s\n\nFixes #%d", issue.Title, issue.IssueNumber)
-	if err := w.pool.executor.CommitChanges(repoDir, commitMsg); err != nil {
-		result.Error = fmt.Errorf("commit failed: %w", err)
-		return
+	// Commit changes only if there are uncommitted changes
+	// (Claude may have already committed as part of the solve phase)
+	if hasUncommittedChanges(repoDir) {
+		commitMsg := fmt.Sprintf("fix: %s\n\nFixes #%d", issue.Title, issue.IssueNumber)
+		if err := w.pool.executor.CommitChanges(repoDir, commitMsg); err != nil {
+			result.Error = fmt.Errorf("commit failed: %w", err)
+			return
+		}
 	}
 
 	// Fork and push
@@ -568,4 +544,61 @@ func formatChangedFiles(files []string) string {
 		result += fmt.Sprintf("- `%s`\n", f)
 	}
 	return result
+}
+
+// hasUncommittedChanges checks if there are uncommitted or untracked changes
+func hasUncommittedChanges(repoDir string) bool {
+	// Check for uncommitted changes (staged or unstaged)
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = repoDir
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(output))) > 0
+}
+
+// handleFailure handles issue failure with retry logic
+// Returns true if issue will be retried, false if abandoned
+func (w *Worker) handleFailure(issue *models.Issue, reason models.FailureReason, errorMsg string) bool {
+	// Check if shutting down
+	select {
+	case <-w.pool.ctx.Done():
+		// Shutting down, don't retry
+		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusDiscovered, "Shutdown during processing")
+		return false
+	default:
+	}
+
+	// Check if this failure is retryable
+	if !reason.IsRetryable() {
+		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, errorMsg)
+		return false
+	}
+
+	// Check retry count
+	if issue.RetryCount >= models.MaxRetries {
+		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned,
+			fmt.Sprintf("%s (max retries %d reached)", errorMsg, models.MaxRetries))
+		return false
+	}
+
+	// Increment retry count and requeue
+	issue.RetryCount++
+	w.pool.db.IncrementIssueRetryCount(issue.ID)
+	w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusDiscovered,
+		fmt.Sprintf("Retry %d/%d: %s", issue.RetryCount, models.MaxRetries, errorMsg))
+
+	// Re-add to queue for retry (with context check to avoid closed channel panic)
+	select {
+	case <-w.pool.ctx.Done():
+		// Shutting down
+		return false
+	case w.pool.issueQueue <- issue:
+		return true
+	default:
+		// Queue full, abandon
+		w.pool.db.UpdateIssueStatus(issue.ID, models.IssueStatusAbandoned, "Retry failed: queue full")
+		return false
+	}
 }

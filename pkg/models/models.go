@@ -51,8 +51,24 @@ type Issue struct {
 	DifficultyScore float64     `db:"difficulty_score"`
 	Status          IssueStatus `db:"status"`
 	ErrorMessage    string      `db:"error_message"`
+	RetryCount      int         `db:"retry_count"`
 	DiscoveredAt    time.Time   `db:"discovered_at"`
 	UpdatedAt       time.Time   `db:"updated_at"`
+}
+
+// MaxRetries is the maximum number of retry attempts for retryable failures
+const MaxRetries = 2
+
+// IsRetryable returns true if this failure reason can be retried
+func (r FailureReason) IsRetryable() bool {
+	switch r {
+	case FailureReasonTestsFailed, FailureReasonTimeout, FailureReasonCloneFailed, FailureReasonNoChanges:
+		return true
+	case FailureReasonAlreadyHasPR, FailureReasonComplexityHigh:
+		return false
+	default:
+		return false
+	}
 }
 
 // PullRequest represents a created pull request

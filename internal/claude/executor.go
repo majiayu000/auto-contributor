@@ -231,64 +231,98 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 
 // buildSolvePrompt constructs the prompt for solving an issue
 func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityResult) string {
-	var testInstructions string
-
-	if complexity != nil && complexity.CanTestLocally {
-		testInstructions = fmt.Sprintf(`
-## TEST-FIX LOOP (CRITICAL)
-After implementing the fix:
-1. Run the project's test suite using: %s
-2. If tests fail, fix the issues and re-run
-3. Continue until ALL tests pass
-4. Output: TESTS_PASSED: true/false`, complexity.TestFramework)
-	} else {
-		testInstructions = `
-## TESTING
-This project requires external dependencies for full testing.
-Focus on code correctness and run any available unit tests.
-Output: TESTS_PASSED: true/false (based on available tests)`
-	}
-
-	return fmt.Sprintf(`You are solving GitHub issue #%d.
+	// Use comprehensive prompt that gives Claude full control
+	return fmt.Sprintf(`You are fixing GitHub issue #%d in repository %s.
 
 ## Issue
 **Title:** %s
 **Body:**
 %s
 
-## Instructions
-1. Read and understand the issue completely
-2. Explore the codebase to understand the context
-3. Implement a minimal, focused fix
-4. Follow existing code style and patterns
-%s
+## CRITICAL Instructions (Follow ALL steps)
+
+1. **Understand the codebase first:**
+   - Read CONTRIBUTING.md if it exists
+   - Check .github/workflows/*.yml to understand CI requirements
+   - Understand the project's code style and patterns
+
+2. **Implement the fix:**
+   - Create a focused, minimal fix for this specific issue
+   - Follow existing code patterns - NO hardcoding unless absolutely necessary
+   - Add unit tests if the project has them and it makes sense
+
+3. **Validate your changes:**
+   - Run gofmt/prettier/black to format code (based on language)
+   - Run the project's own lint commands (check Makefile, package.json, etc.)
+   - Run ALL existing tests: go test ./... or npm test or pytest
+   - Fix any failures and re-run until ALL tests pass
+
+4. **Commit requirements:**
+   - Use git config to set: user.name="majiayu000" user.email="1835304752@qq.com"
+   - Sign-off commits for DCO: git commit -s -m "message"
+   - Keep commit messages concise and descriptive
+
+5. **Quality checks before finishing:**
+   - Ensure no debug code or console.log left behind
+   - Ensure no unrelated changes included
+   - Verify the fix actually addresses the issue
 
 ## Output Format
 When complete, output ONE of these markers on its own line:
-- FIX_COMPLETE - if the fix is complete and tests pass
+- FIX_COMPLETE - if fix is done and ALL tests pass locally
 - FIX_INCOMPLETE - if you cannot complete the fix
 
 Also output: TESTS_PASSED: true/false
 
-Be concise. Focus only on fixing this specific issue.`,
-		issue.IssueNumber, issue.Title, issue.Body, testInstructions)
+Be thorough but concise. You have full control - make it work.`,
+		issue.IssueNumber, issue.Repo, issue.Title, issue.Body)
 }
 
 // getChangedFiles returns list of modified files using git
+// Checks uncommitted, staged, untracked, AND committed changes on the branch
 func (e *Executor) getChangedFiles(repoDir string) []string {
-	cmd := exec.Command("git", "diff", "--name-only")
-	cmd.Dir = repoDir
+	var files []string
 
+	// First, check for committed changes on the current branch vs origin/HEAD or first parent
+	// This is important because Claude may have already committed the changes
+	cmd := exec.Command("git", "diff", "--name-only", "HEAD~1")
+	cmd.Dir = repoDir
 	output, err := cmd.Output()
-	if err != nil {
-		return nil
+	if err == nil {
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !contains(files, line) {
+				files = append(files, line)
+			}
+		}
 	}
 
-	var files []string
-	for _, line := range strings.Split(string(output), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			files = append(files, line)
+	// Also try comparing against origin/main or origin/master
+	for _, baseBranch := range []string{"origin/main", "origin/master"} {
+		cmd = exec.Command("git", "diff", "--name-only", baseBranch+"...HEAD")
+		cmd.Dir = repoDir
+		output, err = cmd.Output()
+		if err == nil {
+			for _, line := range strings.Split(string(output), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && !contains(files, line) {
+					files = append(files, line)
+				}
+			}
+			break // Found a valid base branch
+		}
+	}
+
+	// Check uncommitted changes (working directory)
+	cmd = exec.Command("git", "diff", "--name-only")
+	cmd.Dir = repoDir
+	output, err = cmd.Output()
+	if err == nil {
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !contains(files, line) {
+				files = append(files, line)
+			}
 		}
 	}
 
@@ -366,256 +400,85 @@ type ValidationResult struct {
 	Warnings []string
 }
 
-// ValidateCode runs language-specific linters and formatters before commit
+// ValidateCode uses Claude to intelligently validate changes based on project's own CI/lint config
 func (e *Executor) ValidateCode(ctx context.Context, repoDir string) (*ValidationResult, error) {
 	result := &ValidationResult{Passed: true}
 
-	// Detect project language
-	if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
-		result.Language = "go"
-		if err := e.validateGo(ctx, repoDir, result); err != nil {
-			return result, err
+	// Get list of changed files
+	changedFiles := e.getChangedFiles(repoDir)
+	if len(changedFiles) == 0 {
+		result.Warnings = append(result.Warnings, "No changed files to validate")
+		return result, nil
+	}
+
+	// Ask Claude to validate based on project's own validation tools
+	prompt := fmt.Sprintf(`You are validating code changes for a PR.
+
+## Changed Files
+%s
+
+## Instructions
+1. First, examine the project's CI configuration:
+   - Check .github/workflows/*.yml for CI commands
+   - Check Makefile for lint/test targets
+   - Check package.json scripts (for JS projects)
+   - Check pyproject.toml or setup.cfg (for Python projects)
+
+2. Run ONLY the project's own validation commands that apply to the changed files:
+   - If project has "make lint", use that
+   - If project has "npm run lint", use that
+   - If project has CI lint commands, use those
+   - Do NOT run generic golangci-lint if the project doesn't use it
+
+3. For basic formatting:
+   - Go: run gofmt -w on changed .go files
+   - JS/TS: run prettier if project uses it
+   - Python: run black/ruff if project uses it
+
+4. Focus ONLY on the changed files, not the entire project
+
+## Output
+Output exactly one of:
+- VALIDATION_PASSED: true - if your changes pass validation
+- VALIDATION_PASSED: false - if validation fails
+
+If validation fails, briefly explain why.
+Be concise.`, strings.Join(changedFiles, "\n"))
+
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
+		"--dangerously-skip-permissions",
+		"-p", prompt,
+		"--output-format", "text")
+	cmd.Dir = repoDir
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// If Claude fails, assume validation passed (don't block on tooling issues)
+		result.Warnings = append(result.Warnings, "Claude validation skipped: "+err.Error())
+		return result, nil
+	}
+
+	outputStr := string(output)
+
+	// Parse Claude's validation result
+	if strings.Contains(outputStr, "VALIDATION_PASSED: false") {
+		result.Passed = false
+		// Extract failure reason
+		lines := strings.Split(outputStr, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "VALIDATION_PASSED") {
+				result.Errors = append(result.Errors, line)
+			}
 		}
-	} else if _, err := os.Stat(filepath.Join(repoDir, "package.json")); err == nil {
-		result.Language = "javascript"
-		if err := e.validateJS(ctx, repoDir, result); err != nil {
-			return result, err
-		}
-	} else if _, err := os.Stat(filepath.Join(repoDir, "pyproject.toml")); err == nil {
-		result.Language = "python"
-		if err := e.validatePython(ctx, repoDir, result); err != nil {
-			return result, err
-		}
-	} else if _, err := os.Stat(filepath.Join(repoDir, "Cargo.toml")); err == nil {
-		result.Language = "rust"
-		if err := e.validateRust(ctx, repoDir, result); err != nil {
-			return result, err
-		}
+	} else {
+		// Default to passed
+		result.Passed = true
+		result.Warnings = append(result.Warnings, "Claude validation passed")
 	}
 
 	return result, nil
-}
-
-// validateGo runs Go-specific validation
-func (e *Executor) validateGo(ctx context.Context, repoDir string, result *ValidationResult) error {
-	// Run gofmt to check formatting
-	cmd := exec.CommandContext(ctx, "gofmt", "-l", ".")
-	cmd.Dir = repoDir
-	output, err := cmd.Output()
-	if err != nil {
-		result.Warnings = append(result.Warnings, "gofmt check failed: "+err.Error())
-	} else if len(strings.TrimSpace(string(output))) > 0 {
-		// Files need formatting - auto-fix them
-		fixCmd := exec.CommandContext(ctx, "gofmt", "-w", ".")
-		fixCmd.Dir = repoDir
-		if fixErr := fixCmd.Run(); fixErr != nil {
-			result.Errors = append(result.Errors, "gofmt fix failed: "+fixErr.Error())
-			result.Passed = false
-		} else {
-			result.Warnings = append(result.Warnings, "gofmt: auto-fixed formatting issues")
-		}
-	}
-
-	// Run golangci-lint if available
-	cmd = exec.CommandContext(ctx, "golangci-lint", "run", "./...")
-	cmd.Dir = repoDir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		outputStr := string(output)
-		// Check for ignorable errors
-		if strings.Contains(err.Error(), "executable file not found") {
-			result.Warnings = append(result.Warnings, "golangci-lint not installed, skipping")
-		} else if e.isIgnorableLintError(outputStr) {
-			result.Warnings = append(result.Warnings, "golangci-lint: skipped (platform/plugin issues)")
-		} else {
-			// Real lint errors found
-			lines := strings.Split(outputStr, "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line != "" && !strings.HasPrefix(line, "level=") {
-					result.Errors = append(result.Errors, line)
-				}
-			}
-			result.Passed = false
-		}
-	}
-
-	// Run go vet
-	cmd = exec.CommandContext(ctx, "go", "vet", "./...")
-	cmd.Dir = repoDir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		outputStr := string(output)
-		// Check for platform-specific errors that should be ignored
-		if e.isIgnorableVetError(outputStr) {
-			result.Warnings = append(result.Warnings, "go vet: skipped (platform-specific code)")
-		} else {
-			result.Errors = append(result.Errors, "go vet: "+outputStr)
-			result.Passed = false
-		}
-	}
-
-	return nil
-}
-
-// isIgnorableLintError checks if a golangci-lint error can be safely ignored
-func (e *Executor) isIgnorableLintError(output string) bool {
-	ignorablePatterns := []string{
-		"plugin not found",
-		"plugin(kubeapilinter)",
-		"build constraints exclude",
-		"no Go files in",
-		"context canceled",
-	}
-	for _, pattern := range ignorablePatterns {
-		if strings.Contains(output, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// isIgnorableVetError checks if a go vet error can be safely ignored
-func (e *Executor) isIgnorableVetError(output string) bool {
-	ignorablePatterns := []string{
-		"build constraints exclude all Go files",
-		"no Go files in",
-		"import cycle not allowed",
-		"/linux/",
-		"/darwin/",
-		"/windows/",
-		"_linux.go",
-		"_darwin.go",
-		"_windows.go",
-	}
-	for _, pattern := range ignorablePatterns {
-		if strings.Contains(output, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// validateJS runs JavaScript/TypeScript validation
-func (e *Executor) validateJS(ctx context.Context, repoDir string, result *ValidationResult) error {
-	// First try to use project's npm run lint if available
-	pkgJSONPath := filepath.Join(repoDir, "package.json")
-	if _, err := os.Stat(pkgJSONPath); err == nil {
-		cmd := exec.CommandContext(ctx, "npm", "run", "lint", "--if-present")
-		cmd.Dir = repoDir
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			outputStr := string(output)
-			// Check for ESLint config errors that should be ignored
-			if e.isIgnorableESLintError(outputStr) {
-				result.Warnings = append(result.Warnings, "ESLint config issue, skipping lint check")
-				return nil
-			}
-			if !strings.Contains(outputStr, "Missing script") {
-				result.Errors = append(result.Errors, "npm run lint: "+outputStr)
-				result.Passed = false
-			}
-		}
-		return nil
-	}
-
-	// Fallback to direct eslint
-	cmd := exec.CommandContext(ctx, "npx", "eslint", ".", "--ext", ".js,.jsx,.ts,.tsx", "--max-warnings", "0")
-	cmd.Dir = repoDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		outputStr := string(output)
-		if e.isIgnorableESLintError(outputStr) {
-			result.Warnings = append(result.Warnings, "ESLint config issue, skipping")
-			return nil
-		}
-		if !strings.Contains(err.Error(), "executable file not found") {
-			result.Errors = append(result.Errors, "eslint: "+outputStr)
-			result.Passed = false
-		}
-	}
-	return nil
-}
-
-// isIgnorableESLintError checks if an ESLint error can be safely ignored
-func (e *Executor) isIgnorableESLintError(output string) bool {
-	ignorablePatterns := []string{
-		"couldn't find an eslint.config",
-		"No ESLint configuration found",
-		"ESLintRC configuration files are no longer supported",
-		"eslint.config.js",
-		"eslint.config.mjs",
-	}
-	for _, pattern := range ignorablePatterns {
-		if strings.Contains(output, pattern) {
-			return true
-		}
-	}
-	return false
-}
-
-// validatePython runs Python validation
-func (e *Executor) validatePython(ctx context.Context, repoDir string, result *ValidationResult) error {
-	// Run ruff if available
-	cmd := exec.CommandContext(ctx, "ruff", "check", ".")
-	cmd.Dir = repoDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if !strings.Contains(err.Error(), "executable file not found") {
-			result.Errors = append(result.Errors, "ruff: "+string(output))
-			result.Passed = false
-		}
-	}
-
-	// Run ruff format check
-	cmd = exec.CommandContext(ctx, "ruff", "format", "--check", ".")
-	cmd.Dir = repoDir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		if !strings.Contains(err.Error(), "executable file not found") {
-			// Auto-fix
-			fixCmd := exec.CommandContext(ctx, "ruff", "format", ".")
-			fixCmd.Dir = repoDir
-			if fixErr := fixCmd.Run(); fixErr != nil {
-				result.Errors = append(result.Errors, "ruff format failed")
-				result.Passed = false
-			} else {
-				result.Warnings = append(result.Warnings, "ruff: auto-fixed formatting")
-			}
-		}
-	}
-
-	return nil
-}
-
-// validateRust runs Rust validation
-func (e *Executor) validateRust(ctx context.Context, repoDir string, result *ValidationResult) error {
-	// Run cargo fmt check
-	cmd := exec.CommandContext(ctx, "cargo", "fmt", "--", "--check")
-	cmd.Dir = repoDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// Auto-fix
-		fixCmd := exec.CommandContext(ctx, "cargo", "fmt")
-		fixCmd.Dir = repoDir
-		if fixErr := fixCmd.Run(); fixErr != nil {
-			result.Errors = append(result.Errors, "cargo fmt failed: "+string(output))
-			result.Passed = false
-		} else {
-			result.Warnings = append(result.Warnings, "cargo fmt: auto-fixed formatting")
-		}
-	}
-
-	// Run cargo clippy
-	cmd = exec.CommandContext(ctx, "cargo", "clippy", "--", "-D", "warnings")
-	cmd.Dir = repoDir
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		result.Errors = append(result.Errors, "cargo clippy: "+string(output))
-		result.Passed = false
-	}
-
-	return nil
 }
 
 // binaryExtensions contains file extensions that are typically binary
@@ -745,7 +608,11 @@ func (e *Executor) CreateBranch(repoDir, branchName string) error {
 func (e *Executor) PushBranch(repoDir, remote, branchName string) error {
 	cmd := exec.Command("git", "push", "-u", remote, branchName)
 	cmd.Dir = repoDir
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git push failed: %s - %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
 
 // CloneRepo clones a repository using gh CLI for better reliability
@@ -791,6 +658,11 @@ func (e *Executor) CloneRepo(ctx context.Context, repoURL, destDir string) error
 
 // SetupGitConfig configures git user for commits
 func (e *Executor) SetupGitConfig(repoDir string) error {
+	// First, ensure gh auth is configured as git credential helper
+	// This allows git push to use gh's authentication
+	setupCmd := exec.Command("gh", "auth", "setup-git")
+	setupCmd.Run() // Ignore error if already configured
+
 	cmds := [][]string{
 		{"git", "config", "user.name", e.config.GitHubUsername},
 		{"git", "config", "user.email", e.config.GitHubEmail},

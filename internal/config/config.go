@@ -54,7 +54,7 @@ func Default() *Config {
 		GitHubEmail:       "1835304752@qq.com",
 		ClaudeTimeout:     15 * time.Minute,
 		ClaudeMaxRetries:  3,
-		WorkerCount:       10,
+		WorkerCount:       2,
 		WorkerQueueSize:   100,
 		IssueCheckInterval: 10 * time.Minute,
 		WorkspaceDir:      filepath.Join(dataDir, "workspace"),

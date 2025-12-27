@@ -17,14 +17,18 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/web"
 	"github.com/majiayu000/auto-contributor/internal/worker"
+	"github.com/majiayu000/auto-contributor/pkg/logger"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
+var log = logger.NewComponent("main")
+
 var (
-	cfg      *config.Config
-	database *db.DB
-	ghClient *github.Client
-	pool     *worker.Pool
+	cfg       *config.Config
+	database  *db.DB
+	ghClient  *github.Client
+	pool      *worker.Pool
+	webServer *web.Server
 )
 
 func main() {
@@ -87,7 +91,7 @@ uses Claude Code to create fixes, and submits pull requests.`,
 		Short: "Run continuously with Claude smart discovery",
 		RunE:  runLoop,
 	}
-	loopCmd.Flags().IntP("interval", "n", 30, "Minutes between runs (default 30 for smart discovery)")
+	loopCmd.Flags().IntP("interval", "n", 60, "Minutes between discovery cycles (default 60 for ~1 issue/hour)")
 	loopCmd.Flags().StringP("topic", "t", "golang", "Topic to search (e.g., 'golang', 'ai', 'web')")
 	loopCmd.Flags().StringP("depth", "d", "deep", "Analysis depth: quick, deep, ultrathink")
 
@@ -353,7 +357,7 @@ func runLoop(cmd *cobra.Command, args []string) error {
 
 	// Start web server if enabled
 	if cfg.WebEnabled {
-		webServer := web.New(cfg, database, pool)
+		webServer = web.New(cfg, database, pool)
 		go webServer.Start()
 		fmt.Printf("Web dashboard: http://localhost:%d\n", cfg.WebPort)
 	}
@@ -388,38 +392,72 @@ func runCycle(ctx context.Context) {
 		depth = "deep"
 	}
 
-	fmt.Printf("[%s] Starting cycle with Claude smart discovery (topic: %s)...\n",
-		time.Now().Format("15:04:05"), topic)
+	log.Info("starting discovery cycle", "topic", topic, "depth", depth)
+
+	// Update discovery status
+	if webServer != nil {
+		webServer.UpdateDiscoveryStatus("searching", topic, "Searching GitHub for issues...", 0)
+	}
 
 	// Use Claude-powered smart discovery instead of dumb GitHub search
 	req := discovery.DiscoveryRequest{
 		Topic:         topic,
 		Languages:     cfg.Languages,
-		MinStars:      50,
+		MinStars:      cfg.MinRepoStars,
 		Labels:        cfg.IncludeLabels,
 		MaxAgeDays:    cfg.MaxIssueAgeDays,
 		ExcludeRepos:  cfg.ExcludeRepos,
-		Limit:         5,
+		Limit:         2, // Only 1-2 issues per cycle for ~1 issue/hour rate
 		AnalysisDepth: depth,
 	}
 
-	discoverer := discovery.NewClaudeDiscoverer(1 * time.Hour) // 1 hour timeout for all operations
+	// Update status to analyzing
+	if webServer != nil {
+		webServer.UpdateDiscoveryStatus("analyzing", topic, "Claude is analyzing issues...", 0)
+	}
+
+	discoverer := discovery.NewClaudeDiscoverer(10 * time.Minute) // 10 minute timeout for discovery
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
-		fmt.Printf("Error in smart discovery: %v\n", err)
+		log.Error("smart discovery failed", "error", err)
+		if webServer != nil {
+			webServer.UpdateDiscoveryStatus("idle", "", "", 0)
+		}
 		return
 	}
 
-	fmt.Printf("Claude found %d suitable issues (analyzed %d candidates)\n",
-		len(result.Issues), result.Metadata.TotalCandidates)
+	log.Info("discovery complete",
+		"issues_found", len(result.Issues),
+		"total_candidates", result.Metadata.TotalCandidates,
+	)
+
+	// Update status to complete
+	if webServer != nil {
+		webServer.UpdateDiscoveryStatus("complete", topic,
+			fmt.Sprintf("Found %d issues from %d candidates", len(result.Issues), result.Metadata.TotalCandidates),
+			len(result.Issues))
+	}
 
 	// Submit high-scoring issues to queue
 	submitted := 0
 	for _, issue := range result.Issues {
-		// Only submit issues with score >= 0.6
-		if issue.SuitabilityScore < 0.6 {
-			fmt.Printf("  Skipping %s#%d (score %.2f too low)\n",
-				issue.Repo, issue.IssueNumber, issue.SuitabilityScore)
+		// Only submit issues with score >= 0.4 (lowered from 0.6)
+		if issue.SuitabilityScore < 0.4 {
+			log.Debug("skipping low score issue",
+				"repo", issue.Repo,
+				"issue", issue.IssueNumber,
+				"score", issue.SuitabilityScore,
+			)
+			continue
+		}
+
+		// Double-check for existing PR before submitting to queue
+		hasPR, _ := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
+		if hasPR {
+			log.Debug("skipping issue with existing PR",
+				"repo", issue.Repo,
+				"issue", issue.IssueNumber,
+			)
 			continue
 		}
 
@@ -437,15 +475,27 @@ func runCycle(ctx context.Context) {
 
 		database.CreateIssue(dbIssue)
 		if err := pool.Submit(dbIssue); err != nil {
-			fmt.Printf("  Queue full, skipping %s#%d\n", issue.Repo, issue.IssueNumber)
+			log.Warn("queue full, skipping issue",
+				"repo", issue.Repo,
+				"issue", issue.IssueNumber,
+			)
 		} else {
-			fmt.Printf("  ✓ Queued %s#%d (score %.2f, %s)\n",
-				issue.Repo, issue.IssueNumber, issue.SuitabilityScore, issue.Analysis.FixType)
+			log.Info("queued issue",
+				"repo", issue.Repo,
+				"issue", issue.IssueNumber,
+				"score", issue.SuitabilityScore,
+				"fix_type", issue.Analysis.FixType,
+			)
 			submitted++
 		}
 	}
 
-	fmt.Printf("Submitted %d issues to queue\n", submitted)
+	log.Info("cycle complete", "submitted", submitted)
+
+	// Set discovery to idle after cycle completes
+	if webServer != nil {
+		webServer.UpdateDiscoveryStatus("idle", "", "", 0)
+	}
 }
 
 func handleResults(ctx context.Context) {
@@ -458,11 +508,19 @@ func handleResults(ctx context.Context) {
 				return
 			}
 			if result.Success {
-				fmt.Printf("✓ [Worker %d] %s#%d - PR: %s\n",
-					result.WorkerID, result.Issue.Repo, result.Issue.IssueNumber, result.PRURL)
+				log.Info("PR created successfully",
+					"worker_id", result.WorkerID,
+					"repo", result.Issue.Repo,
+					"issue", result.Issue.IssueNumber,
+					"pr_url", result.PRURL,
+				)
 			} else {
-				fmt.Printf("✗ [Worker %d] %s#%d - Error: %v\n",
-					result.WorkerID, result.Issue.Repo, result.Issue.IssueNumber, result.Error)
+				log.Error("worker failed",
+					"worker_id", result.WorkerID,
+					"repo", result.Issue.Repo,
+					"issue", result.Issue.IssueNumber,
+					"error", result.Error,
+				)
 			}
 		}
 	}
@@ -524,7 +582,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create discoverer with timeout
-	timeout := 1 * time.Hour // All operations get 1 hour timeout
+	timeout := 10 * time.Minute // 10 minute timeout for discovery
 	discoverer := discovery.NewClaudeDiscoverer(timeout)
 
 	fmt.Println("⏳ Running Claude discovery (this may take a few minutes)...")

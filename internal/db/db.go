@@ -43,6 +43,7 @@ func (db *DB) Migrate() error {
 		difficulty_score REAL DEFAULT 0.5,
 		status TEXT DEFAULT 'discovered',
 		error_message TEXT,
+		retry_count INTEGER DEFAULT 0,
 		discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE(repo, issue_number)
@@ -142,7 +143,14 @@ func (db *DB) Migrate() error {
 	`
 
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add retry_count column if it doesn't exist (migration for existing DBs)
+	db.Exec("ALTER TABLE issues ADD COLUMN retry_count INTEGER DEFAULT 0")
+
+	return nil
 }
 
 // CreateIssue inserts a new issue
@@ -203,6 +211,15 @@ func (db *DB) UpdateIssueStatus(id int64, status models.IssueStatus, errorMsg st
 		UPDATE issues SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, status, errorMsg, id)
+	return err
+}
+
+// IncrementIssueRetryCount increments the retry count for an issue
+func (db *DB) IncrementIssueRetryCount(id int64) error {
+	_, err := db.Exec(`
+		UPDATE issues SET retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, id)
 	return err
 }
 

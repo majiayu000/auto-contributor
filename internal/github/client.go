@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -268,9 +269,10 @@ func (c *Client) CreatePullRequest(ctx context.Context, repoFullName, title, bod
 		"--head", head,
 		"--base", base)
 
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", 0, fmt.Errorf("create PR: %w", err)
+		// Include the actual error message from gh CLI
+		return "", 0, fmt.Errorf("create PR: %s - %w", strings.TrimSpace(string(output)), err)
 	}
 
 	// Output is the PR URL
@@ -318,25 +320,62 @@ func (c *Client) GetPRStatus(ctx context.Context, repoFullName string, prNum int
 
 // ForkRepo forks a repository using gh
 func (c *Client) ForkRepo(ctx context.Context, repoFullName string) error {
-	cmd := exec.CommandContext(ctx, "gh", "repo", "fork", repoFullName, "--clone=false")
-	err := cmd.Run()
-	if err != nil {
-		// Fork might already exist, check
-		if strings.Contains(err.Error(), "already exists") {
+	var lastErr error
+
+	// Retry up to 3 times for network issues
+	for attempt := 1; attempt <= 3; attempt++ {
+		cmd := exec.CommandContext(ctx, "gh", "repo", "fork", repoFullName, "--clone=false")
+		output, err := cmd.CombinedOutput()
+		outputStr := strings.TrimSpace(string(output))
+
+		if err == nil {
 			return nil
 		}
+
+		// Check if fork already exists (this is OK)
+		if strings.Contains(outputStr, "already exists") ||
+			strings.Contains(outputStr, "try again later") {
+			return nil
+		}
+
+		lastErr = fmt.Errorf("%s - %w", outputStr, err)
+
+		// Don't retry on permission/not found errors
+		if strings.Contains(outputStr, "not found") ||
+			strings.Contains(outputStr, "permission") ||
+			strings.Contains(outputStr, "Could not resolve") {
+			return lastErr
+		}
+
+		// Wait before retry for network issues
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
 	}
-	return err
+
+	return lastErr
 }
 
 // GetUsername gets the authenticated username
 func (c *Client) GetUsername(ctx context.Context) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login")
-	output, err := cmd.Output()
+
+	// Capture both stdout and stderr for better debugging
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("gh api user failed: %w, stderr: %s", err, stderr.String())
 	}
-	return strings.TrimSpace(string(output)), nil
+
+	username := strings.TrimSpace(stdout.String())
+	if username == "" {
+		return "", fmt.Errorf("gh returned empty username, stderr: %s", stderr.String())
+	}
+
+	return username, nil
 }
 
 // isExcludedRepo checks if a repo is in the exclude list
