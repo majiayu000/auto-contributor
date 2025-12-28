@@ -279,7 +279,7 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 		"--print",                        // Non-interactive mode
 		"--dangerously-skip-permissions", // Auto-approve file edits
 		"-p", prompt,
-		"--output-format", "stream-json") // Use streaming JSON for detailed output
+		"--output-format", "text") // Use text format to properly detect FIX_COMPLETE marker
 	cmd.Dir = repoDir
 
 	// Capture output
@@ -313,14 +313,22 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 			line := scanner.Text()
 			outputBuilder.WriteString(line + "\n")
 
-			// Parse streaming JSON to extract tool calls and content
-			parsed := e.parseStreamLine(line)
-			if parsed != "" {
+			// Add to output buffer for UI display
+			if line != "" {
+				// Detect tool usage from text output
+				outputType := "text"
+				if strings.Contains(line, "Tool:") || strings.Contains(line, "Using tool") {
+					outputType = "tool"
+				} else if strings.Contains(line, "Error") || strings.Contains(line, "error") {
+					outputType = "stderr"
+				}
+				e.addOutput(outputType, line)
+
 				e.outputMu.Lock()
-				e.lastOutput = parsed
+				e.lastOutput = line
 				e.outputMu.Unlock()
 				select {
-				case e.outputChan <- parsed:
+				case e.outputChan <- line:
 				default:
 				}
 			}
