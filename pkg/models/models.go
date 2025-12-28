@@ -41,19 +41,19 @@ const (
 
 // Issue represents a discovered GitHub issue
 type Issue struct {
-	ID              int64       `db:"id"`
-	Repo            string      `db:"repo"`
-	IssueNumber     int         `db:"issue_number"`
-	Title           string      `db:"title"`
-	Body            string      `db:"body"`
-	Labels          string      `db:"labels"` // JSON array
-	Language        string      `db:"language"`
-	DifficultyScore float64     `db:"difficulty_score"`
-	Status          IssueStatus `db:"status"`
-	ErrorMessage    string      `db:"error_message"`
-	RetryCount      int         `db:"retry_count"`
-	DiscoveredAt    time.Time   `db:"discovered_at"`
-	UpdatedAt       time.Time   `db:"updated_at"`
+	ID              int64       `db:"id" json:"id"`
+	Repo            string      `db:"repo" json:"repo"`
+	IssueNumber     int         `db:"issue_number" json:"issue_number"`
+	Title           string      `db:"title" json:"title"`
+	Body            string      `db:"body" json:"body,omitempty"`
+	Labels          string      `db:"labels" json:"labels,omitempty"` // JSON array
+	Language        string      `db:"language" json:"language"`
+	DifficultyScore float64     `db:"difficulty_score" json:"difficulty_score"`
+	Status          IssueStatus `db:"status" json:"status"`
+	ErrorMessage    string      `db:"error_message" json:"error_message,omitempty"`
+	RetryCount      int         `db:"retry_count" json:"retry_count"`
+	DiscoveredAt    time.Time   `db:"discovered_at" json:"discovered_at"`
+	UpdatedAt       time.Time   `db:"updated_at" json:"updated_at"`
 }
 
 // MaxRetries is the maximum number of retry attempts for retryable failures

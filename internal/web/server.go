@@ -715,6 +715,48 @@ const dashboardHTML = `<!DOCTYPE html>
         .worker-stats .success { color: var(--accent-green); }
         .worker-stats .failure { color: var(--accent-red); }
 
+        .worker-issue-title {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .worker-phase-desc {
+            font-size: 13px;
+            color: var(--text-primary);
+            margin-bottom: 12px;
+            font-weight: 500;
+        }
+
+        .progress-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .progress-container .progress-bar {
+            flex: 1;
+            margin-bottom: 0;
+        }
+
+        .progress-text {
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-blue);
+            min-width: 35px;
+        }
+
+        .elapsed-time {
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent-orange);
+            min-width: 60px;
+        }
+
         .log-section {
             max-height: 500px;
             overflow-y: auto;
@@ -1065,19 +1107,52 @@ const dashboardHTML = `<!DOCTYPE html>
                     const issue = worker.current_issue;
                     const issueText = issue ? issue.repo + '#' + issue.issue_number : '';
 
+                    // Calculate elapsed time
+                    let elapsed = '';
+                    if (worker.started_at && isActive) {
+                        const start = new Date(worker.started_at);
+                        const now = new Date();
+                        const secs = Math.floor((now - start) / 1000);
+                        const mins = Math.floor(secs / 60);
+                        elapsed = mins > 0 ? mins + 'm ' + (secs % 60) + 's' : secs + 's';
+                    }
+
+                    // Phase descriptions
+                    const phaseDesc = {
+                        'idle': 'Waiting for task...',
+                        'cloning': '📥 Cloning repository...',
+                        'evaluating': '🔍 Evaluating complexity...',
+                        'solving': '🤖 Claude is fixing...',
+                        'testing': '🧪 Running tests...',
+                        'validating': '✅ Validating changes...',
+                        'creating_pr': '🚀 Creating PR...'
+                    };
+
+                    const issueTitle = issue ? (issue.title || '').substring(0, 50) : '';
+
                     card.innerHTML = ` + "`" + `
                         <div class="worker-header">
                             <span class="worker-id">Worker ${worker.id}</span>
                             <span class="worker-status ${phaseClass}">${worker.phase || 'idle'}</span>
                         </div>
-                        <div class="worker-issue ${issueText ? '' : 'empty'}">${issueText || 'Waiting for task...'}</div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: ${(worker.progress || 0) * 100}%"></div>
+                        ${issueText ? ` + "`" + `
+                            <div class="worker-issue">${issueText}</div>
+                            <div class="worker-issue-title">${issueTitle}${issueTitle.length >= 50 ? '...' : ''}</div>
+                        ` + "`" + ` : ` + "`" + `
+                            <div class="worker-issue empty">Waiting for task...</div>
+                        ` + "`" + `}
+                        <div class="worker-phase-desc">${phaseDesc[worker.phase] || worker.phase || 'Idle'}</div>
+                        <div class="progress-container">
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${(worker.progress || 0) * 100}%"></div>
+                            </div>
+                            <span class="progress-text">${Math.round((worker.progress || 0) * 100)}%</span>
+                            ${elapsed ? ` + "`" + `<span class="elapsed-time">⏱ ${elapsed}</span>` + "`" + ` : ''}
                         </div>
                         <div class="worker-output">${worker.last_output || '...'}</div>
                         <div class="worker-stats">
-                            <span class="success">+ ${worker.tasks_completed || 0}</span>
-                            <span class="failure">- ${worker.tasks_failed || 0}</span>
+                            <span class="success">✓ ${worker.tasks_completed || 0}</span>
+                            <span class="failure">✗ ${worker.tasks_failed || 0}</span>
                         </div>
                     ` + "`" + `;
 
