@@ -173,6 +173,11 @@ func (p *Pool) GetAllStatus() []*WorkerStatus {
 	return statuses
 }
 
+// GetExecutorOutput returns the Claude executor output buffer
+func (p *Pool) GetExecutorOutput() []claude.OutputLine {
+	return p.executor.GetOutputBuffer()
+}
+
 // GetSystemStats returns aggregated system statistics
 func (p *Pool) GetSystemStats() *models.SystemStats {
 	statuses := p.GetAllStatus()

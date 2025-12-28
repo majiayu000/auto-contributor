@@ -39,20 +39,163 @@ type ComplexityResult struct {
 	TestFramework  string   `json:"test_framework"`
 }
 
+// OutputLine represents a single output event
+type OutputLine struct {
+	Time    time.Time `json:"time"`
+	Type    string    `json:"type"`    // "stdout", "stderr", "tool", "thinking"
+	Content string    `json:"content"`
+}
+
 // Executor runs Claude Code to solve issues
 type Executor struct {
-	config      *config.Config
-	outputChan  chan string
-	outputMu    sync.Mutex
-	lastOutput  string
+	config       *config.Config
+	outputChan   chan string
+	outputMu     sync.Mutex
+	lastOutput   string
+	outputBuffer []OutputLine // Store recent output lines
+	bufferMu     sync.RWMutex
 }
 
 // New creates a new Claude executor
 func New(cfg *config.Config) *Executor {
 	return &Executor{
-		config:     cfg,
-		outputChan: make(chan string, 100),
+		config:       cfg,
+		outputChan:   make(chan string, 100),
+		outputBuffer: make([]OutputLine, 0, 200),
 	}
+}
+
+// GetOutputBuffer returns recent output lines
+func (e *Executor) GetOutputBuffer() []OutputLine {
+	e.bufferMu.RLock()
+	defer e.bufferMu.RUnlock()
+	result := make([]OutputLine, len(e.outputBuffer))
+	copy(result, e.outputBuffer)
+	return result
+}
+
+// ClearOutputBuffer clears the output buffer
+func (e *Executor) ClearOutputBuffer() {
+	e.bufferMu.Lock()
+	defer e.bufferMu.Unlock()
+	e.outputBuffer = e.outputBuffer[:0]
+}
+
+// addOutput adds a line to the output buffer
+func (e *Executor) addOutput(outputType, content string) {
+	e.bufferMu.Lock()
+	defer e.bufferMu.Unlock()
+
+	line := OutputLine{
+		Time:    time.Now(),
+		Type:    outputType,
+		Content: content,
+	}
+	e.outputBuffer = append(e.outputBuffer, line)
+
+	// Keep only last 200 lines
+	if len(e.outputBuffer) > 200 {
+		e.outputBuffer = e.outputBuffer[len(e.outputBuffer)-200:]
+	}
+}
+
+// StreamEvent represents a Claude streaming JSON event
+type StreamEvent struct {
+	Type    string `json:"type"`
+	Message struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type  string `json:"type"`
+			Text  string `json:"text,omitempty"`
+			Name  string `json:"name,omitempty"`
+			Input struct {
+				Command  string `json:"command,omitempty"`
+				FilePath string `json:"file_path,omitempty"`
+				Content  string `json:"content,omitempty"`
+			} `json:"input,omitempty"`
+		} `json:"content"`
+	} `json:"message,omitempty"`
+	ContentBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+		Name string `json:"name,omitempty"`
+	} `json:"content_block,omitempty"`
+	Delta struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+	} `json:"delta,omitempty"`
+	Result struct {
+		Subtype string `json:"subtype,omitempty"`
+	} `json:"result,omitempty"`
+}
+
+// parseStreamLine parses a streaming JSON line and returns human-readable output
+func (e *Executor) parseStreamLine(line string) string {
+	if line == "" || line[0] != '{' {
+		return line
+	}
+
+	var event StreamEvent
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		// Not JSON, return as-is
+		return line
+	}
+
+	switch event.Type {
+	case "assistant":
+		// Start of assistant response
+		return ""
+
+	case "content_block_start":
+		if event.ContentBlock.Type == "tool_use" {
+			toolName := event.ContentBlock.Name
+			e.addOutput("tool", fmt.Sprintf("🔧 Using tool: %s", toolName))
+			return fmt.Sprintf("🔧 Tool: %s", toolName)
+		}
+		return ""
+
+	case "content_block_delta":
+		if event.Delta.Type == "text_delta" && event.Delta.Text != "" {
+			text := strings.TrimSpace(event.Delta.Text)
+			if len(text) > 100 {
+				text = text[:100] + "..."
+			}
+			if text != "" {
+				e.addOutput("text", text)
+				return text
+			}
+		}
+		return ""
+
+	case "content_block_stop":
+		return ""
+
+	case "result":
+		if event.Result.Subtype == "tool_result" {
+			return "✅ Tool completed"
+		}
+		return ""
+
+	case "message_start", "message_delta", "message_stop":
+		return ""
+
+	default:
+		// For unrecognized events, try to extract useful info
+		if strings.Contains(line, "tool_use") {
+			return "🔧 Using tool..."
+		}
+		if strings.Contains(line, "Bash") {
+			return "💻 Running command..."
+		}
+		if strings.Contains(line, "Read") || strings.Contains(line, "file_path") {
+			return "📖 Reading file..."
+		}
+		if strings.Contains(line, "Edit") || strings.Contains(line, "Write") {
+			return "✏️ Editing file..."
+		}
+	}
+
+	return ""
 }
 
 // GetLastOutput returns the most recent output line
@@ -121,6 +264,10 @@ Respond ONLY with JSON:
 func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issue, complexity *ComplexityResult) (*Result, error) {
 	startTime := time.Now()
 
+	// Clear output buffer for new task
+	e.ClearOutputBuffer()
+	e.addOutput("info", fmt.Sprintf("Starting fix for %s#%d: %s", issue.Repo, issue.IssueNumber, issue.Title))
+
 	prompt := e.buildSolvePrompt(issue, complexity)
 
 	// Create timeout context
@@ -132,7 +279,7 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 		"--print",                        // Non-interactive mode
 		"--dangerously-skip-permissions", // Auto-approve file edits
 		"-p", prompt,
-		"--output-format", "text")
+		"--output-format", "stream-json") // Use streaming JSON for detailed output
 	cmd.Dir = repoDir
 
 	// Capture output
@@ -158,16 +305,24 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
+		// Increase buffer size for large outputs
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+
 		for scanner.Scan() {
 			line := scanner.Text()
 			outputBuilder.WriteString(line + "\n")
-			e.outputMu.Lock()
-			e.lastOutput = line
-			e.outputMu.Unlock()
-			select {
-			case e.outputChan <- line:
-			default:
-				// Channel full, skip
+
+			// Parse streaming JSON to extract tool calls and content
+			parsed := e.parseStreamLine(line)
+			if parsed != "" {
+				e.outputMu.Lock()
+				e.lastOutput = parsed
+				e.outputMu.Unlock()
+				select {
+				case e.outputChan <- parsed:
+				default:
+				}
 			}
 		}
 	}()
@@ -178,6 +333,7 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 		for scanner.Scan() {
 			line := scanner.Text()
 			outputBuilder.WriteString("[stderr] " + line + "\n")
+			e.addOutput("stderr", line)
 		}
 	}()
 

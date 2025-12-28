@@ -108,12 +108,21 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/issues", s.handleIssues)
 	mux.HandleFunc("/api/discovery", s.handleDiscoveryStatus)
+	mux.HandleFunc("/api/output", s.handleOutputBuffer)
 	mux.HandleFunc("/events", s.handleSSE)
 
 	addr := fmt.Sprintf(":%d", s.config.WebPort)
 	fmt.Printf("Web server starting on %s\n", addr)
 
 	return http.ListenAndServe(addr, mux)
+}
+
+// handleOutputBuffer returns the Claude output buffer
+func (s *Server) handleOutputBuffer(w http.ResponseWriter, r *http.Request) {
+	// Get executor from pool (we need to expose it)
+	buffer := s.pool.GetExecutorOutput()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(buffer)
 }
 
 // handleDiscoveryStatus returns current discovery status
@@ -757,6 +766,65 @@ const dashboardHTML = `<!DOCTYPE html>
             min-width: 60px;
         }
 
+        .terminal-status {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 12px;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+        }
+
+        .terminal-status.active {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--accent-green);
+            animation: pulse 2s infinite;
+        }
+
+        .terminal-section {
+            background: #0d1117;
+            min-height: 400px;
+            max-height: 500px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            padding: 16px;
+        }
+
+        .terminal-empty {
+            color: var(--text-muted);
+            text-align: center;
+            padding: 60px 20px;
+        }
+
+        .terminal-line {
+            padding: 2px 0;
+            display: flex;
+            gap: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .terminal-time {
+            color: #6e7681;
+            flex-shrink: 0;
+            min-width: 70px;
+        }
+
+        .terminal-type {
+            flex-shrink: 0;
+            min-width: 60px;
+            font-weight: 500;
+        }
+
+        .terminal-type.tool { color: #f0883e; }
+        .terminal-type.text { color: #7ee787; }
+        .terminal-type.stderr { color: #f85149; }
+        .terminal-type.info { color: #58a6ff; }
+
+        .terminal-content {
+            color: #c9d1d9;
+            word-break: break-all;
+        }
+
         .log-section {
             max-height: 500px;
             overflow-y: auto;
@@ -892,9 +960,12 @@ const dashboardHTML = `<!DOCTYPE html>
 
             <div class="section">
                 <div class="section-header">
-                    <div class="section-title">Activity Log</div>
+                    <div class="section-title">🖥️ Claude Terminal</div>
+                    <span class="terminal-status" id="terminal-status">Idle</span>
                 </div>
-                <div class="log-section" id="log-section"></div>
+                <div class="terminal-section" id="terminal-section">
+                    <div class="terminal-empty">Waiting for Claude to start...</div>
+                </div>
             </div>
         </div>
     </div>
@@ -1342,10 +1413,63 @@ const dashboardHTML = `<!DOCTYPE html>
             };
         }
 
+        // Terminal output handling
+        let lastOutputCount = 0;
+
+        function updateTerminal(outputs) {
+            const terminal = document.getElementById('terminal-section');
+            const statusEl = document.getElementById('terminal-status');
+
+            if (!outputs || outputs.length === 0) {
+                terminal.innerHTML = '<div class="terminal-empty">Waiting for Claude to start...</div>';
+                statusEl.textContent = 'Idle';
+                statusEl.className = 'terminal-status';
+                return;
+            }
+
+            statusEl.textContent = 'Running';
+            statusEl.className = 'terminal-status active';
+
+            // Only update if there's new output
+            if (outputs.length === lastOutputCount) return;
+            lastOutputCount = outputs.length;
+
+            terminal.innerHTML = outputs.map(line => {
+                const time = new Date(line.time).toLocaleTimeString();
+                return ` + "`" + `
+                    <div class="terminal-line">
+                        <span class="terminal-time">${time}</span>
+                        <span class="terminal-type ${line.type}">${line.type}</span>
+                        <span class="terminal-content">${escapeHtml(line.content)}</span>
+                    </div>
+                ` + "`" + `;
+            }).join('');
+
+            // Auto-scroll to bottom
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function pollTerminal() {
+            fetch('/api/output')
+                .then(r => r.json())
+                .then(updateTerminal)
+                .catch(e => console.log('Terminal poll error'));
+        }
+
+        // Poll terminal every 1 second
+        setInterval(pollTerminal, 1000);
+        pollTerminal();
+
         fetch('/api/status')
             .then(r => r.json())
             .then(updateDashboard)
-            .catch(e => addLog('Failed to load status', 'error'));
+            .catch(e => console.log('Failed to load status'));
 
         fetch('/api/discovery')
             .then(r => r.json())
