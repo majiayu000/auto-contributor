@@ -52,7 +52,7 @@ func Default() *Config {
 
 	return &Config{
 		GitHubEmail:       "1835304752@qq.com",
-		ClaudeTimeout:     15 * time.Minute,
+		ClaudeTimeout:     24 * time.Hour, // No practical timeout - let Claude work
 		ClaudeMaxRetries:  3,
 		WorkerCount:       2,
 		WorkerQueueSize:   100,

@@ -416,7 +416,7 @@ func runCycle(ctx context.Context) {
 		webServer.UpdateDiscoveryStatus("analyzing", topic, "Claude is analyzing issues...", 0)
 	}
 
-	discoverer := discovery.NewClaudeDiscoverer(30 * time.Minute) // 30 minute timeout for thorough discovery
+	discoverer := discovery.NewClaudeDiscoverer(24 * time.Hour) // No practical timeout - let Claude work
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
 		log.Error("smart discovery failed", "error", err)
@@ -581,8 +581,8 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 		AnalysisDepth: depth,
 	}
 
-	// Create discoverer with timeout
-	timeout := 30 * time.Minute // 30 minute timeout for thorough discovery
+	// Create discoverer - no practical timeout
+	timeout := 24 * time.Hour
 	discoverer := discovery.NewClaudeDiscoverer(timeout)
 
 	fmt.Println("⏳ Running Claude discovery (this may take a few minutes)...")
