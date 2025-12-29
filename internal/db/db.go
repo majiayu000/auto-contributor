@@ -333,6 +333,83 @@ func (db *DB) GetAttemptCount(issueID int64) (int, error) {
 	return count, err
 }
 
+// ClaimNextPendingIssue atomically claims the highest-scored pending issue for a worker
+// Returns nil if no pending issues are available
+func (db *DB) ClaimNextPendingIssue(workerID int) (*models.Issue, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	// Find the highest-scored pending issue
+	row := tx.QueryRow(`
+		SELECT id, repo, issue_number, title, body, labels, language, difficulty_score, status, retry_count, discovered_at, updated_at
+		FROM issues
+		WHERE status = 'pending'
+		ORDER BY difficulty_score DESC
+		LIMIT 1
+	`)
+
+	issue := &models.Issue{}
+	err = row.Scan(
+		&issue.ID, &issue.Repo, &issue.IssueNumber, &issue.Title, &issue.Body,
+		&issue.Labels, &issue.Language, &issue.DifficultyScore, &issue.Status,
+		&issue.RetryCount, &issue.DiscoveredAt, &issue.UpdatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // No pending issues
+		}
+		return nil, err
+	}
+
+	// Claim it by updating status to processing
+	_, err = tx.Exec(`
+		UPDATE issues SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = 'pending'
+	`, issue.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	issue.Status = models.IssueStatusProcessing
+	return issue, nil
+}
+
+// GetPendingIssueCount returns the number of pending issues
+func (db *DB) GetPendingIssueCount() (int, error) {
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM issues WHERE status = 'pending'`).Scan(&count)
+	return count, err
+}
+
+// MarkIssueCompleted marks an issue as completed with PR info
+func (db *DB) MarkIssueCompleted(issueID int64, prURL string) error {
+	_, err := db.Exec(`
+		UPDATE issues SET status = 'completed', updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, issueID)
+	return err
+}
+
+// MarkIssueFailed marks an issue as failed, optionally for retry
+func (db *DB) MarkIssueFailed(issueID int64, errorMsg string, canRetry bool) error {
+	status := "failed"
+	if canRetry {
+		status = "pending" // Put back in queue for retry
+	}
+	_, err := db.Exec(`
+		UPDATE issues SET status = ?, error_message = ?, retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, status, errorMsg, issueID)
+	return err
+}
+
 // GetStats returns summary statistics
 func (db *DB) GetStats(days int) (map[string]interface{}, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02")

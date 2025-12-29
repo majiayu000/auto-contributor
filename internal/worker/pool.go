@@ -146,9 +146,13 @@ func (p *Pool) Submit(issue *models.Issue) error {
 	}
 }
 
-// QueueSize returns the current queue size
+// QueueSize returns the current queue size (from DB + memory queue)
 func (p *Pool) QueueSize() int {
-	return len(p.issueQueue)
+	dbCount, err := p.db.GetPendingIssueCount()
+	if err != nil {
+		dbCount = 0
+	}
+	return dbCount + len(p.issueQueue)
 }
 
 // Results returns the results channel
@@ -220,7 +224,7 @@ func (p *Pool) GetSystemStats() *models.SystemStats {
 	return stats
 }
 
-// run is the main worker loop
+// run is the main worker loop - now pulls from DB instead of memory queue
 func (w *Worker) run() {
 	defer w.pool.wg.Done()
 
@@ -228,11 +232,33 @@ func (w *Worker) run() {
 		select {
 		case <-w.pool.ctx.Done():
 			return
-		case issue, ok := <-w.pool.issueQueue:
-			if !ok {
-				return
+		default:
+			// Try to claim an issue from DB
+			issue, err := w.pool.db.ClaimNextPendingIssue(w.ID)
+			if err != nil {
+				// Log error and wait before retrying
+				time.Sleep(5 * time.Second)
+				continue
 			}
-			w.processIssue(issue)
+
+			if issue == nil {
+				// No pending issues, also check the legacy in-memory queue
+				select {
+				case <-w.pool.ctx.Done():
+					return
+				case memIssue, ok := <-w.pool.issueQueue:
+					if !ok {
+						return
+					}
+					w.processIssue(memIssue)
+				case <-time.After(10 * time.Second):
+					// No issues available, wait and retry
+					continue
+				}
+			} else {
+				// Process the issue from DB
+				w.processIssue(issue)
+			}
 		}
 	}
 }

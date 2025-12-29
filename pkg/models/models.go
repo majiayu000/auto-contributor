@@ -8,11 +8,14 @@ import (
 type IssueStatus string
 
 const (
-	IssueStatusDiscovered IssueStatus = "discovered"
-	IssueStatusProcessing IssueStatus = "processing"
-	IssueStatusPRCreated  IssueStatus = "pr_created"
-	IssueStatusMerged     IssueStatus = "merged"
-	IssueStatusAbandoned  IssueStatus = "abandoned"
+	IssueStatusPending    IssueStatus = "pending"    // In DB queue, waiting for worker
+	IssueStatusDiscovered IssueStatus = "discovered" // Legacy: same as pending
+	IssueStatusProcessing IssueStatus = "processing" // Worker is processing
+	IssueStatusCompleted  IssueStatus = "completed"  // Successfully created PR
+	IssueStatusPRCreated  IssueStatus = "pr_created" // Legacy: same as completed
+	IssueStatusFailed     IssueStatus = "failed"     // Failed, won't retry
+	IssueStatusMerged     IssueStatus = "merged"     // PR was merged
+	IssueStatusAbandoned  IssueStatus = "abandoned"  // Manually abandoned
 )
 
 // PRStatus represents the status of a pull request

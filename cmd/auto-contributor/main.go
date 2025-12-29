@@ -407,7 +407,7 @@ func runCycle(ctx context.Context) {
 		Labels:        cfg.IncludeLabels,
 		MaxAgeDays:    cfg.MaxIssueAgeDays,
 		ExcludeRepos:  cfg.ExcludeRepos,
-		Limit:         2, // Only 1-2 issues per cycle for ~1 issue/hour rate
+		Limit:         10, // Find more issues, store all in DB for workers
 		AnalysisDepth: depth,
 	}
 
@@ -467,20 +467,21 @@ func runCycle(ctx context.Context) {
 			Title:           issue.Title,
 			Body:            issue.Analysis.Recommendation,
 			Language:        cfg.Languages[0],
-			DifficultyScore: 1.0 - issue.SuitabilityScore,
-			Status:          models.IssueStatusDiscovered,
+			DifficultyScore: issue.SuitabilityScore, // Higher score = higher priority
+			Status:          models.IssueStatusPending, // Workers will pick this up from DB
 			DiscoveredAt:    time.Now(),
 			UpdatedAt:       time.Now(),
 		}
 
-		database.CreateIssue(dbIssue)
-		if err := pool.Submit(dbIssue); err != nil {
-			log.Warn("queue full, skipping issue",
+		// Save to DB - workers will automatically pick up pending issues
+		if err := database.CreateIssue(dbIssue); err != nil {
+			log.Warn("failed to save issue to DB",
 				"repo", issue.Repo,
 				"issue", issue.IssueNumber,
+				"error", err,
 			)
 		} else {
-			log.Info("queued issue",
+			log.Info("saved issue to DB",
 				"repo", issue.Repo,
 				"issue", issue.IssueNumber,
 				"score", issue.SuitabilityScore,

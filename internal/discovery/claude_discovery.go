@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,14 +61,58 @@ type DiscoveredIssue struct {
 // DiscoveryResult is the complete output of discovery
 type DiscoveryResult struct {
 	Issues   []DiscoveredIssue `json:"issues"`
-	Metadata struct {
-		TotalCandidates      int `json:"total_candidates"`
-		Analyzed             int `json:"analyzed"`
-		IssuesWithPR         int `json:"issues_with_pr"`
-		Selected             int `json:"selected"`
-		StarThresholdUsed    int `json:"star_threshold_used"`
-		DiscoveryTimeSeconds int `json:"discovery_time_seconds"`
-	} `json:"metadata"`
+	Metadata DiscoveryMetadata `json:"metadata"`
+}
+
+// DiscoveryMetadata holds discovery stats (uses interface{} for flexible int/string parsing)
+type DiscoveryMetadata struct {
+	TotalCandidates      int `json:"total_candidates"`
+	Analyzed             int `json:"analyzed"`
+	IssuesWithPR         int `json:"issues_with_pr"`
+	Selected             int `json:"selected"`
+	StarThresholdUsed    int `json:"star_threshold_used"`
+	DiscoveryTimeSeconds int `json:"discovery_time_seconds"`
+}
+
+// UnmarshalJSON handles both int and string values for numeric fields
+func (m *DiscoveryMetadata) UnmarshalJSON(data []byte) error {
+	// Use a flexible struct to parse
+	var raw struct {
+		TotalCandidates      interface{} `json:"total_candidates"`
+		Analyzed             interface{} `json:"analyzed"`
+		IssuesWithPR         interface{} `json:"issues_with_pr"`
+		Selected             interface{} `json:"selected"`
+		StarThresholdUsed    interface{} `json:"star_threshold_used"`
+		DiscoveryTimeSeconds interface{} `json:"discovery_time_seconds"`
+	}
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	m.TotalCandidates = toInt(raw.TotalCandidates)
+	m.Analyzed = toInt(raw.Analyzed)
+	m.IssuesWithPR = toInt(raw.IssuesWithPR)
+	m.Selected = toInt(raw.Selected)
+	m.StarThresholdUsed = toInt(raw.StarThresholdUsed)
+	m.DiscoveryTimeSeconds = toInt(raw.DiscoveryTimeSeconds)
+
+	return nil
+}
+
+// toInt converts interface{} to int, handling both float64 (JSON default) and string
+func toInt(v interface{}) int {
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case string:
+		i, _ := strconv.Atoi(val)
+		return i
+	default:
+		return 0
+	}
 }
 
 // ClaudeDiscoverer uses Claude to find and analyze issues

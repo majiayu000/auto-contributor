@@ -849,6 +849,7 @@ func ExtractIssueRef(repo string, issueNum int) string {
 }
 
 // SanitizeBranchName creates a valid branch name from issue title
+// Includes a timestamp suffix to ensure uniqueness for retries
 func SanitizeBranchName(issueNum int, title string) string {
 	// Remove special characters
 	reg := regexp.MustCompile(`[^a-zA-Z0-9\s-]`)
@@ -859,11 +860,14 @@ func SanitizeBranchName(issueNum int, title string) string {
 
 	// Lowercase and truncate
 	clean = strings.ToLower(clean)
-	if len(clean) > 40 {
-		clean = clean[:40]
+	if len(clean) > 30 {
+		clean = clean[:30]
 	}
 
-	return fmt.Sprintf("fix-%d-%s", issueNum, clean)
+	// Add timestamp suffix for uniqueness (MMDD-HHMM format)
+	timestamp := time.Now().Format("0102-1504")
+
+	return fmt.Sprintf("fix-%d-%s-%s", issueNum, clean, timestamp)
 }
 
 func contains(slice []string, item string) bool {
