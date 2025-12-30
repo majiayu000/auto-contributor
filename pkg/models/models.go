@@ -273,3 +273,11 @@ type SystemStats struct {
 	AvgSolveTime      time.Duration `json:"avg_solve_time"`
 	Workers           []WorkerState `json:"workers"`
 }
+
+// BlacklistEntry represents a blacklisted repository
+type BlacklistEntry struct {
+	ID      int64     `db:"id" json:"id"`
+	Repo    string    `db:"repo" json:"repo"`
+	Reason  string    `db:"reason" json:"reason,omitempty"`
+	AddedAt time.Time `db:"added_at" json:"added_at"`
+}

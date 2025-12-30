@@ -397,7 +397,6 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 
 // buildSolvePrompt constructs the prompt for solving an issue
 func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityResult) string {
-	// Use comprehensive prompt that gives Claude full control
 	return fmt.Sprintf(`You are fixing GitHub issue #%d in repository %s.
 
 ## Issue
@@ -405,53 +404,76 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
 **Body:**
 %s
 
-## CRITICAL Instructions (Follow ALL steps)
+## CRITICAL: Use ultrathink for ALL analysis steps
 
-0. **FIRST: Verify the issue still needs fixing:**
-   - Search the codebase to check if the feature/fix described in this issue ALREADY EXISTS
-   - Look for functions, methods, or code that already implements what the issue is asking for
-   - Check recent commits or changes that might have addressed this
-   - If the issue is ALREADY FIXED or the feature ALREADY EXISTS:
-     * Output: ALREADY_FIXED
-     * Explain what you found and where the existing implementation is
-     * Do NOT make any changes
-     * Stop here - do not continue to other steps
+### Phase 1: Deep Understanding (DO NOT SKIP)
 
-1. **Understand the codebase first:**
-   - Read CONTRIBUTING.md if it exists
-   - Check .github/workflows/*.yml to understand CI requirements
-   - Understand the project's code style and patterns
+1. **Read and understand the issue thoroughly:**
+   - Use ultrathink to analyze what the issue is REALLY asking for
+   - Understand the user's intent, not just the surface request
+   - Identify what success looks like
 
-2. **Implement the fix:**
-   - Create a focused, minimal fix for this specific issue
-   - Follow existing code patterns - NO hardcoding unless absolutely necessary
-   - Add unit tests if the project has them and it makes sense
+2. **Verify the issue still needs fixing:**
+   - Search codebase to check if feature/fix ALREADY EXISTS
+   - Check recent commits that might have addressed this
+   - If ALREADY_FIXED: output marker and stop
 
-3. **Validate your changes:**
-   - Run gofmt/prettier/black to format code (based on language)
-   - Run the project's own lint commands (check Makefile, package.json, etc.)
-   - Run ALL existing tests: go test ./... or npm test or pytest
-   - Fix any failures and re-run until ALL tests pass
+3. **Study the project:**
+   - Read CONTRIBUTING.md if exists
+   - Check .github/workflows/*.yml for CI requirements
+   - Understand code style and patterns from existing code
+   - Identify test framework used
 
-4. **Commit requirements:**
-   - Use git config to set: user.name="majiayu000" user.email="1835304752@qq.com"
-   - Sign-off commits for DCO: git commit -s -m "message"
-   - Keep commit messages concise and descriptive
+### Phase 2: Implementation (MINIMAL & CORRECT)
 
-5. **Quality checks before finishing:**
-   - Ensure no debug code or console.log left behind
-   - Ensure no unrelated changes included
-   - Verify the fix actually addresses the issue
+4. **Plan before coding:**
+   - Use ultrathink to design the minimal fix
+   - NO over-engineering, NO unnecessary abstractions
+   - NO hardcoding unless absolutely required
+   - Follow existing patterns exactly
 
-## Output Format
-When complete, output ONE of these markers on its own line:
-- FIX_COMPLETE - if fix is done and ALL tests pass locally
-- FIX_INCOMPLETE - if you cannot complete the fix
-- ALREADY_FIXED - if the issue has already been resolved in the codebase
+5. **Implement the fix:**
+   - Make ONLY changes that directly address the issue
+   - Add tests if project has test files and it makes sense
+   - Each test must verify the specific fix
 
-Also output: TESTS_PASSED: true/false
+### Phase 3: Verification (ALL MUST PASS)
 
-Be thorough but concise. You have full control - make it work.`,
+6. **Run ALL project tests:**
+   - Find test command from: Makefile, package.json, CI config
+   - Run: go test ./... OR npm test OR pytest OR make test
+   - If tests fail: FIX them and re-run
+   - Do NOT proceed until ALL tests pass
+
+7. **Format and lint:**
+   - Go: gofmt -w .
+   - JS/TS: prettier (if used)
+   - Python: black/ruff (if used)
+   - Run project's own lint: make lint, npm run lint, etc.
+
+### Phase 4: Final Commit
+
+8. **Git config and commit:**
+   git config user.name "majiayu000"
+   git config user.email "1835304752@qq.com"
+   git add -A
+   git commit -s -m "fix: <concise description>"
+
+### Quality Checklist (verify ALL before FIX_COMPLETE)
+- [ ] Fix addresses the actual issue requirement
+- [ ] No debug code, no console.log, no print statements left
+- [ ] No unrelated changes included
+- [ ] All existing tests pass
+- [ ] New tests added where appropriate
+- [ ] Code follows project style
+- [ ] No hardcoded values unless necessary
+
+## Output Markers (output ONE on its own line)
+- FIX_COMPLETE - fix done, ALL tests pass locally
+- FIX_INCOMPLETE - cannot complete (explain why)
+- ALREADY_FIXED - issue already resolved in codebase
+
+Also output: TESTS_PASSED: true/false`,
 		issue.IssueNumber, issue.Repo, issue.Title, issue.Body)
 }
 
@@ -749,50 +771,66 @@ func (e *Executor) buildReviewPrompt(issue *models.Issue, changedFiles []string,
 ## Changed Files
 %s
 
-## Your Task: Review, Fix, and Create PR
+## Review & Submit Process (up to %d review rounds)
 
-You have FULL CONTROL. Do the following:
+### Step 1: Critical Review with ultrathink
 
-### Step 1: Review (up to %d rounds)
-Check these items:
-1. **Does it solve the issue?** - Do the changes actually fix what the issue describes?
-2. **Over-engineering?** - Are there unnecessary abstractions, features, or complexity?
-3. **Code quality** - Is the code clean, readable, and follows project conventions?
-4. **Minimal changes** - Are there any unrelated changes that should be removed?
-5. **Tests** - Are tests added/updated appropriately?
-6. **Security** - Any security concerns?
+Use ultrathink to deeply analyze:
 
-If you find issues, FIX THEM directly - edit files, run tests, then review again.
+1. **Does it ACTUALLY solve the issue?**
+   - Re-read the issue carefully
+   - Verify the fix addresses the REAL requirement
+   - Check for misunderstandings of the issue intent
 
-### Step 2: Prepare Final Commit
-Once review passes:
-1. Run all tests one final time to ensure they pass
-2. Format code properly (gofmt, prettier, etc.)
-3. Stage all changes: git add -A
-4. Commit with DCO sign-off:
-   git config user.name "majiayu000"
-   git config user.email "1835304752@qq.com"
-   git commit -s -m "fix: <concise description>"
+2. **Is it minimal and correct?**
+   - Remove any over-engineering
+   - Remove unnecessary abstractions
+   - Remove unrelated changes
+   - NO hardcoded values unless necessary
 
-### Step 3: Push and Create Pull Request
-After committing:
-1. Get the current branch name: git branch --show-current
-2. Push changes to fork remote: git push fork <branch-name> --force
-3. Get default branch: gh repo view %s --json defaultBranchRef -q .defaultBranchRef.name
-4. Create PR:
+3. **Code quality check:**
+   - Follows project conventions
+   - No debug code or print statements left
+   - Clean and readable
 
-gh pr create --repo %s --title "fix: %s" --body "## Summary
-This PR fixes #%d
+4. **Tests verification:**
+   - Run ALL project tests
+   - Fix any failures before proceeding
+
+If issues found: FIX them, run tests again, re-review.
+
+### Step 2: Final Verification
+
+Before creating PR, verify:
+- [ ] All tests pass: go test ./... OR npm test OR pytest
+- [ ] Code is formatted: gofmt -w . OR prettier OR black
+- [ ] Lint passes: make lint OR npm run lint (if exists)
+
+### Step 3: Commit and Push
+
+git config user.name "majiayu000"
+git config user.email "1835304752@qq.com"
+git add -A
+git commit -s -m "fix: <concise description>"
+
+Get branch: git branch --show-current
+Push: git push fork <branch-name> --force
+
+### Step 4: Create Pull Request
+
+Get default branch:
+gh repo view %s --json defaultBranchRef -q .defaultBranchRef.name
+
+Create PR (keep body SHORT and direct):
+gh pr create --repo %s --title "fix: %s" --body "Fixes #%d
 
 ## Changes
-<list the key changes>" --head majiayu000:<branch-name> --base <default-branch>
+- <key change 1>
+- <key change 2>" --head majiayu000:<branch-name> --base <default-branch>
 
 ### Output
-When complete, output one of:
-- REVIEW_PASSED - if PR was created successfully (include the PR URL in your output)
-- REVIEW_FAILED - if changes are fundamentally broken and cannot be fixed
-
-Start now.`,
+- REVIEW_PASSED - PR created (include PR URL)
+- REVIEW_FAILED - cannot fix (explain why)`,
 		issue.IssueNumber, issue.Repo, issue.Title, issue.Body,
 		strings.Join(changedFiles, "\n"), maxRounds,
 		issue.Repo, issue.Repo, issue.Title, issue.IssueNumber)

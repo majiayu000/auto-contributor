@@ -175,6 +175,15 @@ func (db *DB) Migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_repo_metrics_repo ON repo_metrics(repo);
 	CREATE INDEX IF NOT EXISTS idx_repo_metrics_language ON repo_metrics(language);
+
+	CREATE TABLE IF NOT EXISTS blacklist (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo TEXT NOT NULL UNIQUE,
+		reason TEXT,
+		added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_blacklist_repo ON blacklist(repo);
 	`
 
 	_, err := db.Exec(schema)
@@ -379,6 +388,7 @@ func (db *DB) GetAttemptCount(issueID int64) (int, error) {
 
 // ClaimNextPendingIssue atomically claims the highest-scored pending issue for a worker
 // Returns nil if no pending issues are available
+// Excludes blacklisted repositories
 func (db *DB) ClaimNextPendingIssue(workerID int) (*models.Issue, error) {
 	tx, err := db.Begin()
 	if err != nil {
@@ -386,12 +396,13 @@ func (db *DB) ClaimNextPendingIssue(workerID int) (*models.Issue, error) {
 	}
 	defer tx.Rollback()
 
-	// Find the highest-scored pending issue
+	// Find the highest-scored pending issue that's not blacklisted
 	row := tx.QueryRow(`
-		SELECT id, repo, issue_number, title, body, labels, language, difficulty_score, status, retry_count, discovered_at, updated_at
-		FROM issues
-		WHERE status = 'pending'
-		ORDER BY difficulty_score DESC
+		SELECT i.id, i.repo, i.issue_number, i.title, i.body, i.labels, i.language, i.difficulty_score, i.status, i.retry_count, i.discovered_at, i.updated_at
+		FROM issues i
+		LEFT JOIN blacklist b ON i.repo = b.repo
+		WHERE i.status = 'pending' AND b.repo IS NULL
+		ORDER BY i.difficulty_score DESC
 		LIMIT 1
 	`)
 
@@ -747,4 +758,49 @@ func (db *DB) GetTokenUsageStats() (map[string]interface{}, error) {
 	}
 
 	return stats, nil
+}
+
+// AddToBlacklist adds a repository to the blacklist
+func (db *DB) AddToBlacklist(repo, reason string) error {
+	_, err := db.Exec(`
+		INSERT INTO blacklist (repo, reason) VALUES (?, ?)
+		ON CONFLICT(repo) DO UPDATE SET reason = excluded.reason
+	`, repo, reason)
+	return err
+}
+
+// RemoveFromBlacklist removes a repository from the blacklist
+func (db *DB) RemoveFromBlacklist(repo string) error {
+	_, err := db.Exec(`DELETE FROM blacklist WHERE repo = ?`, repo)
+	return err
+}
+
+// IsBlacklisted checks if a repository is blacklisted
+func (db *DB) IsBlacklisted(repo string) (bool, error) {
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM blacklist WHERE repo = ?`, repo).Scan(&count)
+	return count > 0, err
+}
+
+// GetBlacklist returns all blacklisted repositories
+func (db *DB) GetBlacklist() ([]*models.BlacklistEntry, error) {
+	rows, err := db.Query(`SELECT id, repo, reason, added_at FROM blacklist ORDER BY added_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*models.BlacklistEntry
+	for rows.Next() {
+		entry := &models.BlacklistEntry{}
+		var reason sql.NullString
+		if err := rows.Scan(&entry.ID, &entry.Repo, &reason, &entry.AddedAt); err != nil {
+			continue
+		}
+		if reason.Valid {
+			entry.Reason = reason.String
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }

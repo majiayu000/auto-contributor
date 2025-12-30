@@ -116,6 +116,8 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/stats/repos", s.handleRepoMetrics)
 	mux.HandleFunc("/api/stats/failures", s.handleFailureStats)
 	mux.HandleFunc("/api/stats/tokens", s.handleTokenStats)
+	// Blacklist endpoints
+	mux.HandleFunc("/api/blacklist", s.handleBlacklist)
 
 	addr := fmt.Sprintf(":%d", s.config.WebPort)
 	fmt.Printf("Web server starting on %s\n", addr)
@@ -315,6 +317,55 @@ func (s *Server) broadcast(status *worker.WorkerStatus) {
 		default:
 			// Client buffer full, skip
 		}
+	}
+}
+
+// handleBlacklist handles blacklist CRUD operations
+func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case http.MethodGet:
+		entries, err := s.db.GetBlacklist()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(entries)
+
+	case http.MethodPost:
+		var req struct {
+			Repo   string `json:"repo"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Repo == "" {
+			http.Error(w, "repo is required", http.StatusBadRequest)
+			return
+		}
+		if err := s.db.AddToBlacklist(req.Repo, req.Reason); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "added", "repo": req.Repo})
+
+	case http.MethodDelete:
+		repo := r.URL.Query().Get("repo")
+		if repo == "" {
+			http.Error(w, "repo query param required", http.StatusBadRequest)
+			return
+		}
+		if err := s.db.RemoveFromBlacklist(repo); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "removed", "repo": repo})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 

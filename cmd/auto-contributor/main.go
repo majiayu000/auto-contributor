@@ -207,6 +207,13 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Found %d issues:\n\n", len(issues))
 
 	for _, issue := range issues {
+		// Check blacklist before saving
+		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
+		if isBlacklisted {
+			fmt.Printf("Skipping blacklisted repo: %s\n", issue.Repo)
+			continue
+		}
+
 		// Save to database
 		if err := database.CreateIssue(issue); err != nil {
 			fmt.Printf("Warning: failed to save issue %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
@@ -461,6 +468,16 @@ func runCycle(ctx context.Context) {
 			continue
 		}
 
+		// Check blacklist before saving
+		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
+		if isBlacklisted {
+			log.Debug("skipping blacklisted repo",
+				"repo", issue.Repo,
+				"issue", issue.IssueNumber,
+			)
+			continue
+		}
+
 		dbIssue := &models.Issue{
 			Repo:            issue.Repo,
 			IssueNumber:     issue.IssueNumber,
@@ -640,6 +657,13 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 		fmt.Println("💾 Saving high-scoring issues to database...")
 		for _, issue := range result.Issues {
 			if issue.SuitabilityScore >= 0.7 {
+				// Check blacklist before saving
+				isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
+				if isBlacklisted {
+					fmt.Printf("   ⚫ Skipping blacklisted repo: %s\n", issue.Repo)
+					continue
+				}
+
 				dbIssue := &models.Issue{
 					Repo:            issue.Repo,
 					IssueNumber:     issue.IssueNumber,
