@@ -437,6 +437,14 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		attempt.ClaudeOutputPreview = solveResult.Output
 	}
 
+	// Check if issue was already fixed in the codebase
+	if solveResult.AlreadyFixed {
+		result.Error = fmt.Errorf("issue already fixed in codebase")
+		attempt.FailureReason = models.FailureReasonAlreadyFixed
+		w.handleFailure(issue, models.FailureReasonAlreadyFixed, "Issue already fixed in codebase")
+		return
+	}
+
 	// Check if fix is complete
 	if !solveResult.FixComplete || len(solveResult.FilesChanged) == 0 {
 		result.Error = fmt.Errorf("fix incomplete or no changes made")
@@ -460,53 +468,38 @@ func (w *Worker) processIssue(issue *models.Issue) {
 
 	w.updateStatus(PhaseValidating, 0.8, "Claude completed fix with passing tests")
 
-	// Phase 6: Create PR
-	w.updateStatus(PhaseCreatingPR, 0.9, "Creating pull request...")
+	// Phase 6: Review, Fix, and Create PR (all handled by Claude)
+	w.updateStatus(PhaseCreatingPR, 0.9, "Claude is reviewing and creating PR...")
 
-	// Commit changes only if there are uncommitted changes
-	// (Claude may have already committed as part of the solve phase)
-	if hasUncommittedChanges(repoDir) {
-		commitMsg := fmt.Sprintf("fix: %s\n\nFixes #%d", issue.Title, issue.IssueNumber)
-		if err := w.pool.executor.CommitChanges(repoDir, commitMsg); err != nil {
-			result.Error = fmt.Errorf("commit failed: %w", err)
-			return
-		}
-	}
-
-	// Fork and push
+	// Fork repo first (needed for PR creation)
 	err = w.pool.ghClient.ForkRepo(w.pool.ctx, issue.Repo)
 	if err != nil && !isAlreadyForked(err) {
 		result.Error = fmt.Errorf("fork failed: %w", err)
 		return
 	}
 
-	// Add fork as remote and push
+	// Add fork as remote
 	forkRemote := fmt.Sprintf("https://github.com/%s/%s.git",
 		w.pool.config.GitHubUsername,
 		filepath.Base(issue.Repo))
-
-	// Configure remote
 	configureRemote(repoDir, "fork", forkRemote)
 
+	// Push current branch to fork (Claude will commit and push final changes if needed)
 	if err := w.pool.executor.PushBranch(repoDir, "fork", branchName); err != nil {
 		result.Error = fmt.Errorf("push failed: %w", err)
 		return
 	}
 
-	// Create PR
-	prTitle := fmt.Sprintf("fix: %s", issue.Title)
-	prBody := fmt.Sprintf(`## Summary
-This PR fixes #%d
-
-## Changes
-%s`,
-		issue.IssueNumber,
-		formatChangedFiles(solveResult.FilesChanged))
-
-	head := fmt.Sprintf("%s:%s", w.pool.config.GitHubUsername, branchName)
-	prURL, prNumber, err := w.pool.ghClient.CreatePullRequest(w.pool.ctx, issue.Repo, prTitle, prBody, head, "main")
+	// Let Claude review, fix any issues, and create PR
+	reviewResult, err := w.pool.executor.Review(w.pool.ctx, repoDir, issue, 3)
 	if err != nil {
-		result.Error = fmt.Errorf("create PR failed: %w", err)
+		result.Error = fmt.Errorf("review failed: %w", err)
+		attempt.FailureReason = models.FailureReasonPRFailed
+		return
+	}
+
+	if !reviewResult.Passed || reviewResult.PRURL == "" {
+		result.Error = fmt.Errorf("review failed or PR not created: %s", reviewResult.Output)
 		attempt.FailureReason = models.FailureReasonPRFailed
 		return
 	}
@@ -514,13 +507,13 @@ This PR fixes #%d
 	// Success!
 	result.Success = true
 	result.PRCreated = true
-	result.PRURL = prURL
+	result.PRURL = reviewResult.PRURL
 
 	// Save PR to database
 	prRecord := &models.PullRequest{
 		IssueID:    issue.ID,
-		PRURL:      prURL,
-		PRNumber:   prNumber,
+		PRURL:      reviewResult.PRURL,
+		PRNumber:   reviewResult.PRNumber,
 		BranchName: branchName,
 		Status:     models.PRStatusOpen,
 		CIStatus:   "pending",

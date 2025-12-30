@@ -206,17 +206,12 @@ gh search repos "cli OR tool OR framework" --language=%s --stars=">1000" --sort=
 对于每个找到的库，执行：
 gh issue list --repo <owner/repo> --state open --label "good first issue,help wanted,bug" --json number,title,createdAt --limit 15
 
-### 第三步：关键！验证issue没有关联的PR
-对于每个候选issue，**必须**验证没有PR：
+### 第三步：验证issue没有关联的PR
+对于每个候选issue，用**一次**API调用验证：
 
-# 方法1：搜索是否有PR提到这个issue
-gh pr list --repo <owner/repo> --state open --search "fixes #<number> OR closes #<number> OR resolves #<number>"
+gh pr list --repo <owner/repo> --state all --search "<issue_number>" --limit 1
 
-# 方法2：搜索PR标题是否包含issue关键词
-gh pr list --repo <owner/repo> --state open --search "<issue标题关键词>"
-
-# 方法3：查看issue详情，看是否有人评论说在处理
-gh issue view <number> --repo <owner/repo> --json comments
+如果返回为空，说明没有PR关联。不要用多种方法重复验证！
 
 ### 第四步：递归降级搜索
 如果高星库(>1000)的issue都有PR了，自动降级：

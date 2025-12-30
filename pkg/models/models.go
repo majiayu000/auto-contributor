@@ -39,6 +39,7 @@ const (
 	FailureReasonPRFailed         FailureReason = "pr_failed"
 	FailureReasonComplexityHigh   FailureReason = "complexity_too_high"
 	FailureReasonAlreadyHasPR     FailureReason = "already_has_pr"
+	FailureReasonAlreadyFixed     FailureReason = "already_fixed"
 	FailureReasonUnknown          FailureReason = "unknown"
 )
 
@@ -67,7 +68,7 @@ func (r FailureReason) IsRetryable() bool {
 	switch r {
 	case FailureReasonTestsFailed, FailureReasonTimeout, FailureReasonCloneFailed, FailureReasonNoChanges:
 		return true
-	case FailureReasonAlreadyHasPR, FailureReasonComplexityHigh:
+	case FailureReasonAlreadyHasPR, FailureReasonComplexityHigh, FailureReasonAlreadyFixed:
 		return false
 	default:
 		return false

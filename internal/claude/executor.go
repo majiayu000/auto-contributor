@@ -21,6 +21,7 @@ import (
 type Result struct {
 	Success           bool
 	FixComplete       bool
+	AlreadyFixed      bool
 	TestsPassed       *bool
 	IsComplex         *bool
 	CanTestLocally    *bool
@@ -358,6 +359,7 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 	}
 
 	// Parse markers from output
+	result.AlreadyFixed = strings.Contains(output, "ALREADY_FIXED")
 	result.FixComplete = strings.Contains(output, "FIX_COMPLETE")
 	if strings.Contains(output, "FIX_INCOMPLETE") {
 		result.FixComplete = false
@@ -405,6 +407,16 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
 
 ## CRITICAL Instructions (Follow ALL steps)
 
+0. **FIRST: Verify the issue still needs fixing:**
+   - Search the codebase to check if the feature/fix described in this issue ALREADY EXISTS
+   - Look for functions, methods, or code that already implements what the issue is asking for
+   - Check recent commits or changes that might have addressed this
+   - If the issue is ALREADY FIXED or the feature ALREADY EXISTS:
+     * Output: ALREADY_FIXED
+     * Explain what you found and where the existing implementation is
+     * Do NOT make any changes
+     * Stop here - do not continue to other steps
+
 1. **Understand the codebase first:**
    - Read CONTRIBUTING.md if it exists
    - Check .github/workflows/*.yml to understand CI requirements
@@ -435,6 +447,7 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
 When complete, output ONE of these markers on its own line:
 - FIX_COMPLETE - if fix is done and ALL tests pass locally
 - FIX_INCOMPLETE - if you cannot complete the fix
+- ALREADY_FIXED - if the issue has already been resolved in the codebase
 
 Also output: TESTS_PASSED: true/false
 
@@ -643,6 +656,146 @@ Be concise.`, strings.Join(changedFiles, "\n"))
 	}
 
 	return result, nil
+}
+
+// ReviewResult holds the result of code review
+type ReviewResult struct {
+	Passed  bool
+	PRURL   string
+	PRNumber int
+	Output  string
+}
+
+// Review runs Claude to review, fix, and create PR
+// Claude has full control over the entire process
+func (e *Executor) Review(ctx context.Context, repoDir string, issue *models.Issue, maxRounds int) (*ReviewResult, error) {
+	if maxRounds <= 0 {
+		maxRounds = 3
+	}
+
+	e.addOutput("info", fmt.Sprintf("Starting review for %s#%d", issue.Repo, issue.IssueNumber))
+
+	// Get changed files for context
+	changedFiles := e.getChangedFiles(repoDir)
+	if len(changedFiles) == 0 {
+		return &ReviewResult{Passed: false, Output: "No changes to review"}, nil
+	}
+
+	prompt := e.buildReviewPrompt(issue, changedFiles, maxRounds)
+
+	timeout := e.config.ClaudeTimeout
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "claude",
+		"--print",
+		"--dangerously-skip-permissions",
+		"-p", prompt,
+		"--output-format", "text")
+	cmd.Dir = repoDir
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("review failed: %w", err)
+	}
+
+	outputStr := string(output)
+	result := &ReviewResult{
+		Output: outputStr,
+	}
+
+	// Parse review result
+	if strings.Contains(outputStr, "REVIEW_PASSED") {
+		result.Passed = true
+		// Try to extract PR URL from output
+		result.PRURL, result.PRNumber = extractPRURL(outputStr)
+	} else if strings.Contains(outputStr, "REVIEW_FAILED") {
+		result.Passed = false
+	} else {
+		// Check if PR was created even without explicit marker
+		prURL, prNum := extractPRURL(outputStr)
+		if prURL != "" {
+			result.Passed = true
+			result.PRURL = prURL
+			result.PRNumber = prNum
+		}
+	}
+
+	return result, nil
+}
+
+// extractPRURL extracts PR URL from Claude's output
+func extractPRURL(output string) (string, int) {
+	// Look for GitHub PR URL pattern
+	prPattern := regexp.MustCompile(`https://github\.com/[^/]+/[^/]+/pull/(\d+)`)
+	matches := prPattern.FindStringSubmatch(output)
+	if len(matches) >= 2 {
+		prNum := 0
+		fmt.Sscanf(matches[1], "%d", &prNum)
+		return matches[0], prNum
+	}
+	return "", 0
+}
+
+// buildReviewPrompt constructs the prompt for reviewing, fixing, and preparing PR
+func (e *Executor) buildReviewPrompt(issue *models.Issue, changedFiles []string, maxRounds int) string {
+	return fmt.Sprintf(`You are reviewing code changes for GitHub issue #%d in repository %s.
+
+## Issue
+**Title:** %s
+**Body:**
+%s
+
+## Changed Files
+%s
+
+## Your Task: Review, Fix, and Create PR
+
+You have FULL CONTROL. Do the following:
+
+### Step 1: Review (up to %d rounds)
+Check these items:
+1. **Does it solve the issue?** - Do the changes actually fix what the issue describes?
+2. **Over-engineering?** - Are there unnecessary abstractions, features, or complexity?
+3. **Code quality** - Is the code clean, readable, and follows project conventions?
+4. **Minimal changes** - Are there any unrelated changes that should be removed?
+5. **Tests** - Are tests added/updated appropriately?
+6. **Security** - Any security concerns?
+
+If you find issues, FIX THEM directly - edit files, run tests, then review again.
+
+### Step 2: Prepare Final Commit
+Once review passes:
+1. Run all tests one final time to ensure they pass
+2. Format code properly (gofmt, prettier, etc.)
+3. Stage all changes: git add -A
+4. Commit with DCO sign-off:
+   git config user.name "majiayu000"
+   git config user.email "1835304752@qq.com"
+   git commit -s -m "fix: <concise description>"
+
+### Step 3: Push and Create Pull Request
+After committing:
+1. Get the current branch name: git branch --show-current
+2. Push changes to fork remote: git push fork <branch-name> --force
+3. Get default branch: gh repo view %s --json defaultBranchRef -q .defaultBranchRef.name
+4. Create PR:
+
+gh pr create --repo %s --title "fix: %s" --body "## Summary
+This PR fixes #%d
+
+## Changes
+<list the key changes>" --head majiayu000:<branch-name> --base <default-branch>
+
+### Output
+When complete, output one of:
+- REVIEW_PASSED - if PR was created successfully (include the PR URL in your output)
+- REVIEW_FAILED - if changes are fundamentally broken and cannot be fixed
+
+Start now.`,
+		issue.IssueNumber, issue.Repo, issue.Title, issue.Body,
+		strings.Join(changedFiles, "\n"), maxRounds,
+		issue.Repo, issue.Repo, issue.Title, issue.IssueNumber)
 }
 
 // binaryExtensions contains file extensions that are typically binary

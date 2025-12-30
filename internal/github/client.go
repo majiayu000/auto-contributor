@@ -154,6 +154,7 @@ func (c *Client) buildSearchQuery() string {
 type RepoInfo struct {
 	Stars           int
 	Language        string
+	DefaultBranch   string
 	HasContributing bool
 	HasClaudeMD     bool
 	TestFramework   string
@@ -162,7 +163,7 @@ type RepoInfo struct {
 // GetRepoInfo fetches repository information using gh
 func (c *Client) GetRepoInfo(ctx context.Context, repoFullName string) (*RepoInfo, error) {
 	cmd := exec.CommandContext(ctx, "gh", "repo", "view", repoFullName,
-		"--json", "stargazerCount,primaryLanguage")
+		"--json", "stargazerCount,primaryLanguage,defaultBranchRef")
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -170,19 +171,28 @@ func (c *Client) GetRepoInfo(ctx context.Context, repoFullName string) (*RepoInf
 	}
 
 	var result struct {
-		StargazerCount  int `json:"stargazerCount"`
-		PrimaryLanguage struct {
+		StargazerCount   int `json:"stargazerCount"`
+		PrimaryLanguage  struct {
 			Name string `json:"name"`
 		} `json:"primaryLanguage"`
+		DefaultBranchRef struct {
+			Name string `json:"name"`
+		} `json:"defaultBranchRef"`
 	}
 
 	if err := json.Unmarshal(output, &result); err != nil {
 		return nil, err
 	}
 
+	defaultBranch := result.DefaultBranchRef.Name
+	if defaultBranch == "" {
+		defaultBranch = "main" // fallback
+	}
+
 	info := &RepoInfo{
-		Stars:    result.StargazerCount,
-		Language: result.PrimaryLanguage.Name,
+		Stars:         result.StargazerCount,
+		Language:      result.PrimaryLanguage.Name,
+		DefaultBranch: defaultBranch,
 	}
 
 	// Check for CONTRIBUTING.md
