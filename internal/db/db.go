@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -61,12 +62,17 @@ func (db *DB) Migrate() error {
 		status TEXT DEFAULT 'open',
 		ci_status TEXT DEFAULT 'pending',
 		retry_count INTEGER DEFAULT 0,
+		merged_at DATETIME,
+		closed_at DATETIME,
+		review_comment_count INTEGER DEFAULT 0,
+		first_review_at DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (issue_id) REFERENCES issues(id)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_prs_status ON pull_requests(status);
+	CREATE INDEX IF NOT EXISTS idx_prs_merged ON pull_requests(merged_at);
 
 	CREATE TABLE IF NOT EXISTS solve_attempts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,11 +97,17 @@ func (db *DB) Migrate() error {
 		success INTEGER DEFAULT 0,
 		failure_reason TEXT,
 		error_details TEXT,
+		prompt_tokens INTEGER DEFAULT 0,
+		completion_tokens INTEGER DEFAULT 0,
+		total_tokens INTEGER DEFAULT 0,
+		lines_added INTEGER DEFAULT 0,
+		lines_deleted INTEGER DEFAULT 0,
 		FOREIGN KEY (issue_id) REFERENCES issues(id)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_attempts_issue ON solve_attempts(issue_id);
 	CREATE INDEX IF NOT EXISTS idx_attempts_started ON solve_attempts(started_at);
+	CREATE INDEX IF NOT EXISTS idx_attempts_success ON solve_attempts(success);
 
 	CREATE TABLE IF NOT EXISTS issue_metrics (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,6 +152,29 @@ func (db *DB) Migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_stats(date);
+
+	CREATE TABLE IF NOT EXISTS repo_metrics (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo TEXT NOT NULL UNIQUE,
+		language TEXT,
+		stars INTEGER DEFAULT 0,
+		success_count INTEGER DEFAULT 0,
+		attempt_count INTEGER DEFAULT 0,
+		prs_created INTEGER DEFAULT 0,
+		prs_merged INTEGER DEFAULT 0,
+		prs_closed INTEGER DEFAULT 0,
+		avg_duration_seconds REAL DEFAULT 0,
+		avg_time_to_merge REAL DEFAULT 0,
+		total_tokens_used INTEGER DEFAULT 0,
+		total_lines_changed INTEGER DEFAULT 0,
+		has_contributing INTEGER DEFAULT 0,
+		has_claude_md INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_repo_metrics_repo ON repo_metrics(repo);
+	CREATE INDEX IF NOT EXISTS idx_repo_metrics_language ON repo_metrics(language);
 	`
 
 	_, err := db.Exec(schema)
@@ -147,8 +182,17 @@ func (db *DB) Migrate() error {
 		return err
 	}
 
-	// Add retry_count column if it doesn't exist (migration for existing DBs)
+	// Migrations for existing DBs
 	db.Exec("ALTER TABLE issues ADD COLUMN retry_count INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE pull_requests ADD COLUMN merged_at DATETIME")
+	db.Exec("ALTER TABLE pull_requests ADD COLUMN closed_at DATETIME")
+	db.Exec("ALTER TABLE pull_requests ADD COLUMN review_comment_count INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE pull_requests ADD COLUMN first_review_at DATETIME")
+	db.Exec("ALTER TABLE solve_attempts ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE solve_attempts ADD COLUMN completion_tokens INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE solve_attempts ADD COLUMN total_tokens INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE solve_attempts ADD COLUMN lines_added INTEGER DEFAULT 0")
+	db.Exec("ALTER TABLE solve_attempts ADD COLUMN lines_deleted INTEGER DEFAULT 0")
 
 	return nil
 }
@@ -437,6 +481,269 @@ func (db *DB) GetStats(days int) (map[string]interface{}, error) {
 		stats["avg_duration_seconds"] = avgDuration.Float64
 	} else {
 		stats["avg_duration_seconds"] = 0.0
+	}
+
+	return stats, nil
+}
+
+// GetPRMetrics returns PR-related aggregate statistics
+func (db *DB) GetPRMetrics() (*models.PRMetrics, error) {
+	metrics := &models.PRMetrics{}
+
+	// Get PR counts by status
+	db.QueryRow(`SELECT COUNT(*) FROM pull_requests`).Scan(&metrics.TotalPRs)
+	db.QueryRow(`SELECT COUNT(*) FROM pull_requests WHERE status = 'open'`).Scan(&metrics.OpenPRs)
+	db.QueryRow(`SELECT COUNT(*) FROM pull_requests WHERE status = 'merged'`).Scan(&metrics.MergedPRs)
+	db.QueryRow(`SELECT COUNT(*) FROM pull_requests WHERE status = 'closed'`).Scan(&metrics.ClosedPRs)
+
+	// Calculate merge rate
+	if metrics.TotalPRs > 0 {
+		metrics.MergeRate = float64(metrics.MergedPRs) / float64(metrics.TotalPRs)
+	}
+
+	// Average time to merge (in hours)
+	var avgMerge sql.NullFloat64
+	db.QueryRow(`
+		SELECT AVG((julianday(merged_at) - julianday(created_at)) * 24)
+		FROM pull_requests
+		WHERE merged_at IS NOT NULL
+	`).Scan(&avgMerge)
+	if avgMerge.Valid {
+		metrics.AvgTimeToMerge = avgMerge.Float64
+	}
+
+	// Average time to first review (in hours)
+	var avgReview sql.NullFloat64
+	db.QueryRow(`
+		SELECT AVG((julianday(first_review_at) - julianday(created_at)) * 24)
+		FROM pull_requests
+		WHERE first_review_at IS NOT NULL
+	`).Scan(&avgReview)
+	if avgReview.Valid {
+		metrics.AvgTimeToFirstReview = avgReview.Float64
+	}
+
+	// Average review comments
+	var avgComments sql.NullFloat64
+	db.QueryRow(`SELECT AVG(review_comment_count) FROM pull_requests`).Scan(&avgComments)
+	if avgComments.Valid {
+		metrics.AvgReviewComments = avgComments.Float64
+	}
+
+	return metrics, nil
+}
+
+// GetLanguageMetrics returns metrics grouped by programming language
+func (db *DB) GetLanguageMetrics() ([]*models.LanguageMetrics, error) {
+	rows, err := db.Query(`
+		SELECT
+			i.language,
+			COUNT(DISTINCT sa.id) as attempt_count,
+			SUM(CASE WHEN sa.success = 1 THEN 1 ELSE 0 END) as success_count,
+			AVG(sa.duration_seconds) as avg_duration,
+			SUM(sa.total_tokens) as total_tokens,
+			COUNT(DISTINCT pr.id) as prs_created,
+			SUM(CASE WHEN pr.status = 'merged' THEN 1 ELSE 0 END) as prs_merged
+		FROM issues i
+		LEFT JOIN solve_attempts sa ON i.id = sa.issue_id
+		LEFT JOIN pull_requests pr ON i.id = pr.issue_id
+		WHERE i.language IS NOT NULL AND i.language != ''
+		GROUP BY i.language
+		ORDER BY attempt_count DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var metrics []*models.LanguageMetrics
+	for rows.Next() {
+		m := &models.LanguageMetrics{}
+		var avgDuration, totalTokens sql.NullFloat64
+		var prsCreated, prsMerged sql.NullInt64
+		err := rows.Scan(&m.Language, &m.AttemptCount, &m.SuccessCount, &avgDuration, &totalTokens, &prsCreated, &prsMerged)
+		if err != nil {
+			continue
+		}
+		if avgDuration.Valid {
+			m.AvgDurationSeconds = avgDuration.Float64
+		}
+		if totalTokens.Valid {
+			m.TotalTokensUsed = int(totalTokens.Float64)
+		}
+		if prsCreated.Valid {
+			m.PRsCreated = int(prsCreated.Int64)
+		}
+		if prsMerged.Valid {
+			m.PRsMerged = int(prsMerged.Int64)
+		}
+		if m.AttemptCount > 0 {
+			m.SuccessRate = float64(m.SuccessCount) / float64(m.AttemptCount)
+		}
+		if m.PRsCreated > 0 {
+			m.MergeRate = float64(m.PRsMerged) / float64(m.PRsCreated)
+		}
+		metrics = append(metrics, m)
+	}
+
+	return metrics, nil
+}
+
+// GetRepoMetrics returns metrics for a specific repository or all repos
+func (db *DB) GetRepoMetrics(repo string) ([]*models.RepoMetrics, error) {
+	query := `
+		SELECT
+			i.repo,
+			i.language,
+			COUNT(DISTINCT sa.id) as attempt_count,
+			SUM(CASE WHEN sa.success = 1 THEN 1 ELSE 0 END) as success_count,
+			AVG(sa.duration_seconds) as avg_duration,
+			SUM(sa.total_tokens) as total_tokens,
+			SUM(sa.lines_added + sa.lines_deleted) as total_lines,
+			COUNT(DISTINCT pr.id) as prs_created,
+			SUM(CASE WHEN pr.status = 'merged' THEN 1 ELSE 0 END) as prs_merged,
+			SUM(CASE WHEN pr.status = 'closed' THEN 1 ELSE 0 END) as prs_closed
+		FROM issues i
+		LEFT JOIN solve_attempts sa ON i.id = sa.issue_id
+		LEFT JOIN pull_requests pr ON i.id = pr.issue_id
+		%s
+		GROUP BY i.repo
+		ORDER BY attempt_count DESC
+	`
+
+	whereClause := ""
+	var rows *sql.Rows
+	var err error
+	if repo != "" {
+		whereClause = "WHERE i.repo = ?"
+		rows, err = db.Query(fmt.Sprintf(query, whereClause), repo)
+	} else {
+		rows, err = db.Query(fmt.Sprintf(query, whereClause))
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var metrics []*models.RepoMetrics
+	for rows.Next() {
+		m := &models.RepoMetrics{}
+		var avgDuration, totalTokens, totalLines sql.NullFloat64
+		var prsCreated, prsMerged, prsClosed sql.NullInt64
+		err := rows.Scan(&m.Repo, &m.Language, &m.AttemptCount, &m.SuccessCount, &avgDuration, &totalTokens, &totalLines, &prsCreated, &prsMerged, &prsClosed)
+		if err != nil {
+			continue
+		}
+		if avgDuration.Valid {
+			m.AvgDurationSeconds = avgDuration.Float64
+		}
+		if totalTokens.Valid {
+			m.TotalTokensUsed = int(totalTokens.Float64)
+		}
+		if totalLines.Valid {
+			m.TotalLinesChanged = int(totalLines.Float64)
+		}
+		if prsCreated.Valid {
+			m.PRsCreated = int(prsCreated.Int64)
+		}
+		if prsMerged.Valid {
+			m.PRsMerged = int(prsMerged.Int64)
+		}
+		if prsClosed.Valid {
+			m.PRsClosed = int(prsClosed.Int64)
+		}
+		metrics = append(metrics, m)
+	}
+
+	return metrics, nil
+}
+
+// GetFailureReasonStats returns failure counts grouped by reason
+func (db *DB) GetFailureReasonStats() (map[string]int, error) {
+	rows, err := db.Query(`
+		SELECT failure_reason, COUNT(*) as count
+		FROM solve_attempts
+		WHERE success = 0 AND failure_reason IS NOT NULL AND failure_reason != ''
+		GROUP BY failure_reason
+		ORDER BY count DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := make(map[string]int)
+	for rows.Next() {
+		var reason string
+		var count int
+		if err := rows.Scan(&reason, &count); err != nil {
+			continue
+		}
+		stats[reason] = count
+	}
+
+	return stats, nil
+}
+
+// UpdatePRStatus updates a PR's status and related timestamps
+func (db *DB) UpdatePRStatus(prID int64, status models.PRStatus) error {
+	now := time.Now()
+	switch status {
+	case models.PRStatusMerged:
+		_, err := db.Exec(`
+			UPDATE pull_requests SET status = ?, merged_at = ?, updated_at = ?
+			WHERE id = ?
+		`, status, now, now, prID)
+		return err
+	case models.PRStatusClosed:
+		_, err := db.Exec(`
+			UPDATE pull_requests SET status = ?, closed_at = ?, updated_at = ?
+			WHERE id = ?
+		`, status, now, now, prID)
+		return err
+	default:
+		_, err := db.Exec(`
+			UPDATE pull_requests SET status = ?, updated_at = ?
+			WHERE id = ?
+		`, status, now, prID)
+		return err
+	}
+}
+
+// GetTokenUsageStats returns token usage statistics
+func (db *DB) GetTokenUsageStats() (map[string]interface{}, error) {
+	stats := make(map[string]interface{})
+
+	var totalPrompt, totalCompletion, totalTokens sql.NullInt64
+	var avgPerAttempt sql.NullFloat64
+	db.QueryRow(`
+		SELECT SUM(prompt_tokens), SUM(completion_tokens), SUM(total_tokens), AVG(total_tokens)
+		FROM solve_attempts
+		WHERE total_tokens > 0
+	`).Scan(&totalPrompt, &totalCompletion, &totalTokens, &avgPerAttempt)
+
+	if totalPrompt.Valid {
+		stats["total_prompt_tokens"] = totalPrompt.Int64
+	}
+	if totalCompletion.Valid {
+		stats["total_completion_tokens"] = totalCompletion.Int64
+	}
+	if totalTokens.Valid {
+		stats["total_tokens"] = totalTokens.Int64
+	}
+	if avgPerAttempt.Valid {
+		stats["avg_tokens_per_attempt"] = avgPerAttempt.Float64
+	}
+
+	// Token usage by success/failure
+	var successTokens, failTokens sql.NullFloat64
+	db.QueryRow(`SELECT AVG(total_tokens) FROM solve_attempts WHERE success = 1 AND total_tokens > 0`).Scan(&successTokens)
+	db.QueryRow(`SELECT AVG(total_tokens) FROM solve_attempts WHERE success = 0 AND total_tokens > 0`).Scan(&failTokens)
+	if successTokens.Valid {
+		stats["avg_tokens_successful"] = successTokens.Float64
+	}
+	if failTokens.Valid {
+		stats["avg_tokens_failed"] = failTokens.Float64
 	}
 
 	return stats, nil

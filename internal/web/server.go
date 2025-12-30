@@ -110,6 +110,12 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/discovery", s.handleDiscoveryStatus)
 	mux.HandleFunc("/api/output", s.handleOutputBuffer)
 	mux.HandleFunc("/events", s.handleSSE)
+	// New metrics endpoints
+	mux.HandleFunc("/api/stats/prs", s.handlePRMetrics)
+	mux.HandleFunc("/api/stats/languages", s.handleLanguageMetrics)
+	mux.HandleFunc("/api/stats/repos", s.handleRepoMetrics)
+	mux.HandleFunc("/api/stats/failures", s.handleFailureStats)
+	mux.HandleFunc("/api/stats/tokens", s.handleTokenStats)
 
 	addr := fmt.Sprintf(":%d", s.config.WebPort)
 	fmt.Printf("Web server starting on %s\n", addr)
@@ -173,6 +179,67 @@ func (s *Server) handleIssues(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// handlePRMetrics returns PR merge rate and other PR statistics
+func (s *Server) handlePRMetrics(w http.ResponseWriter, r *http.Request) {
+	metrics, err := s.db.GetPRMetrics()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleLanguageMetrics returns statistics grouped by programming language
+func (s *Server) handleLanguageMetrics(w http.ResponseWriter, r *http.Request) {
+	metrics, err := s.db.GetLanguageMetrics()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleRepoMetrics returns statistics grouped by repository
+func (s *Server) handleRepoMetrics(w http.ResponseWriter, r *http.Request) {
+	repo := r.URL.Query().Get("repo")
+	metrics, err := s.db.GetRepoMetrics(repo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// handleFailureStats returns failure reason breakdown
+func (s *Server) handleFailureStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.db.GetFailureReasonStats()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// handleTokenStats returns token usage statistics
+func (s *Server) handleTokenStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.db.GetTokenUsageStats()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
 }
 
 // handleSSE handles Server-Sent Events for real-time updates

@@ -77,42 +77,71 @@ func (r FailureReason) IsRetryable() bool {
 
 // PullRequest represents a created pull request
 type PullRequest struct {
-	ID         int64     `db:"id"`
-	IssueID    int64     `db:"issue_id"`
-	PRURL      string    `db:"pr_url"`
-	PRNumber   int       `db:"pr_number"`
-	BranchName string    `db:"branch_name"`
-	Status     PRStatus  `db:"status"`
-	CIStatus   string    `db:"ci_status"`
-	RetryCount int       `db:"retry_count"`
-	CreatedAt  time.Time `db:"created_at"`
-	UpdatedAt  time.Time `db:"updated_at"`
+	ID                 int64      `db:"id" json:"id"`
+	IssueID            int64      `db:"issue_id" json:"issue_id"`
+	PRURL              string     `db:"pr_url" json:"pr_url"`
+	PRNumber           int        `db:"pr_number" json:"pr_number"`
+	BranchName         string     `db:"branch_name" json:"branch_name"`
+	Status             PRStatus   `db:"status" json:"status"`
+	CIStatus           string     `db:"ci_status" json:"ci_status"`
+	RetryCount         int        `db:"retry_count" json:"retry_count"`
+	MergedAt           *time.Time `db:"merged_at" json:"merged_at,omitempty"`
+	ClosedAt           *time.Time `db:"closed_at" json:"closed_at,omitempty"`
+	ReviewCommentCount int        `db:"review_comment_count" json:"review_comment_count"`
+	FirstReviewAt      *time.Time `db:"first_review_at" json:"first_review_at,omitempty"`
+	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// TimeToMerge returns the duration from PR creation to merge
+func (pr *PullRequest) TimeToMerge() *time.Duration {
+	if pr.MergedAt == nil {
+		return nil
+	}
+	d := pr.MergedAt.Sub(pr.CreatedAt)
+	return &d
+}
+
+// TimeToFirstReview returns the duration from PR creation to first review
+func (pr *PullRequest) TimeToFirstReview() *time.Duration {
+	if pr.FirstReviewAt == nil {
+		return nil
+	}
+	d := pr.FirstReviewAt.Sub(pr.CreatedAt)
+	return &d
 }
 
 // SolveAttempt records each attempt to solve an issue
 type SolveAttempt struct {
-	ID                  int64         `db:"id"`
-	IssueID             int64         `db:"issue_id"`
-	AttemptNumber       int           `db:"attempt_number"`
-	StartedAt           time.Time     `db:"started_at"`
-	CompletedAt         *time.Time    `db:"completed_at"`
-	DurationSeconds     float64       `db:"duration_seconds"`
-	PromptVersion       string        `db:"prompt_version"`
-	ModelUsed           string        `db:"model_used"`
-	FilesChanged        string        `db:"files_changed"` // JSON array
-	ClaudeOutputPreview string        `db:"claude_output_preview"`
-	FixCompleteMarker   bool          `db:"fix_complete_marker"`
-	ClaudeTestsPassed   *bool         `db:"claude_tests_passed"`
-	IsComplex           *bool         `db:"is_complex"`
-	CanTestLocally      *bool         `db:"can_test_locally"`
-	ComplexityReasons   string        `db:"complexity_reasons"` // JSON array
-	ExternalTestPassed  *bool         `db:"external_test_passed"`
-	TestFramework       string        `db:"test_framework"`
-	TestDurationSeconds float64       `db:"test_duration_seconds"`
-	TestOutputPreview   string        `db:"test_output_preview"`
-	Success             bool          `db:"success"`
-	FailureReason       FailureReason `db:"failure_reason"`
-	ErrorDetails        string        `db:"error_details"`
+	ID                  int64         `db:"id" json:"id"`
+	IssueID             int64         `db:"issue_id" json:"issue_id"`
+	AttemptNumber       int           `db:"attempt_number" json:"attempt_number"`
+	StartedAt           time.Time     `db:"started_at" json:"started_at"`
+	CompletedAt         *time.Time    `db:"completed_at" json:"completed_at,omitempty"`
+	DurationSeconds     float64       `db:"duration_seconds" json:"duration_seconds"`
+	PromptVersion       string        `db:"prompt_version" json:"prompt_version"`
+	ModelUsed           string        `db:"model_used" json:"model_used"`
+	FilesChanged        string        `db:"files_changed" json:"files_changed,omitempty"`
+	ClaudeOutputPreview string        `db:"claude_output_preview" json:"claude_output_preview,omitempty"`
+	FixCompleteMarker   bool          `db:"fix_complete_marker" json:"fix_complete_marker"`
+	ClaudeTestsPassed   *bool         `db:"claude_tests_passed" json:"claude_tests_passed,omitempty"`
+	IsComplex           *bool         `db:"is_complex" json:"is_complex,omitempty"`
+	CanTestLocally      *bool         `db:"can_test_locally" json:"can_test_locally,omitempty"`
+	ComplexityReasons   string        `db:"complexity_reasons" json:"complexity_reasons,omitempty"`
+	ExternalTestPassed  *bool         `db:"external_test_passed" json:"external_test_passed,omitempty"`
+	TestFramework       string        `db:"test_framework" json:"test_framework,omitempty"`
+	TestDurationSeconds float64       `db:"test_duration_seconds" json:"test_duration_seconds"`
+	TestOutputPreview   string        `db:"test_output_preview" json:"test_output_preview,omitempty"`
+	Success             bool          `db:"success" json:"success"`
+	FailureReason       FailureReason `db:"failure_reason" json:"failure_reason,omitempty"`
+	ErrorDetails        string        `db:"error_details" json:"error_details,omitempty"`
+	// Token usage metrics
+	PromptTokens     int `db:"prompt_tokens" json:"prompt_tokens"`
+	CompletionTokens int `db:"completion_tokens" json:"completion_tokens"`
+	TotalTokens      int `db:"total_tokens" json:"total_tokens"`
+	// Code change metrics
+	LinesAdded   int `db:"lines_added" json:"lines_added"`
+	LinesDeleted int `db:"lines_deleted" json:"lines_deleted"`
 }
 
 // IssueMetrics aggregates metrics for an issue
@@ -156,6 +185,68 @@ type DailyStats struct {
 	StatsByRepo            string    `db:"stats_by_repo"`         // JSON
 	FailureReasonsCount    string    `db:"failure_reasons_count"` // JSON
 	CreatedAt              time.Time `db:"created_at"`
+}
+
+// RepoMetrics holds aggregated metrics per repository
+type RepoMetrics struct {
+	ID                 int64     `db:"id" json:"id"`
+	Repo               string    `db:"repo" json:"repo"`
+	Language           string    `db:"language" json:"language"`
+	Stars              int       `db:"stars" json:"stars"`
+	SuccessCount       int       `db:"success_count" json:"success_count"`
+	AttemptCount       int       `db:"attempt_count" json:"attempt_count"`
+	PRsCreated         int       `db:"prs_created" json:"prs_created"`
+	PRsMerged          int       `db:"prs_merged" json:"prs_merged"`
+	PRsClosed          int       `db:"prs_closed" json:"prs_closed"`
+	AvgDurationSeconds float64   `db:"avg_duration_seconds" json:"avg_duration_seconds"`
+	AvgTimeToMerge     float64   `db:"avg_time_to_merge" json:"avg_time_to_merge"` // seconds
+	TotalTokensUsed    int       `db:"total_tokens_used" json:"total_tokens_used"`
+	TotalLinesChanged  int       `db:"total_lines_changed" json:"total_lines_changed"`
+	HasContributing    bool      `db:"has_contributing" json:"has_contributing"`
+	HasClaudeMD        bool      `db:"has_claude_md" json:"has_claude_md"`
+	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// SuccessRate returns the success rate for this repository
+func (r *RepoMetrics) SuccessRate() float64 {
+	if r.AttemptCount == 0 {
+		return 0
+	}
+	return float64(r.SuccessCount) / float64(r.AttemptCount)
+}
+
+// MergeRate returns the PR merge rate for this repository
+func (r *RepoMetrics) MergeRate() float64 {
+	if r.PRsCreated == 0 {
+		return 0
+	}
+	return float64(r.PRsMerged) / float64(r.PRsCreated)
+}
+
+// LanguageMetrics holds aggregated metrics per programming language
+type LanguageMetrics struct {
+	Language           string  `json:"language"`
+	SuccessCount       int     `json:"success_count"`
+	AttemptCount       int     `json:"attempt_count"`
+	SuccessRate        float64 `json:"success_rate"`
+	PRsCreated         int     `json:"prs_created"`
+	PRsMerged          int     `json:"prs_merged"`
+	MergeRate          float64 `json:"merge_rate"`
+	AvgDurationSeconds float64 `json:"avg_duration_seconds"`
+	TotalTokensUsed    int     `json:"total_tokens_used"`
+}
+
+// PRMetrics holds PR-related aggregate statistics
+type PRMetrics struct {
+	TotalPRs           int     `json:"total_prs"`
+	OpenPRs            int     `json:"open_prs"`
+	MergedPRs          int     `json:"merged_prs"`
+	ClosedPRs          int     `json:"closed_prs"`
+	MergeRate          float64 `json:"merge_rate"`
+	AvgTimeToMerge     float64 `json:"avg_time_to_merge_hours"`
+	AvgTimeToFirstReview float64 `json:"avg_time_to_first_review_hours"`
+	AvgReviewComments  float64 `json:"avg_review_comments"`
 }
 
 // WorkerState represents the current state of a worker
