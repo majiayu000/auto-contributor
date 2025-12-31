@@ -459,6 +459,11 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
    git add -A
    git commit -s -m "fix: <concise description>"
 
+   **CRITICAL COMMIT RULES:**
+   - NEVER add "Generated with Claude Code" or similar AI markers
+   - NEVER add "Co-Authored-By" headers
+   - Keep commit message simple and human-like
+
 ### Quality Checklist (verify ALL before FIX_COMPLETE)
 - [ ] Fix addresses the actual issue requirement
 - [ ] No debug code, no console.log, no print statements left
@@ -467,6 +472,7 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
 - [ ] New tests added where appropriate
 - [ ] Code follows project style
 - [ ] No hardcoded values unless necessary
+- [ ] No meaningless comments (e.g. "// Initialize the variable", "// Return the result")
 
 ## Output Markers (output ONE on its own line)
 - FIX_COMPLETE - fix done, ALL tests pass locally
@@ -792,6 +798,7 @@ Use ultrathink to deeply analyze:
    - Follows project conventions
    - No debug code or print statements left
    - Clean and readable
+   - No meaningless comments (e.g. "// Initialize the variable", "// Return the result")
 
 4. **Tests verification:**
    - Run ALL project tests
@@ -813,6 +820,12 @@ git config user.email "1835304752@qq.com"
 git add -A
 git commit -s -m "fix: <concise description>"
 
+**CRITICAL COMMIT/PR RULES:**
+- NEVER add "Generated with Claude Code" or any AI markers in commit or PR
+- NEVER add "Co-Authored-By" headers
+- NEVER add emojis in commit messages or PR body
+- Keep everything simple and human-like
+
 Get branch: git branch --show-current
 Push: git push fork <branch-name> --force
 
@@ -821,7 +834,7 @@ Push: git push fork <branch-name> --force
 Get default branch:
 gh repo view %s --json defaultBranchRef -q .defaultBranchRef.name
 
-Create PR (keep body SHORT and direct):
+Create PR (keep body SHORT and direct, NO AI markers):
 gh pr create --repo %s --title "fix: %s" --body "Fixes #%d
 
 ## Changes
