@@ -460,6 +460,8 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
    git commit -s -m "fix: <concise description>"
 
    **CRITICAL COMMIT RULES:**
+   - ALWAYS use -s flag for DCO sign-off on EVERY commit (required by many projects)
+   - If you need to make additional commits (e.g., lint fixes), ALWAYS use: git commit -s -m "..."
    - NEVER add "Generated with Claude Code" or similar AI markers
    - NEVER add "Co-Authored-By" headers
    - Keep commit message simple and human-like
@@ -473,6 +475,8 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *ComplexityR
 - [ ] Code follows project style
 - [ ] No hardcoded values unless necessary
 - [ ] No meaningless comments (e.g. "// Initialize the variable", "// Return the result")
+- [ ] ALL commits use -s flag for DCO sign-off
+- [ ] NO AI markers in commit messages (no "Generated with Claude", no "Co-Authored-By")
 
 ## Output Markers (output ONE on its own line)
 - FIX_COMPLETE - fix done, ALL tests pass locally

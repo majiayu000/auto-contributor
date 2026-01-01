@@ -241,7 +241,10 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
 3. **递归搜索**：如果高星库没有可用issue，自动降级到低星库
 4. **最终结果**：至少找到%d个确认没有PR的issue
 
-## 输出格式（仅JSON，不要markdown代码块）
+## 输出格式
+**严格要求：只输出JSON，不要任何其他文字、解释或markdown代码块！**
+**第一个字符必须是 { ，最后一个字符必须是 }**
+
 {
   "issues": [
     {
@@ -280,7 +283,7 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
   }
 }
 
-开始搜索！返回JSON。
+开始搜索！记住：只输出JSON，不要任何解释文字！
 `, lang, lang, excludeRepos, lang, lang, lang, req.Limit, req.Limit, req.Limit)
 }
 

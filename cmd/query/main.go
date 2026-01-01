@@ -15,16 +15,15 @@ func main() {
 	}
 	defer database.Close()
 
-	// Add to blacklist
-	repo := "external-secrets/external-secrets"
-	err = database.AddToBlacklist(repo, "User requested")
+	// Add go-better-auth to blacklist
+	err = database.AddToBlacklist("go-better-auth/go-better-auth", "User requested")
 	if err != nil {
 		fmt.Println("Error adding to blacklist:", err)
-		return
+	} else {
+		fmt.Println("Added to blacklist: go-better-auth/go-better-auth")
 	}
-	fmt.Printf("Added to blacklist: %s\n", repo)
 
-	// Show current blacklist
+	// Show blacklist
 	entries, _ := database.GetBlacklist()
 	fmt.Printf("\n=== Blacklist (%d repos) ===\n", len(entries))
 	for _, e := range entries {

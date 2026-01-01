@@ -73,6 +73,24 @@ func (db *DB) IsPostgres() bool {
 	return db.dbType == DBTypePostgres
 }
 
+// placeholder returns the correct placeholder for the given index (1-based)
+// PostgreSQL uses $1, $2, etc. SQLite uses ?
+func (db *DB) placeholder(index int) string {
+	if db.IsPostgres() {
+		return fmt.Sprintf("$%d", index)
+	}
+	return "?"
+}
+
+// placeholders returns a comma-separated list of placeholders
+func (db *DB) placeholders(count int) string {
+	parts := make([]string, count)
+	for i := 0; i < count; i++ {
+		parts[i] = db.placeholder(i + 1)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // Migrate creates the database schema
 func (db *DB) Migrate() error {
 	var schema string
@@ -433,15 +451,30 @@ func (db *DB) runMigrations() {
 
 // CreateIssue inserts a new issue
 func (db *DB) CreateIssue(issue *models.Issue) error {
-	result, err := db.Exec(`
-		INSERT INTO issues (repo, issue_number, title, body, labels, language, difficulty_score, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(repo, issue_number) DO UPDATE SET
-			title = excluded.title,
-			body = excluded.body,
-			labels = excluded.labels,
-			updated_at = CURRENT_TIMESTAMP
-	`, issue.Repo, issue.IssueNumber, issue.Title, issue.Body, issue.Labels, issue.Language, issue.DifficultyScore, issue.Status)
+	var query string
+	if db.IsPostgres() {
+		query = `
+			INSERT INTO issues (repo, issue_number, title, body, labels, language, difficulty_score, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT(repo, issue_number) DO UPDATE SET
+				title = excluded.title,
+				body = excluded.body,
+				labels = excluded.labels,
+				updated_at = CURRENT_TIMESTAMP
+		`
+	} else {
+		query = `
+			INSERT INTO issues (repo, issue_number, title, body, labels, language, difficulty_score, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(repo, issue_number) DO UPDATE SET
+				title = excluded.title,
+				body = excluded.body,
+				labels = excluded.labels,
+				updated_at = CURRENT_TIMESTAMP
+		`
+	}
+
+	result, err := db.Exec(query, issue.Repo, issue.IssueNumber, issue.Title, issue.Body, issue.Labels, issue.Language, issue.DifficultyScore, issue.Status)
 
 	if err != nil {
 		return err
@@ -454,13 +487,14 @@ func (db *DB) CreateIssue(issue *models.Issue) error {
 
 // GetIssuesByStatus retrieves issues by status
 func (db *DB) GetIssuesByStatus(status models.IssueStatus, limit int) ([]*models.Issue, error) {
-	rows, err := db.Query(`
+	query := fmt.Sprintf(`
 		SELECT id, repo, issue_number, title, body, labels, language, difficulty_score, status, error_message, discovered_at, updated_at
 		FROM issues
-		WHERE status = ?
+		WHERE status = %s
 		ORDER BY difficulty_score ASC
-		LIMIT ?
-	`, status, limit)
+		LIMIT %s
+	`, db.placeholder(1), db.placeholder(2))
+	rows, err := db.Query(query, status, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -485,28 +519,32 @@ func (db *DB) GetIssuesByStatus(status models.IssueStatus, limit int) ([]*models
 
 // UpdateIssueStatus updates the status of an issue
 func (db *DB) UpdateIssueStatus(id int64, status models.IssueStatus, errorMsg string) error {
-	_, err := db.Exec(`
-		UPDATE issues SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, status, errorMsg, id)
+	query := fmt.Sprintf(`
+		UPDATE issues SET status = %s, error_message = %s, updated_at = CURRENT_TIMESTAMP
+		WHERE id = %s
+	`, db.placeholder(1), db.placeholder(2), db.placeholder(3))
+	_, err := db.Exec(query, status, errorMsg, id)
 	return err
 }
 
 // IncrementIssueRetryCount increments the retry count for an issue
 func (db *DB) IncrementIssueRetryCount(id int64) error {
-	_, err := db.Exec(`
+	query := fmt.Sprintf(`
 		UPDATE issues SET retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, id)
+		WHERE id = %s
+	`, db.placeholder(1))
+	_, err := db.Exec(query, id)
 	return err
 }
 
 // CreatePullRequest inserts a new pull request
 func (db *DB) CreatePullRequest(pr *models.PullRequest) error {
-	result, err := db.Exec(`
+	query := fmt.Sprintf(`
 		INSERT INTO pull_requests (issue_id, pr_url, pr_number, branch_name, status, ci_status)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, pr.IssueID, pr.PRURL, pr.PRNumber, pr.BranchName, pr.Status, pr.CIStatus)
+		VALUES (%s)
+	`, db.placeholders(6))
+
+	result, err := db.Exec(query, pr.IssueID, pr.PRURL, pr.PRNumber, pr.BranchName, pr.Status, pr.CIStatus)
 
 	if err != nil {
 		return err
@@ -547,10 +585,12 @@ func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 
 // CreateSolveAttempt inserts a new solve attempt
 func (db *DB) CreateSolveAttempt(attempt *models.SolveAttempt) error {
-	result, err := db.Exec(`
+	query := fmt.Sprintf(`
 		INSERT INTO solve_attempts (issue_id, attempt_number, started_at, prompt_version, model_used)
-		VALUES (?, ?, ?, ?, ?)
-	`, attempt.IssueID, attempt.AttemptNumber, attempt.StartedAt, attempt.PromptVersion, attempt.ModelUsed)
+		VALUES (%s)
+	`, db.placeholders(5))
+
+	result, err := db.Exec(query, attempt.IssueID, attempt.AttemptNumber, attempt.StartedAt, attempt.PromptVersion, attempt.ModelUsed)
 
 	if err != nil {
 		return err
@@ -563,26 +603,33 @@ func (db *DB) CreateSolveAttempt(attempt *models.SolveAttempt) error {
 
 // UpdateSolveAttempt updates a solve attempt with results
 func (db *DB) UpdateSolveAttempt(attempt *models.SolveAttempt) error {
-	_, err := db.Exec(`
+	query := fmt.Sprintf(`
 		UPDATE solve_attempts SET
-			completed_at = ?,
-			duration_seconds = ?,
-			files_changed = ?,
-			claude_output_preview = ?,
-			fix_complete_marker = ?,
-			claude_tests_passed = ?,
-			is_complex = ?,
-			can_test_locally = ?,
-			complexity_reasons = ?,
-			external_test_passed = ?,
-			test_framework = ?,
-			test_duration_seconds = ?,
-			test_output_preview = ?,
-			success = ?,
-			failure_reason = ?,
-			error_details = ?
-		WHERE id = ?
+			completed_at = %s,
+			duration_seconds = %s,
+			files_changed = %s,
+			claude_output_preview = %s,
+			fix_complete_marker = %s,
+			claude_tests_passed = %s,
+			is_complex = %s,
+			can_test_locally = %s,
+			complexity_reasons = %s,
+			external_test_passed = %s,
+			test_framework = %s,
+			test_duration_seconds = %s,
+			test_output_preview = %s,
+			success = %s,
+			failure_reason = %s,
+			error_details = %s
+		WHERE id = %s
 	`,
+		db.placeholder(1), db.placeholder(2), db.placeholder(3), db.placeholder(4),
+		db.placeholder(5), db.placeholder(6), db.placeholder(7), db.placeholder(8),
+		db.placeholder(9), db.placeholder(10), db.placeholder(11), db.placeholder(12),
+		db.placeholder(13), db.placeholder(14), db.placeholder(15), db.placeholder(16),
+		db.placeholder(17),
+	)
+	_, err := db.Exec(query,
 		attempt.CompletedAt,
 		attempt.DurationSeconds,
 		attempt.FilesChanged,
@@ -607,7 +654,8 @@ func (db *DB) UpdateSolveAttempt(attempt *models.SolveAttempt) error {
 // GetAttemptCount returns the number of attempts for an issue
 func (db *DB) GetAttemptCount(issueID int64) (int, error) {
 	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM solve_attempts WHERE issue_id = ?`, issueID).Scan(&count)
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM solve_attempts WHERE issue_id = %s`, db.placeholder(1))
+	err := db.QueryRow(query, issueID).Scan(&count)
 	return count, err
 }
 
@@ -645,10 +693,13 @@ func (db *DB) ClaimNextPendingIssue(workerID int) (*models.Issue, error) {
 	}
 
 	// Claim it by updating status to processing
-	_, err = tx.Exec(`
-		UPDATE issues SET status = 'processing', updated_at = CURRENT_TIMESTAMP
-		WHERE id = ? AND status = 'pending'
-	`, issue.ID)
+	var claimQuery string
+	if db.IsPostgres() {
+		claimQuery = `UPDATE issues SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'pending'`
+	} else {
+		claimQuery = `UPDATE issues SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`
+	}
+	_, err = tx.Exec(claimQuery, issue.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -670,10 +721,11 @@ func (db *DB) GetPendingIssueCount() (int, error) {
 
 // MarkIssueCompleted marks an issue as completed with PR info
 func (db *DB) MarkIssueCompleted(issueID int64, prURL string) error {
-	_, err := db.Exec(`
+	query := fmt.Sprintf(`
 		UPDATE issues SET status = 'completed', updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, issueID)
+		WHERE id = %s
+	`, db.placeholder(1))
+	_, err := db.Exec(query, issueID)
 	return err
 }
 
@@ -683,10 +735,11 @@ func (db *DB) MarkIssueFailed(issueID int64, errorMsg string, canRetry bool) err
 	if canRetry {
 		status = "pending" // Put back in queue for retry
 	}
-	_, err := db.Exec(`
-		UPDATE issues SET status = ?, error_message = ?, retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, status, errorMsg, issueID)
+	query := fmt.Sprintf(`
+		UPDATE issues SET status = %s, error_message = %s, retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = %s
+	`, db.placeholder(1), db.placeholder(2), db.placeholder(3))
+	_, err := db.Exec(query, status, errorMsg, issueID)
 	return err
 }
 
@@ -987,23 +1040,26 @@ func (db *DB) GetTokenUsageStats() (map[string]interface{}, error) {
 
 // AddToBlacklist adds a repository to the blacklist
 func (db *DB) AddToBlacklist(repo, reason string) error {
-	_, err := db.Exec(`
-		INSERT INTO blacklist (repo, reason) VALUES (?, ?)
+	query := fmt.Sprintf(`
+		INSERT INTO blacklist (repo, reason) VALUES (%s, %s)
 		ON CONFLICT(repo) DO UPDATE SET reason = excluded.reason
-	`, repo, reason)
+	`, db.placeholder(1), db.placeholder(2))
+	_, err := db.Exec(query, repo, reason)
 	return err
 }
 
 // RemoveFromBlacklist removes a repository from the blacklist
 func (db *DB) RemoveFromBlacklist(repo string) error {
-	_, err := db.Exec(`DELETE FROM blacklist WHERE repo = ?`, repo)
+	query := fmt.Sprintf(`DELETE FROM blacklist WHERE repo = %s`, db.placeholder(1))
+	_, err := db.Exec(query, repo)
 	return err
 }
 
 // IsBlacklisted checks if a repository is blacklisted
 func (db *DB) IsBlacklisted(repo string) (bool, error) {
 	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM blacklist WHERE repo = ?`, repo).Scan(&count)
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM blacklist WHERE repo = %s`, db.placeholder(1))
+	err := db.QueryRow(query, repo).Scan(&count)
 	return count > 0, err
 }
 
