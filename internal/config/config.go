@@ -27,6 +27,7 @@ type Config struct {
 	// Paths
 	WorkspaceDir string `mapstructure:"workspace_dir"`
 	DatabasePath string `mapstructure:"database_path"`
+	DatabaseURL  string `mapstructure:"database_url"` // PostgreSQL connection string (optional)
 
 	// Filters
 	Languages      []string `mapstructure:"languages"`
@@ -89,6 +90,7 @@ func Load() (*Config, error) {
 	// Bind specific env vars
 	viper.BindEnv("github_token", "GITHUB_TOKEN")
 	viper.BindEnv("github_username", "GITHUB_USERNAME")
+	viper.BindEnv("database_url", "DATABASE_URL")
 
 	// Read config file (optional)
 	if err := viper.ReadInConfig(); err != nil {

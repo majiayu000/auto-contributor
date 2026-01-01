@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 
 	"github.com/majiayu000/auto-contributor/internal/config"
@@ -32,6 +33,9 @@ var (
 )
 
 func main() {
+	// Load .env file if exists (ignore error if not found)
+	_ = godotenv.Load()
+
 	rootCmd := &cobra.Command{
 		Use:   "auto-contributor",
 		Short: "Automated GitHub contributor using Claude Code",
@@ -143,10 +147,16 @@ func initApp() error {
 		cfg.GitHubUsername = username
 	}
 
-	// Initialize database
-	database, err = db.New(cfg.DatabasePath)
+	// Initialize database (PostgreSQL if DATABASE_URL is set, otherwise SQLite)
+	database, err = db.NewWithURL(cfg.DatabaseURL, cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("init database: %w", err)
+	}
+
+	if cfg.DatabaseURL != "" {
+		log.Info("using PostgreSQL database")
+	} else {
+		log.Info("using SQLite database", "path", cfg.DatabasePath)
 	}
 
 	// Initialize GitHub client
