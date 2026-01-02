@@ -204,7 +204,9 @@ gh search repos "cli OR tool OR framework" --language=%s --stars=">1000" --sort=
 
 ### 第二步：对每个库检查issue
 对于每个找到的库，执行：
-gh issue list --repo <owner/repo> --state open --label "good first issue,help wanted,bug" --json number,title,createdAt --limit 15
+gh issue list --repo <owner/repo> --state open --label "good first issue,help wanted,bug" --json number,title,createdAt,assignees --limit 15
+
+**重要：跳过已有assignee的issue！** 如果assignees数组不为空，说明有人正在处理。
 
 ### 第三步：验证issue没有关联的PR
 对于每个候选issue，用**一次**API调用验证：
@@ -236,10 +238,11 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
 5. 是否有阻塞因素？（需要外部服务、权限等）
 
 ## 重要规则
-1. **必须验证**：每个issue都要确认没有关联PR
-2. **不要猜测**：如果无法确认，跳过这个issue
-3. **递归搜索**：如果高星库没有可用issue，自动降级到低星库
-4. **最终结果**：至少找到%d个确认没有PR的issue
+1. **跳过已assign的issue**：如果issue有assignee，说明有人在处理，跳过！
+2. **必须验证**：每个issue都要确认没有关联PR
+3. **不要猜测**：如果无法确认，跳过这个issue
+4. **递归搜索**：如果高星库没有可用issue，自动降级到低星库
+5. **最终结果**：至少找到%d个确认没有PR且没有assignee的issue
 
 ## 输出格式
 **严格要求：只输出JSON，不要任何其他文字、解释或markdown代码块！**
@@ -254,7 +257,8 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
       "url": "https://github.com/owner/repo/issues/123",
       "suitability_score": 0.85,
       "verified_no_pr": true,
-      "verification_method": "searched PRs with 'fixes #123', no results",
+      "has_assignee": false,
+      "verification_method": "searched PRs with 'fixes #123', no results, no assignees",
       "analysis": {
         "is_well_defined": true,
         "has_reproduction_steps": true,
