@@ -38,17 +38,20 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Use:   "auto-contributor",
-		Short: "Automated GitHub contributor using Claude Code",
+		Short: "Automated GitHub contributor using AI (Claude or Codex)",
 		Long: `Auto-contributor automatically discovers GitHub issues,
-uses Claude Code to create fixes, and submits pull requests.`,
+uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Skip init for help commands
 			if cmd.Name() == "help" || cmd.Name() == "version" {
 				return nil
 			}
-			return initApp()
+			return initApp(cmd)
 		},
 	}
+
+	// Global flags
+	rootCmd.PersistentFlags().StringP("executor", "e", "claude", "AI executor to use: claude or codex")
 
 	// Run command - main loop
 	runCmd := &cobra.Command{
@@ -92,7 +95,7 @@ uses Claude Code to create fixes, and submits pull requests.`,
 	// Loop command - continuous operation with smart discovery
 	loopCmd := &cobra.Command{
 		Use:   "loop",
-		Short: "Run continuously with Claude smart discovery",
+		Short: "Run continuously with AI smart discovery",
 		RunE:  runLoop,
 	}
 	loopCmd.Flags().IntP("interval", "n", 60, "Minutes between discovery cycles (default 60 for ~1 issue/hour)")
@@ -108,10 +111,10 @@ uses Claude Code to create fixes, and submits pull requests.`,
 		},
 	}
 
-	// Smart discover command - uses Claude for intelligent discovery
+	// Smart discover command - uses AI for intelligent discovery
 	smartDiscoverCmd := &cobra.Command{
 		Use:   "discover-smart",
-		Short: "Use Claude to intelligently discover and analyze issues",
+		Short: "Use AI to intelligently discover and analyze issues",
 		RunE:  smartDiscover,
 	}
 	smartDiscoverCmd.Flags().StringP("topic", "t", "golang", "Topic to search (e.g., 'golang', 'ai', 'web')")
@@ -128,13 +131,21 @@ uses Claude Code to create fixes, and submits pull requests.`,
 	}
 }
 
-func initApp() error {
+func initApp(cmd *cobra.Command) error {
 	var err error
 
 	// Load configuration
 	cfg, err = config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Override executor type from command line flag
+	if cmd != nil {
+		executorType, _ := cmd.Flags().GetString("executor")
+		if executorType != "" {
+			cfg.ExecutorType = executorType
+		}
 	}
 
 	// Get username from gh CLI if not set
@@ -158,6 +169,8 @@ func initApp() error {
 	} else {
 		log.Info("using SQLite database", "path", cfg.DatabasePath)
 	}
+
+	log.Info("using executor", "type", cfg.ExecutorType)
 
 	// Initialize GitHub client
 	ghClient = github.New(cfg)

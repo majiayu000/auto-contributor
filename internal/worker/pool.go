@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/majiayu000/auto-contributor/internal/claude"
+	"github.com/majiayu000/auto-contributor/internal/codex"
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
+	"github.com/majiayu000/auto-contributor/internal/executor"
 	"github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
@@ -49,7 +51,7 @@ type Pool struct {
 	config     *config.Config
 	db         *db.DB
 	ghClient   *github.Client
-	executor   *claude.Executor
+	executor   executor.Executor
 
 	workers    []*Worker
 	workersMu  sync.RWMutex
@@ -89,11 +91,20 @@ type Worker struct {
 func NewPool(cfg *config.Config, database *db.DB, ghClient *github.Client) *Pool {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Select executor based on config
+	var exec executor.Executor
+	switch cfg.ExecutorType {
+	case "codex":
+		exec = codex.New(cfg)
+	default:
+		exec = claude.New(cfg)
+	}
+
 	return &Pool{
 		config:     cfg,
 		db:         database,
 		ghClient:   ghClient,
-		executor:   claude.New(cfg),
+		executor:   exec,
 		issueQueue: make(chan *models.Issue, cfg.WorkerQueueSize),
 		results:    make(chan *WorkResult, cfg.WorkerQueueSize),
 		ctx:        ctx,
@@ -177,8 +188,8 @@ func (p *Pool) GetAllStatus() []*WorkerStatus {
 	return statuses
 }
 
-// GetExecutorOutput returns the Claude executor output buffer
-func (p *Pool) GetExecutorOutput() []claude.OutputLine {
+// GetExecutorOutput returns the executor output buffer
+func (p *Pool) GetExecutorOutput() []executor.OutputLine {
 	return p.executor.GetOutputBuffer()
 }
 
@@ -371,7 +382,7 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	complexity, err := w.pool.executor.EvaluateComplexity(w.pool.ctx, repoDir, issue)
 	if err != nil {
 		// Continue with default complexity
-		complexity = &claude.ComplexityResult{
+		complexity = &executor.ComplexityResult{
 			IsComplex:      false,
 			CanTestLocally: true,
 		}
@@ -403,17 +414,17 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		return
 	}
 
-	// Phase 3: Solve with Claude
-	w.updateStatus(PhaseSolving, 0.4, "Claude is working on the fix...")
+	// Phase 3: Solve with AI
+	w.updateStatus(PhaseSolving, 0.4, "AI is working on the fix...")
 
 	// Create branch
-	branchName := claude.SanitizeBranchName(issue.IssueNumber, issue.Title)
+	branchName := executor.SanitizeBranchName(issue.IssueNumber, issue.Title)
 	if err := w.pool.executor.CreateBranch(repoDir, branchName); err != nil {
 		result.Error = fmt.Errorf("create branch: %w", err)
 		return
 	}
 
-	// Run Claude to solve
+	// Run AI executor to solve
 	solveResult, err := w.pool.executor.Solve(w.pool.ctx, repoDir, issue, complexity)
 	if err != nil {
 		result.Error = fmt.Errorf("solve failed: %w", err)
@@ -455,10 +466,10 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		return
 	}
 
-	// Trust Claude's test results - it already ran tests in the solve phase
-	// Only fail if Claude explicitly reported tests failed
+	// Trust AI's test results - it already ran tests in the solve phase
+	// Only fail if AI explicitly reported tests failed
 	if solveResult.TestsPassed != nil && !*solveResult.TestsPassed {
-		result.Error = fmt.Errorf("Claude reported tests failed")
+		result.Error = fmt.Errorf("AI reported tests failed")
 		attempt.FailureReason = models.FailureReasonTestsFailed
 		if w.handleFailure(issue, models.FailureReasonTestsFailed, "Tests failed during solve") {
 			result.WillRetry = true
@@ -466,10 +477,10 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		return
 	}
 
-	w.updateStatus(PhaseValidating, 0.8, "Claude completed fix with passing tests")
+	w.updateStatus(PhaseValidating, 0.8, "AI completed fix with passing tests")
 
-	// Phase 6: Review, Fix, and Create PR (all handled by Claude)
-	w.updateStatus(PhaseCreatingPR, 0.9, "Claude is reviewing and creating PR...")
+	// Phase 6: Review, Fix, and Create PR (all handled by AI)
+	w.updateStatus(PhaseCreatingPR, 0.9, "AI is reviewing and creating PR...")
 
 	// Fork repo first (needed for PR creation)
 	err = w.pool.ghClient.ForkRepo(w.pool.ctx, issue.Repo)
@@ -484,13 +495,13 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		filepath.Base(issue.Repo))
 	configureRemote(repoDir, "fork", forkRemote)
 
-	// Push current branch to fork (Claude will commit and push final changes if needed)
+	// Push current branch to fork (AI will commit and push final changes if needed)
 	if err := w.pool.executor.PushBranch(repoDir, "fork", branchName); err != nil {
 		result.Error = fmt.Errorf("push failed: %w", err)
 		return
 	}
 
-	// Let Claude review, fix any issues, and create PR
+	// Let AI review, fix any issues, and create PR
 	reviewResult, err := w.pool.executor.Review(w.pool.ctx, repoDir, issue, 3)
 	if err != nil {
 		result.Error = fmt.Errorf("review failed: %w", err)
