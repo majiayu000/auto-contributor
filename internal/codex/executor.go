@@ -25,14 +25,52 @@ type Executor struct {
 	lastOutput   string
 	outputBuffer []executor.OutputLine
 	bufferMu     sync.RWMutex
+	logDir       string
 }
 
 // New creates a new Codex executor
 func New(cfg *config.Config) *Executor {
+	// Create log directory
+	logDir := filepath.Join(os.TempDir(), "auto-contributor", "codex-logs")
+	os.MkdirAll(logDir, 0755)
+
 	return &Executor{
 		config:       cfg,
 		outputBuffer: make([]executor.OutputLine, 0, 200),
+		logDir:       logDir,
 	}
+}
+
+// saveLog saves output to a log file for debugging
+func (e *Executor) saveLog(operation string, issue *models.Issue, prompt string, output string, duration time.Duration) {
+	if e.logDir == "" {
+		return
+	}
+
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("%s_%s_%d_%s.log", timestamp, sanitizeForFilename(issue.Repo), issue.IssueNumber, operation)
+	logPath := filepath.Join(e.logDir, filename)
+
+	content := fmt.Sprintf(`=== Codex %s Log ===
+Time: %s
+Repo: %s
+Issue: #%d - %s
+Duration: %v
+
+=== PROMPT ===
+%s
+
+=== OUTPUT ===
+%s
+`, operation, time.Now().Format(time.RFC3339), issue.Repo, issue.IssueNumber, issue.Title, duration, prompt, output)
+
+	os.WriteFile(logPath, []byte(content), 0644)
+	e.addOutput("log", fmt.Sprintf("Log saved to: %s", logPath))
+}
+
+// sanitizeForFilename removes invalid characters from repo name
+func sanitizeForFilename(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "/", "_"), "\\", "_")
 }
 
 // GetOutputBuffer returns recent output lines
@@ -243,6 +281,9 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 		result.Success = result.FixComplete && len(result.FilesChanged) > 0
 	}
 
+	// Save log for debugging
+	e.saveLog("solve", issue, prompt, output, duration)
+
 	return result, nil
 }
 
@@ -264,10 +305,15 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *executor.Co
    - Understand the user's intent, not just the surface request
    - Identify what success looks like
 
-2. **Verify the issue still needs fixing:**
-   - Search codebase to check if feature/fix ALREADY EXISTS
-   - Check recent commits that might have addressed this
-   - If ALREADY_FIXED: output marker and stop
+2. **Verify the issue still needs fixing (BE VERY CAREFUL HERE):**
+   - Search codebase thoroughly for the EXACT functionality requested
+   - Finding similar code is NOT enough - verify it actually solves THIS specific issue
+   - ONLY mark as ALREADY_FIXED if you find CONCRETE EVIDENCE:
+     * The exact feature/fix described in the issue is fully implemented
+     * You can point to specific code that addresses every point in the issue
+     * Tests exist that cover the requested functionality
+   - When in doubt, ATTEMPT THE FIX - do not give up early
+   - If you mark ALREADY_FIXED, you MUST explain exactly where the fix exists
 
 3. **Study the project:**
    - Read CONTRIBUTING.md if exists
@@ -332,7 +378,9 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *executor.Co
 ## Output Markers (output ONE on its own line)
 - FIX_COMPLETE - fix done, ALL tests pass locally
 - FIX_INCOMPLETE - cannot complete (explain why)
-- ALREADY_FIXED - issue already resolved in codebase
+- ALREADY_FIXED - issue already resolved in codebase (REQUIRES PROOF: cite specific file:line where fix exists)
+
+**IMPORTANT**: Only use ALREADY_FIXED if you have DEFINITIVE proof. If unsure, attempt the fix!
 
 Also output: TESTS_PASSED: true/false`,
 		issue.IssueNumber, issue.Repo, issue.Title, issue.Body)
@@ -523,6 +571,8 @@ Be concise.`, strings.Join(changedFiles, "\n"))
 
 // Review runs Codex to review, fix, and create PR
 func (e *Executor) Review(ctx context.Context, repoDir string, issue *models.Issue, maxRounds int) (*executor.ReviewResult, error) {
+	startTime := time.Now()
+
 	if maxRounds <= 0 {
 		maxRounds = 3
 	}
@@ -566,6 +616,9 @@ func (e *Executor) Review(ctx context.Context, repoDir string, issue *models.Iss
 			result.PRNumber = prNum
 		}
 	}
+
+	// Save log for debugging
+	e.saveLog("review", issue, prompt, outputStr, time.Since(startTime))
 
 	return result, nil
 }
