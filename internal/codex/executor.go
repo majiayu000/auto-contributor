@@ -73,6 +73,33 @@ func sanitizeForFilename(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "/", "_"), "\\", "_")
 }
 
+// hasOutputMarker checks if a marker appears in Codex's actual output (not in the echoed prompt)
+// Markers in the prompt appear in instruction text, while actual markers appear:
+// 1. Near the end of output
+// 2. On a line by themselves or followed by whitespace/punctuation
+func hasOutputMarker(output, marker string) bool {
+	// Look for marker in the last 2000 characters of output (actual Codex response)
+	searchArea := output
+	if len(output) > 2000 {
+		searchArea = output[len(output)-2000:]
+	}
+
+	// Check for marker on its own line or at start of line
+	lines := strings.Split(searchArea, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Match: "MARKER", "MARKER ", "MARKER:", "MARKER\n", etc.
+		if strings.HasPrefix(trimmed, marker) {
+			// Make sure it's not part of a longer word or instruction
+			rest := strings.TrimPrefix(trimmed, marker)
+			if rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == ':' || rest[0] == '.' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GetOutputBuffer returns recent output lines
 func (e *Executor) GetOutputBuffer() []executor.OutputLine {
 	e.bufferMu.RLock()
@@ -247,10 +274,12 @@ func (e *Executor) Solve(ctx context.Context, repoDir string, issue *models.Issu
 		Duration: duration,
 	}
 
-	// Parse markers from output
-	result.AlreadyFixed = strings.Contains(output, "ALREADY_FIXED")
-	result.FixComplete = strings.Contains(output, "FIX_COMPLETE")
-	if strings.Contains(output, "FIX_INCOMPLETE") {
+	// Parse markers from output - look for markers on their own line (not in prompt text)
+	// The prompt echoes markers in instructions, so we need to find the actual output markers
+	// which appear at the end or on a line by themselves
+	result.AlreadyFixed = hasOutputMarker(output, "ALREADY_FIXED")
+	result.FixComplete = hasOutputMarker(output, "FIX_COMPLETE")
+	if hasOutputMarker(output, "FIX_INCOMPLETE") {
 		result.FixComplete = false
 	}
 
