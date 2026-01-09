@@ -15,7 +15,10 @@ type Config struct {
 	GitHubUsername string `mapstructure:"github_username"`
 	GitHubEmail    string `mapstructure:"github_email"`
 
-	// Claude settings
+	// Executor settings
+	ExecutorType string `mapstructure:"executor_type"` // "claude" or "codex"
+
+	// Claude/Codex settings
 	ClaudeTimeout    time.Duration `mapstructure:"claude_timeout"`
 	ClaudeMaxRetries int           `mapstructure:"claude_max_retries"`
 
@@ -53,7 +56,8 @@ func Default() *Config {
 
 	return &Config{
 		GitHubEmail:       "1835304752@qq.com",
-		ClaudeTimeout:     24 * time.Hour, // No practical timeout - let Claude work
+		ExecutorType:      "claude", // Default to Claude, can be "codex"
+		ClaudeTimeout:     24 * time.Hour, // No practical timeout - let executor work
 		ClaudeMaxRetries:  3,
 		WorkerCount:       2,
 		WorkerQueueSize:   100,
