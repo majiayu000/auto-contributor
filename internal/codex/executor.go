@@ -391,6 +391,8 @@ func (e *Executor) buildSolvePrompt(issue *models.Issue, complexity *executor.Co
    - NEVER add "Generated with Codex" or similar AI markers
    - NEVER add "Co-Authored-By" headers
    - Keep commit message simple and human-like
+   - DO NOT push yet - a "fork" remote is configured, push will happen in review phase
+   - If you must push, ONLY use: git push fork <branch> (never push to origin)
 
 ### Quality Checklist (verify ALL before FIX_COMPLETE)
 - [ ] Fix addresses the actual issue requirement

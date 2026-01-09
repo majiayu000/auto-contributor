@@ -424,6 +424,19 @@ func (w *Worker) processIssue(issue *models.Issue) {
 		return
 	}
 
+	// Fork repo BEFORE solve (so AI can push to fork)
+	err = w.pool.ghClient.ForkRepo(w.pool.ctx, issue.Repo)
+	if err != nil && !isAlreadyForked(err) {
+		result.Error = fmt.Errorf("fork failed: %w", err)
+		return
+	}
+
+	// Add fork as remote
+	forkRemote := fmt.Sprintf("https://github.com/%s/%s.git",
+		w.pool.config.GitHubUsername,
+		filepath.Base(issue.Repo))
+	configureRemote(repoDir, "fork", forkRemote)
+
 	// Run AI executor to solve
 	solveResult, err := w.pool.executor.Solve(w.pool.ctx, repoDir, issue, complexity)
 	if err != nil {
@@ -482,20 +495,7 @@ func (w *Worker) processIssue(issue *models.Issue) {
 	// Phase 6: Review, Fix, and Create PR (all handled by AI)
 	w.updateStatus(PhaseCreatingPR, 0.9, "AI is reviewing and creating PR...")
 
-	// Fork repo first (needed for PR creation)
-	err = w.pool.ghClient.ForkRepo(w.pool.ctx, issue.Repo)
-	if err != nil && !isAlreadyForked(err) {
-		result.Error = fmt.Errorf("fork failed: %w", err)
-		return
-	}
-
-	// Add fork as remote
-	forkRemote := fmt.Sprintf("https://github.com/%s/%s.git",
-		w.pool.config.GitHubUsername,
-		filepath.Base(issue.Repo))
-	configureRemote(repoDir, "fork", forkRemote)
-
-	// Push current branch to fork (AI will commit and push final changes if needed)
+	// Push current branch to fork (fork remote was configured before solve)
 	if err := w.pool.executor.PushBranch(repoDir, "fork", branchName); err != nil {
 		result.Error = fmt.Errorf("push failed: %w", err)
 		return
