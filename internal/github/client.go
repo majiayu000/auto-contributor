@@ -461,6 +461,75 @@ func base64Decode(s string) ([]byte, error) {
 }
 
 // estimateDifficulty provides initial difficulty estimate
+// GetUnassignedBugs returns unassigned open bug issues with no competing PRs.
+func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, limit int) ([]*models.Issue, error) {
+	cmd := exec.CommandContext(ctx, "gh", "issue", "list",
+		"-R", repoFullName,
+		"--state", "open",
+		"--label", "bug",
+		"--limit", fmt.Sprintf("%d", limit*2), // fetch extra, we'll filter
+		"--json", "number,title,body,labels,assignees")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh issue list %s: %w", repoFullName, err)
+	}
+
+	var raw []struct {
+		Number    int    `json:"number"`
+		Title     string `json:"title"`
+		Body      string `json:"body"`
+		Labels    []struct{ Name string `json:"name"` } `json:"labels"`
+		Assignees []struct{ Login string `json:"login"` } `json:"assignees"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil, fmt.Errorf("parse issues: %w", err)
+	}
+
+	repoInfo, _ := c.GetRepoInfo(ctx, repoFullName)
+	lang := ""
+	if repoInfo != nil {
+		lang = repoInfo.Language
+	}
+
+	var issues []*models.Issue
+	for _, r := range raw {
+		if len(r.Assignees) > 0 {
+			continue
+		}
+
+		// Skip if already has a competing PR
+		hasPR, _ := c.HasExistingPR(ctx, repoFullName, r.Number)
+		if hasPR {
+			continue
+		}
+
+		var labels []string
+		for _, l := range r.Labels {
+			labels = append(labels, l.Name)
+		}
+
+		issues = append(issues, &models.Issue{
+			Repo:            repoFullName,
+			IssueNumber:     r.Number,
+			Title:           r.Title,
+			Body:            r.Body,
+			Labels:          strings.Join(labels, ","),
+			Language:        lang,
+			DifficultyScore: 0.5,
+			Status:          models.IssueStatusDiscovered,
+			DiscoveredAt:    time.Now(),
+			UpdatedAt:       time.Now(),
+		})
+
+		if len(issues) >= limit {
+			break
+		}
+	}
+
+	return issues, nil
+}
+
 func (c *Client) estimateDifficulty(labels []string, repo *RepoInfo) float64 {
 	score := 0.5
 

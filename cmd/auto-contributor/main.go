@@ -134,7 +134,17 @@ uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 	pipelineCmd.Flags().IntP("issue", "i", 0, "Issue number")
 	pipelineCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory (default: auto-detect)")
 
-	rootCmd.AddCommand(runCmd, discoverCmd, solveCmd, statsCmd, statusCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd)
+	// Pipeline-auto command - discover issues and process them through V2 pipeline
+	pipelineAutoCmd := &cobra.Command{
+		Use:   "pipeline-auto",
+		Short: "Auto-discover issues and process through V2 pipeline",
+		RunE:  runPipelineAuto,
+	}
+	pipelineAutoCmd.Flags().StringSliceP("repos", "r", nil, "Target repositories (owner/repo), comma-separated")
+	pipelineAutoCmd.Flags().IntP("limit", "l", 3, "Max issues to process")
+	pipelineAutoCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory")
+
+	rootCmd.AddCommand(runCmd, discoverCmd, solveCmd, statsCmd, statusCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd, pipelineAutoCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -605,6 +615,73 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func runPipelineAuto(cmd *cobra.Command, args []string) error {
+	repos, _ := cmd.Flags().GetStringSlice("repos")
+	limit, _ := cmd.Flags().GetInt("limit")
+	promptsDir, _ := cmd.Flags().GetString("prompts")
+	if promptsDir == "" {
+		promptsDir = cfg.PromptsDir
+	}
+
+	if len(repos) == 0 {
+		return fmt.Errorf("--repos is required (e.g., -r owner/repo1,owner/repo2)")
+	}
+
+	fmt.Printf("Pipeline Auto: discovering up to %d issues from %v\n\n", limit, repos)
+
+	ctx := context.Background()
+
+	// Discover unassigned bug issues from target repos
+	var candidates []*models.Issue
+	for _, repo := range repos {
+		issues, err := ghClient.GetUnassignedBugs(ctx, repo, limit)
+		if err != nil {
+			fmt.Printf("Warning: skip %s: %v\n", repo, err)
+			continue
+		}
+		candidates = append(candidates, issues...)
+	}
+
+	if len(candidates) == 0 {
+		return fmt.Errorf("no candidate issues found")
+	}
+
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	fmt.Printf("Found %d candidates:\n", len(candidates))
+	for _, c := range candidates {
+		fmt.Printf("  %s#%d: %s\n", c.Repo, c.IssueNumber, c.Title)
+	}
+	fmt.Println()
+
+	// Process each through the pipeline
+	pipe, err := pipeline.New(cfg, database, promptsDir)
+	if err != nil {
+		return fmt.Errorf("create pipeline: %w", err)
+	}
+
+	var succeeded, failed int
+	for i, issue := range candidates {
+		fmt.Printf("=== [%d/%d] %s#%d ===\n", i+1, len(candidates), issue.Repo, issue.IssueNumber)
+
+		issue.Status = models.IssueStatusDiscovered
+		database.CreateIssue(issue)
+
+		if err := pipe.ProcessIssue(ctx, issue); err != nil {
+			fmt.Printf("FAILED: %v\n\n", err)
+			failed++
+			continue
+		}
+		fmt.Printf("SUCCESS\n\n")
+		succeeded++
+	}
+
+	fmt.Printf("Pipeline Auto complete: %d succeeded, %d failed out of %d\n", succeeded, failed, len(candidates))
+	return nil
 }
 
 func runPipeline(cmd *cobra.Command, args []string) error {
