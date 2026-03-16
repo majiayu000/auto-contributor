@@ -570,6 +570,109 @@ func (c *Client) SetupForkRemote(ctx context.Context, repoDir, repoFullName stri
 	return nil
 }
 
+// PRReview represents a single review on a PR.
+type PRReview struct {
+	Author      string `json:"author"`
+	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+	Body        string `json:"body"`
+	SubmittedAt string `json:"submittedAt"`
+}
+
+// PRReviewComment represents an inline review comment.
+type PRReviewComment struct {
+	ID        int64  `json:"id"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	Path      string `json:"path"`
+	Line      int    `json:"line"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// GetPRReviews fetches all reviews for a PR.
+func (c *Client) GetPRReviews(ctx context.Context, repo string, prNum int) ([]PRReview, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
+		fmt.Sprintf("%d", prNum),
+		"-R", repo,
+		"--json", "reviews",
+		"--jq", ".reviews")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("get PR reviews: %w", err)
+	}
+
+	var reviews []PRReview
+	if err := json.Unmarshal(output, &reviews); err != nil {
+		return nil, fmt.Errorf("parse reviews: %w", err)
+	}
+	return reviews, nil
+}
+
+// GetPRReviewComments fetches inline review comments for a PR.
+func (c *Client) GetPRReviewComments(ctx context.Context, repo string, prNum int) ([]PRReviewComment, error) {
+	output, err := c.ghAPI(ctx, fmt.Sprintf("repos/%s/pulls/%d/comments", repo, prNum))
+	if err != nil {
+		return nil, fmt.Errorf("get PR comments: %w", err)
+	}
+
+	var raw []struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		Path      string `json:"path"`
+		Line      *int   `json:"line"`
+		CreatedAt string `json:"created_at"`
+		User      struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil, fmt.Errorf("parse comments: %w", err)
+	}
+
+	var comments []PRReviewComment
+	for _, r := range raw {
+		line := 0
+		if r.Line != nil {
+			line = *r.Line
+		}
+		comments = append(comments, PRReviewComment{
+			ID:        r.ID,
+			Author:    r.User.Login,
+			Body:      r.Body,
+			Path:      r.Path,
+			Line:      line,
+			CreatedAt: r.CreatedAt,
+		})
+	}
+	return comments, nil
+}
+
+// ReplyToPRComment posts a reply to a PR review comment.
+func (c *Client) ReplyToPRComment(ctx context.Context, repo string, prNum int, commentID int64, body string) error {
+	_, err := c.ghAPI(ctx,
+		fmt.Sprintf("repos/%s/pulls/%d/comments/%d/replies", repo, prNum, commentID),
+		"-f", fmt.Sprintf("body=%s", body))
+	if err != nil {
+		return fmt.Errorf("reply to comment %d: %w", commentID, err)
+	}
+	return nil
+}
+
+// GetPRStateAndRepo fetches the current state and repo of a PR.
+func (c *Client) GetPRStateAndRepo(ctx context.Context, repo string, prNum int) (string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
+		fmt.Sprintf("%d", prNum),
+		"-R", repo,
+		"--json", "state",
+		"--jq", ".state")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("get PR state: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 func (c *Client) estimateDifficulty(labels []string, repo *RepoInfo) float64 {
 	score := 0.5
 

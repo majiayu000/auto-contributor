@@ -390,6 +390,177 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 	return &result, nil
 }
 
+// --- Feedback (Responder Agent) ---
+
+// ProcessFeedback checks a single open PR for review feedback and addresses it.
+func (p *Pipeline) ProcessFeedback(ctx context.Context, pr *models.PullRequest) error {
+	// Load associated issue
+	issue, err := p.db.GetIssueByID(pr.IssueID)
+	if err != nil {
+		return fmt.Errorf("load issue %d: %w", pr.IssueID, err)
+	}
+
+	// Check if PR is still open
+	state, err := p.gh.GetPRStateAndRepo(ctx, issue.Repo, pr.PRNumber)
+	if err != nil {
+		log.WithError(err).Warn("failed to check PR state")
+	} else {
+		switch state {
+		case "MERGED":
+			p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
+			log.WithField("pr", pr.PRURL).Info("PR merged")
+			return nil
+		case "CLOSED":
+			p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			log.WithField("pr", pr.PRURL).Info("PR closed")
+			return nil
+		}
+	}
+
+	// Fetch reviews and inline comments
+	reviews, err := p.gh.GetPRReviews(ctx, issue.Repo, pr.PRNumber)
+	if err != nil {
+		return fmt.Errorf("get reviews: %w", err)
+	}
+	comments, err := p.gh.GetPRReviewComments(ctx, issue.Repo, pr.PRNumber)
+	if err != nil {
+		return fmt.Errorf("get comments: %w", err)
+	}
+
+	// Check if there's new feedback since last check
+	totalFeedback := len(reviews) + len(comments)
+	if totalFeedback == 0 {
+		log.WithField("pr", pr.PRURL).Debug("no feedback on PR")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
+		return nil
+	}
+
+	// Filter to new feedback only (after last check)
+	hasNew := false
+	if pr.LastFeedbackCheckAt == nil {
+		hasNew = totalFeedback > 0
+	} else {
+		for _, r := range reviews {
+			if r.SubmittedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
+				hasNew = true
+				break
+			}
+		}
+		if !hasNew {
+			for _, c := range comments {
+				if c.CreatedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
+					hasNew = true
+					break
+				}
+			}
+		}
+	}
+
+	if !hasNew {
+		log.WithField("pr", pr.PRURL).Debug("no new feedback since last check")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
+		return nil
+	}
+
+	// Cap feedback rounds
+	if pr.FeedbackRound >= p.maxReview {
+		log.WithFields(log.Fields{
+			"pr":    pr.PRURL,
+			"round": pr.FeedbackRound,
+		}).Warn("max feedback rounds exceeded, skipping")
+		return nil
+	}
+
+	// Update review stats
+	firstReview := time.Now()
+	p.db.UpdatePRReviewStats(pr.ID, totalFeedback, &firstReview)
+
+	// Locate workspace
+	workspace, err := p.createWorkspace(issue)
+	if err != nil {
+		return fmt.Errorf("create workspace: %w", err)
+	}
+
+	// Build context for responder agent
+	tmplCtx := p.buildResponderCtx(issue, pr, reviews, comments)
+
+	log.WithFields(log.Fields{
+		"pr":       pr.PRURL,
+		"reviews":  len(reviews),
+		"comments": len(comments),
+		"round":    pr.FeedbackRound + 1,
+	}).Info("processing feedback")
+
+	// Run responder agent
+	var result FeedbackResult
+	if _, err := p.runner.RunJSON(ctx, "responder", workspace, tmplCtx, &result); err != nil {
+		log.WithError(err).Warn("responder parse error, treating as no_action")
+		result.Action = "no_action"
+	}
+
+	// Post replies
+	for _, reply := range result.Replies {
+		if err := p.gh.ReplyToPRComment(ctx, issue.Repo, pr.PRNumber, reply.CommentID, reply.Body); err != nil {
+			log.WithError(err).Warn("failed to post reply")
+		}
+	}
+
+	// Update DB
+	newRound := pr.FeedbackRound + 1
+	p.db.UpdatePRFeedbackCheck(pr.ID, newRound)
+
+	if result.Action == "close" {
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+	}
+
+	log.WithFields(log.Fields{
+		"pr":      pr.PRURL,
+		"action":  result.Action,
+		"summary": result.Summary,
+		"round":   newRound,
+	}).Info("feedback processed")
+
+	return nil
+}
+
+func (p *Pipeline) buildResponderCtx(
+	issue *models.Issue,
+	pr *models.PullRequest,
+	reviews []ghclient.PRReview,
+	comments []ghclient.PRReviewComment,
+) map[string]any {
+	// Format reviews as readable text
+	var reviewsText string
+	for _, r := range reviews {
+		reviewsText += fmt.Sprintf("- **%s** (%s): %s\n", r.Author, r.State, r.Body)
+	}
+	if reviewsText == "" {
+		reviewsText = "(none)"
+	}
+
+	// Format inline comments
+	var commentsText string
+	for _, c := range comments {
+		commentsText += fmt.Sprintf("- [%s:%d] **%s** (id:%d): %s\n", c.Path, c.Line, c.Author, c.ID, c.Body)
+	}
+	if commentsText == "" {
+		commentsText = "(none)"
+	}
+
+	return map[string]any{
+		"Repo":           issue.Repo,
+		"IssueNumber":    issue.IssueNumber,
+		"IssueTitle":     issue.Title,
+		"IssueBody":      issue.Body,
+		"PRNumber":       pr.PRNumber,
+		"PRURL":          pr.PRURL,
+		"BranchName":     pr.BranchName,
+		"FeedbackRound":  pr.FeedbackRound + 1,
+		"Reviews":        reviewsText,
+		"InlineComments": commentsText,
+	}
+}
+
 // --- Workspace ---
 
 func (p *Pipeline) createWorkspace(issue *models.Issue) (string, error) {

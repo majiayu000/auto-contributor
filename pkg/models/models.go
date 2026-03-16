@@ -27,9 +27,10 @@ const (
 type PRStatus string
 
 const (
-	PRStatusOpen   PRStatus = "open"
-	PRStatusMerged PRStatus = "merged"
-	PRStatusClosed PRStatus = "closed"
+	PRStatusOpen       PRStatus = "open"
+	PRStatusMerged     PRStatus = "merged"
+	PRStatusClosed     PRStatus = "closed"
+	PRStatusResponding PRStatus = "responding"
 )
 
 // FailureReason categorizes why an attempt failed
@@ -94,8 +95,10 @@ type PullRequest struct {
 	ClosedAt           *time.Time `db:"closed_at" json:"closed_at,omitempty"`
 	ReviewCommentCount int        `db:"review_comment_count" json:"review_comment_count"`
 	FirstReviewAt      *time.Time `db:"first_review_at" json:"first_review_at,omitempty"`
-	CreatedAt          time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt          time.Time  `db:"updated_at" json:"updated_at"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+	LastFeedbackCheckAt  *time.Time `db:"last_feedback_check_at" json:"last_feedback_check_at,omitempty"`
+	FeedbackRound        int        `db:"feedback_round" json:"feedback_round"`
 }
 
 // TimeToMerge returns the duration from PR creation to merge

@@ -116,7 +116,16 @@ to create fixes, and submits pull requests.`,
 	pipelineAutoCmd.Flags().IntP("limit", "l", 3, "Max issues to process")
 	pipelineAutoCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory")
 
-	rootCmd.AddCommand(discoverCmd, statsCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd, pipelineAutoCmd)
+	// Feedback-loop command - periodically check open PRs for review feedback
+	feedbackLoopCmd := &cobra.Command{
+		Use:   "feedback-loop",
+		Short: "Periodically check open PRs for review feedback and address it",
+		RunE:  runFeedbackLoop,
+	}
+	feedbackLoopCmd.Flags().IntP("interval", "n", 30, "Minutes between feedback checks")
+	feedbackLoopCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory")
+
+	rootCmd.AddCommand(discoverCmd, statsCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd, pipelineAutoCmd, feedbackLoopCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -370,6 +379,66 @@ func runCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 		"failed", failed,
 		"skipped", skipped,
 	)
+
+	// Also check feedback on existing open PRs
+	checkOpenPRFeedback(ctx, pipe)
+}
+
+func runFeedbackLoop(cmd *cobra.Command, args []string) error {
+	interval, _ := cmd.Flags().GetInt("interval")
+	promptsDir, _ := cmd.Flags().GetString("prompts")
+	if promptsDir == "" {
+		promptsDir = cfg.PromptsDir
+	}
+
+	fmt.Printf("Feedback loop: checking open PRs every %d minutes\n", interval)
+	fmt.Printf("  Prompts: %s\n\n", promptsDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	pipe, err := pipeline.New(cfg, database, ghClient, promptsDir)
+	if err != nil {
+		return fmt.Errorf("create pipeline: %w", err)
+	}
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Minute)
+	defer ticker.Stop()
+
+	// Run immediately
+	checkOpenPRFeedback(ctx, pipe)
+
+	for {
+		select {
+		case <-sigChan:
+			fmt.Println("\nShutting down...")
+			return nil
+		case <-ticker.C:
+			checkOpenPRFeedback(ctx, pipe)
+		}
+	}
+}
+
+func checkOpenPRFeedback(ctx context.Context, pipe *pipeline.Pipeline) {
+	prs, err := database.GetOpenPRs()
+	if err != nil {
+		log.Error("failed to get open PRs", "error", err)
+		return
+	}
+	if len(prs) == 0 {
+		log.Info("no open PRs to check")
+		return
+	}
+
+	log.Info("checking feedback on open PRs", "count", len(prs))
+	for _, pr := range prs {
+		if err := pipe.ProcessFeedback(ctx, pr); err != nil {
+			log.Error("feedback processing failed", "pr", pr.PRURL, "error", err)
+		}
+	}
 }
 
 func truncate(s string, max int) string {

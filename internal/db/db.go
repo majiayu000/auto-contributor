@@ -147,6 +147,8 @@ func (db *DB) sqliteSchema() string {
 		closed_at DATETIME,
 		review_comment_count INTEGER DEFAULT 0,
 		first_review_at DATETIME,
+		last_feedback_check_at DATETIME,
+		feedback_round INTEGER DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (issue_id) REFERENCES issues(id)
@@ -303,6 +305,8 @@ func (db *DB) postgresSchema() string {
 		closed_at TIMESTAMP,
 		review_comment_count INTEGER DEFAULT 0,
 		first_review_at TIMESTAMP,
+		last_feedback_check_at TIMESTAMP,
+		feedback_round INTEGER DEFAULT 0,
 		created_at TIMESTAMP DEFAULT NOW(),
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
@@ -429,6 +433,8 @@ func (db *DB) runMigrations() {
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS review_comment_count INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS first_review_at TIMESTAMP")
+		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS last_feedback_check_at TIMESTAMP")
+		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS feedback_round INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN IF NOT EXISTS completion_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN IF NOT EXISTS total_tokens INTEGER DEFAULT 0")
@@ -441,6 +447,8 @@ func (db *DB) runMigrations() {
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN closed_at DATETIME")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN review_comment_count INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN first_review_at DATETIME")
+		db.Exec("ALTER TABLE pull_requests ADD COLUMN last_feedback_check_at DATETIME")
+		db.Exec("ALTER TABLE pull_requests ADD COLUMN feedback_round INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN completion_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN total_tokens INTEGER DEFAULT 0")
@@ -558,7 +566,9 @@ func (db *DB) CreatePullRequest(pr *models.PullRequest) error {
 // GetOpenPRs retrieves all open pull requests
 func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 	rows, err := db.Query(`
-		SELECT id, issue_id, pr_url, pr_number, branch_name, status, ci_status, retry_count, created_at, updated_at
+		SELECT id, issue_id, pr_url, pr_number, branch_name, status, ci_status, retry_count,
+			   review_comment_count, first_review_at, last_feedback_check_at, feedback_round,
+			   created_at, updated_at
 		FROM pull_requests
 		WHERE status = 'open'
 	`)
@@ -572,7 +582,9 @@ func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 		pr := &models.PullRequest{}
 		err := rows.Scan(
 			&pr.ID, &pr.IssueID, &pr.PRURL, &pr.PRNumber, &pr.BranchName,
-			&pr.Status, &pr.CIStatus, &pr.RetryCount, &pr.CreatedAt, &pr.UpdatedAt,
+			&pr.Status, &pr.CIStatus, &pr.RetryCount,
+			&pr.ReviewCommentCount, &pr.FirstReviewAt, &pr.LastFeedbackCheckAt, &pr.FeedbackRound,
+			&pr.CreatedAt, &pr.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -657,6 +669,45 @@ func (db *DB) GetAttemptCount(issueID int64) (int, error) {
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM solve_attempts WHERE issue_id = %s`, db.placeholder(1))
 	err := db.QueryRow(query, issueID).Scan(&count)
 	return count, err
+}
+
+// GetIssueByID retrieves an issue by its primary key.
+func (db *DB) GetIssueByID(id int64) (*models.Issue, error) {
+	query := fmt.Sprintf(`
+		SELECT id, repo, issue_number, title, body, labels, language, difficulty_score, status, error_message, retry_count, discovered_at, updated_at
+		FROM issues WHERE id = %s
+	`, db.placeholder(1))
+
+	issue := &models.Issue{}
+	err := db.QueryRow(query, id).Scan(
+		&issue.ID, &issue.Repo, &issue.IssueNumber, &issue.Title, &issue.Body,
+		&issue.Labels, &issue.Language, &issue.DifficultyScore, &issue.Status,
+		&issue.ErrorMessage, &issue.RetryCount, &issue.DiscoveredAt, &issue.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return issue, nil
+}
+
+// UpdatePRFeedbackCheck updates the last feedback check timestamp and round.
+func (db *DB) UpdatePRFeedbackCheck(prID int64, round int) error {
+	query := fmt.Sprintf(`
+		UPDATE pull_requests SET last_feedback_check_at = CURRENT_TIMESTAMP, feedback_round = %s, updated_at = CURRENT_TIMESTAMP
+		WHERE id = %s
+	`, db.placeholder(1), db.placeholder(2))
+	_, err := db.Exec(query, round, prID)
+	return err
+}
+
+// UpdatePRReviewStats updates review_comment_count and first_review_at.
+func (db *DB) UpdatePRReviewStats(prID int64, commentCount int, firstReviewAt *time.Time) error {
+	query := fmt.Sprintf(`
+		UPDATE pull_requests SET review_comment_count = %s, first_review_at = COALESCE(first_review_at, %s), updated_at = CURRENT_TIMESTAMP
+		WHERE id = %s
+	`, db.placeholder(1), db.placeholder(2), db.placeholder(3))
+	_, err := db.Exec(query, commentCount, firstReviewAt, prID)
+	return err
 }
 
 // MarkIssueCompleted marks an issue as completed with PR info

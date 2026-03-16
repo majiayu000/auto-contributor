@@ -69,3 +69,18 @@ type SubmitResult struct {
 	PRNumber int    `json:"pr_number"`
 	IsDraft  bool   `json:"is_draft"`
 }
+
+// FeedbackResult is the structured output from the responder agent.
+type FeedbackResult struct {
+	Action       string          `json:"action"` // addressed, replied_only, no_action, close
+	FilesChanged []string        `json:"files_changed"`
+	CommitMsg    string          `json:"commit_message"`
+	Replies      []FeedbackReply `json:"replies"`
+	Summary      string          `json:"summary"`
+}
+
+// FeedbackReply is a reply to a specific review comment.
+type FeedbackReply struct {
+	CommentID int64  `json:"comment_id"`
+	Body      string `json:"body"`
+}
