@@ -659,66 +659,6 @@ func (db *DB) GetAttemptCount(issueID int64) (int, error) {
 	return count, err
 }
 
-// ClaimNextPendingIssue atomically claims the highest-scored pending issue for a worker
-// Returns nil if no pending issues are available
-// Excludes blacklisted repositories
-func (db *DB) ClaimNextPendingIssue(workerID int) (*models.Issue, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	// Find the highest-scored pending issue that's not blacklisted
-	row := tx.QueryRow(`
-		SELECT i.id, i.repo, i.issue_number, i.title, i.body, i.labels, i.language, i.difficulty_score, i.status, i.retry_count, i.discovered_at, i.updated_at
-		FROM issues i
-		LEFT JOIN blacklist b ON i.repo = b.repo
-		WHERE i.status = 'pending' AND b.repo IS NULL
-		ORDER BY i.difficulty_score DESC
-		LIMIT 1
-	`)
-
-	issue := &models.Issue{}
-	err = row.Scan(
-		&issue.ID, &issue.Repo, &issue.IssueNumber, &issue.Title, &issue.Body,
-		&issue.Labels, &issue.Language, &issue.DifficultyScore, &issue.Status,
-		&issue.RetryCount, &issue.DiscoveredAt, &issue.UpdatedAt,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil // No pending issues
-		}
-		return nil, err
-	}
-
-	// Claim it by updating status to processing
-	var claimQuery string
-	if db.IsPostgres() {
-		claimQuery = `UPDATE issues SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'pending'`
-	} else {
-		claimQuery = `UPDATE issues SET status = 'processing', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`
-	}
-	_, err = tx.Exec(claimQuery, issue.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	issue.Status = models.IssueStatusProcessing
-	return issue, nil
-}
-
-// GetPendingIssueCount returns the number of pending issues
-func (db *DB) GetPendingIssueCount() (int, error) {
-	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM issues WHERE status = 'pending'`).Scan(&count)
-	return count, err
-}
-
 // MarkIssueCompleted marks an issue as completed with PR info
 func (db *DB) MarkIssueCompleted(issueID int64, prURL string) error {
 	query := fmt.Sprintf(`

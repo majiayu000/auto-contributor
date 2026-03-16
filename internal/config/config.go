@@ -15,17 +15,9 @@ type Config struct {
 	GitHubUsername string `mapstructure:"github_username"`
 	GitHubEmail    string `mapstructure:"github_email"`
 
-	// Executor settings
-	ExecutorType string `mapstructure:"executor_type"` // "claude" or "codex"
-
-	// Claude/Codex settings
+	// Claude settings
 	ClaudeTimeout    time.Duration `mapstructure:"claude_timeout"`
 	ClaudeMaxRetries int           `mapstructure:"claude_max_retries"`
-
-	// Worker settings
-	WorkerCount       int           `mapstructure:"worker_count"`
-	WorkerQueueSize   int           `mapstructure:"worker_queue_size"`
-	IssueCheckInterval time.Duration `mapstructure:"issue_check_interval"`
 
 	// Paths
 	WorkspaceDir string `mapstructure:"workspace_dir"`
@@ -44,10 +36,6 @@ type Config struct {
 	MaxReviewRounds int    `mapstructure:"max_review_rounds"`
 	PromptsDir      string `mapstructure:"prompts_dir"`
 
-	// Web UI
-	WebEnabled bool   `mapstructure:"web_enabled"`
-	WebPort    int    `mapstructure:"web_port"`
-
 	// Logging
 	LogLevel string `mapstructure:"log_level"`
 	LogFile  string `mapstructure:"log_file"`
@@ -59,27 +47,21 @@ func Default() *Config {
 	dataDir := filepath.Join(homeDir, ".auto-contributor")
 
 	return &Config{
-		GitHubEmail:       "1835304752@qq.com",
-		ExecutorType:      "claude", // Default to Claude, can be "codex"
-		ClaudeTimeout:     24 * time.Hour, // No practical timeout - let executor work
-		ClaudeMaxRetries:  3,
-		WorkerCount:       2,
-		WorkerQueueSize:   100,
-		IssueCheckInterval: 10 * time.Minute,
-		WorkspaceDir:      filepath.Join(dataDir, "workspace"),
-		DatabasePath:      filepath.Join(dataDir, "data.db"),
-		Languages:         []string{"go", "python", "typescript", "javascript", "rust"},
-		IncludeLabels:     []string{"good first issue", "help wanted", "bug"},
-		ExcludeLabels:     []string{"wontfix", "duplicate", "invalid"},
-		ExcludeRepos:      []string{},
-		MinRepoStars:      10,
-		MaxIssueAgeDays:   30,
-		MaxReviewRounds:   3,
-		PromptsDir:        filepath.Join(dataDir, "prompts"),
-		WebEnabled:        true,
-		WebPort:           8080,
-		LogLevel:          "info",
-		LogFile:           filepath.Join(dataDir, "auto-contributor.log"),
+		GitHubEmail:      "1835304752@qq.com",
+		ClaudeTimeout:    24 * time.Hour,
+		ClaudeMaxRetries: 3,
+		WorkspaceDir:     filepath.Join(dataDir, "workspace"),
+		DatabasePath:     filepath.Join(dataDir, "data.db"),
+		Languages:        []string{"go", "python", "typescript", "javascript", "rust"},
+		IncludeLabels:    []string{"good first issue", "help wanted", "bug"},
+		ExcludeLabels:    []string{"wontfix", "duplicate", "invalid"},
+		ExcludeRepos:     []string{},
+		MinRepoStars:     10,
+		MaxIssueAgeDays:  30,
+		MaxReviewRounds:  3,
+		PromptsDir:       filepath.Join(dataDir, "prompts"),
+		LogLevel:         "info",
+		LogFile:          filepath.Join(dataDir, "auto-contributor.log"),
 	}
 }
 

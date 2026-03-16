@@ -17,8 +17,6 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/discovery"
 	"github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/pipeline"
-	"github.com/majiayu000/auto-contributor/internal/web"
-	"github.com/majiayu000/auto-contributor/internal/worker"
 	"github.com/majiayu000/auto-contributor/pkg/logger"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
@@ -26,11 +24,9 @@ import (
 var log = logger.NewComponent("main")
 
 var (
-	cfg       *config.Config
-	database  *db.DB
-	ghClient  *github.Client
-	pool      *worker.Pool
-	webServer *web.Server
+	cfg      *config.Config
+	database *db.DB
+	ghClient *github.Client
 )
 
 func main() {
@@ -39,26 +35,17 @@ func main() {
 
 	rootCmd := &cobra.Command{
 		Use:   "auto-contributor",
-		Short: "Automated GitHub contributor using AI (Claude or Codex)",
+		Short: "Automated GitHub contributor using AI agents",
 		Long: `Auto-contributor automatically discovers GitHub issues,
-uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
+uses a 5-stage AI agent pipeline (Scout→Analyst→Engineer⇄Reviewer→Submitter)
+to create fixes, and submits pull requests.`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// Skip init for help commands
 			if cmd.Name() == "help" || cmd.Name() == "version" {
 				return nil
 			}
-			return initApp(cmd)
+			return initApp()
 		},
-	}
-
-	// Global flags
-	rootCmd.PersistentFlags().StringP("executor", "e", "claude", "AI executor to use: claude or codex")
-
-	// Run command - main loop
-	runCmd := &cobra.Command{
-		Use:   "run",
-		Short: "Start the auto-contributor service",
-		RunE:  runService,
 	}
 
 	// Discover command - find issues
@@ -69,15 +56,6 @@ uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 	}
 	discoverCmd.Flags().IntP("limit", "l", 10, "Maximum issues to discover")
 
-	// Solve command - solve a single issue
-	solveCmd := &cobra.Command{
-		Use:   "solve",
-		Short: "Solve a single issue",
-		RunE:  solveSingle,
-	}
-	solveCmd.Flags().StringP("repo", "r", "", "Repository (owner/repo)")
-	solveCmd.Flags().IntP("issue", "i", 0, "Issue number")
-
 	// Stats command - show statistics
 	statsCmd := &cobra.Command{
 		Use:   "stats",
@@ -86,29 +64,23 @@ uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 	}
 	statsCmd.Flags().IntP("days", "d", 7, "Number of days to show")
 
-	// Status command - show worker status
-	statusCmd := &cobra.Command{
-		Use:   "status",
-		Short: "Show current worker status",
-		RunE:  showStatus,
-	}
-
-	// Loop command - continuous operation with smart discovery
+	// Loop command - continuous operation with smart discovery + V2 pipeline
 	loopCmd := &cobra.Command{
 		Use:   "loop",
-		Short: "Run continuously with AI smart discovery",
+		Short: "Run continuously: smart discovery → V2 pipeline (Scout→Analyst→Engineer⇄Reviewer→Submitter)",
 		RunE:  runLoop,
 	}
-	loopCmd.Flags().IntP("interval", "n", 60, "Minutes between discovery cycles (default 60 for ~1 issue/hour)")
+	loopCmd.Flags().IntP("interval", "n", 60, "Minutes between discovery cycles")
 	loopCmd.Flags().StringP("topic", "t", "golang", "Topic to search (e.g., 'golang', 'ai', 'web')")
 	loopCmd.Flags().StringP("depth", "d", "deep", "Analysis depth: quick, deep, ultrathink")
+	loopCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory")
 
 	// Version command
 	versionCmd := &cobra.Command{
 		Use:   "version",
 		Short: "Show version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("auto-contributor v1.0.0 (Go)")
+			fmt.Println("auto-contributor v2.0.0 (Go)")
 		},
 	}
 
@@ -124,27 +96,27 @@ uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 	smartDiscoverCmd.Flags().StringP("depth", "d", "deep", "Analysis depth: quick, deep, ultrathink")
 	smartDiscoverCmd.Flags().StringP("output", "o", "", "Output file path (optional, defaults to stdout)")
 
-	// Pipeline V2 command - process a single issue through the 5-stage agent pipeline
+	// Pipeline command - process a single issue through the 5-stage agent pipeline
 	pipelineCmd := &cobra.Command{
 		Use:   "pipeline",
-		Short: "Process an issue through the V2 agent pipeline (Scout→Analyst→Engineer⇄Reviewer→Submitter)",
+		Short: "Process an issue through the agent pipeline (Scout→Analyst→Engineer⇄Reviewer→Submitter)",
 		RunE:  runPipeline,
 	}
 	pipelineCmd.Flags().StringP("repo", "r", "", "Repository (owner/repo)")
 	pipelineCmd.Flags().IntP("issue", "i", 0, "Issue number")
-	pipelineCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory (default: auto-detect)")
+	pipelineCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory")
 
-	// Pipeline-auto command - discover issues and process them through V2 pipeline
+	// Pipeline-auto command - discover issues from specific repos and process them
 	pipelineAutoCmd := &cobra.Command{
 		Use:   "pipeline-auto",
-		Short: "Auto-discover issues and process through V2 pipeline",
+		Short: "Auto-discover issues from specific repos and process through pipeline",
 		RunE:  runPipelineAuto,
 	}
 	pipelineAutoCmd.Flags().StringSliceP("repos", "r", nil, "Target repositories (owner/repo), comma-separated")
 	pipelineAutoCmd.Flags().IntP("limit", "l", 3, "Max issues to process")
 	pipelineAutoCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory")
 
-	rootCmd.AddCommand(runCmd, discoverCmd, solveCmd, statsCmd, statusCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd, pipelineAutoCmd)
+	rootCmd.AddCommand(discoverCmd, statsCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd, pipelineAutoCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -152,21 +124,13 @@ uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 	}
 }
 
-func initApp(cmd *cobra.Command) error {
+func initApp() error {
 	var err error
 
 	// Load configuration
 	cfg, err = config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
-	}
-
-	// Override executor type from command line flag
-	if cmd != nil {
-		executorType, _ := cmd.Flags().GetString("executor")
-		if executorType != "" {
-			cfg.ExecutorType = executorType
-		}
 	}
 
 	// Get username from gh CLI if not set
@@ -191,48 +155,8 @@ func initApp(cmd *cobra.Command) error {
 		log.Info("using SQLite database", "path", cfg.DatabasePath)
 	}
 
-	log.Info("using executor", "type", cfg.ExecutorType)
-
 	// Initialize GitHub client
 	ghClient = github.New(cfg)
-
-	// Initialize worker pool
-	pool = worker.NewPool(cfg, database, ghClient)
-
-	return nil
-}
-
-func runService(cmd *cobra.Command, args []string) error {
-	fmt.Println("Starting auto-contributor service...")
-	fmt.Printf("Workers: %d, Queue size: %d\n", cfg.WorkerCount, cfg.WorkerQueueSize)
-
-	// Setup signal handling
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Start worker pool
-	pool.Start()
-	defer pool.Stop()
-
-	// Start web server if enabled
-	if cfg.WebEnabled {
-		webServer := web.New(cfg, database, pool)
-		go webServer.Start()
-		fmt.Printf("Web dashboard: http://localhost:%d\n", cfg.WebPort)
-	}
-
-	// Start result handler
-	go handleResults(ctx)
-
-	// Start issue discovery loop
-	go discoveryLoop(ctx)
-
-	// Wait for shutdown signal
-	<-sigChan
-	fmt.Println("\nShutting down...")
 
 	return nil
 }
@@ -264,67 +188,8 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		fmt.Printf("• %s#%d: %s\n", issue.Repo, issue.IssueNumber, truncate(issue.Title, 60))
+		fmt.Printf("  %s#%d: %s\n", issue.Repo, issue.IssueNumber, truncate(issue.Title, 60))
 		fmt.Printf("  Language: %s, Difficulty: %.2f\n", issue.Language, issue.DifficultyScore)
-	}
-
-	return nil
-}
-
-func solveSingle(cmd *cobra.Command, args []string) error {
-	repo, _ := cmd.Flags().GetString("repo")
-	issueNum, _ := cmd.Flags().GetInt("issue")
-
-	if repo == "" || issueNum == 0 {
-		return fmt.Errorf("both --repo and --issue are required")
-	}
-
-	fmt.Printf("Solving %s#%d...\n", repo, issueNum)
-
-	ctx := context.Background()
-
-	// Fetch issue from GitHub
-	issue, err := ghClient.GetIssue(ctx, repo, issueNum)
-	if err != nil {
-		return fmt.Errorf("fetch issue: %w", err)
-	}
-
-	// Get repo info for language
-	repoInfo, err := ghClient.GetRepoInfo(ctx, repo)
-	if err != nil {
-		return fmt.Errorf("fetch repo info: %w", err)
-	}
-
-	issue.Language = repoInfo.Language
-	issue.DifficultyScore = 0.5
-	issue.Status = models.IssueStatusDiscovered
-
-	// Save to database
-	database.CreateIssue(issue)
-
-	// Start pool with single worker
-	cfg.WorkerCount = 1
-	pool = worker.NewPool(cfg, database, ghClient)
-
-	// Set status callback
-	pool.SetStatusCallback(func(workerID int, status *worker.WorkerStatus) {
-		fmt.Printf("[Worker %d] %s: %s\n", workerID, status.Phase, status.LastOutput)
-	})
-
-	pool.Start()
-
-	// Submit issue
-	pool.Submit(issue)
-
-	// Wait for result
-	result := <-pool.Results()
-
-	pool.Stop()
-
-	if result.Success {
-		fmt.Printf("\n✓ Success! PR created: %s\n", result.PRURL)
-	} else {
-		fmt.Printf("\n✗ Failed: %v\n", result.Error)
 	}
 
 	return nil
@@ -348,39 +213,11 @@ func showStats(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func showStatus(cmd *cobra.Command, args []string) error {
-	if pool == nil {
-		fmt.Println("Service not running. Use 'run' to start.")
-		return nil
-	}
-
-	stats := pool.GetSystemStats()
-
-	fmt.Println("Worker Status:")
-	fmt.Println("─────────────────────────────")
-	fmt.Printf("Active workers: %d/%d\n", stats.ActiveWorkers, stats.ActiveWorkers+stats.IdleWorkers)
-	fmt.Printf("Queue size:     %d\n", stats.QueueSize)
-	fmt.Println()
-
-	for _, w := range stats.Workers {
-		status := "●"
-		if w.Status == "idle" {
-			status = "○"
-		}
-		fmt.Printf("%s Worker %d: %s", status, w.ID, w.Phase)
-		if w.CurrentIssue != nil {
-			fmt.Printf(" - %s#%d", w.CurrentIssue.Repo, w.CurrentIssue.IssueNumber)
-		}
-		fmt.Printf(" (completed: %d, failed: %d)\n", w.TasksCompleted, w.TasksFailed)
-	}
-
-	return nil
-}
-
 // loopConfig holds configuration for the loop command
 type loopConfig struct {
-	topic string
-	depth string
+	topic      string
+	depth      string
+	promptsDir string
 }
 
 var loopCfg loopConfig
@@ -389,11 +226,16 @@ func runLoop(cmd *cobra.Command, args []string) error {
 	interval, _ := cmd.Flags().GetInt("interval")
 	loopCfg.topic, _ = cmd.Flags().GetString("topic")
 	loopCfg.depth, _ = cmd.Flags().GetString("depth")
+	loopCfg.promptsDir, _ = cmd.Flags().GetString("prompts")
+	if loopCfg.promptsDir == "" {
+		loopCfg.promptsDir = cfg.PromptsDir
+	}
 
-	fmt.Printf("Running in loop mode with Claude smart discovery\n")
+	fmt.Printf("Running in loop mode with smart discovery + V2 pipeline\n")
 	fmt.Printf("  Interval: %d minutes\n", interval)
 	fmt.Printf("  Topic: %s\n", loopCfg.topic)
 	fmt.Printf("  Depth: %s\n", loopCfg.depth)
+	fmt.Printf("  Prompts: %s\n", loopCfg.promptsDir)
 	fmt.Println()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -402,25 +244,17 @@ func runLoop(cmd *cobra.Command, args []string) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start worker pool
-	pool.Start()
-	defer pool.Stop()
-
-	// Start web server if enabled
-	if cfg.WebEnabled {
-		webServer = web.New(cfg, database, pool)
-		go webServer.Start()
-		fmt.Printf("Web dashboard: http://localhost:%d\n", cfg.WebPort)
+	// Create V2 pipeline
+	pipe, err := pipeline.New(cfg, database, ghClient, loopCfg.promptsDir)
+	if err != nil {
+		return fmt.Errorf("create pipeline: %w", err)
 	}
-
-	// Start result handler
-	go handleResults(ctx)
 
 	ticker := time.NewTicker(time.Duration(interval) * time.Minute)
 	defer ticker.Stop()
 
 	// Run immediately
-	runCycle(ctx)
+	runCycle(ctx, pipe)
 
 	for {
 		select {
@@ -428,12 +262,12 @@ func runLoop(cmd *cobra.Command, args []string) error {
 			fmt.Println("\nShutting down...")
 			return nil
 		case <-ticker.C:
-			runCycle(ctx)
+			runCycle(ctx, pipe)
 		}
 	}
 }
 
-func runCycle(ctx context.Context) {
+func runCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 	topic := loopCfg.topic
 	if topic == "" {
 		topic = "golang"
@@ -445,12 +279,7 @@ func runCycle(ctx context.Context) {
 
 	log.Info("starting discovery cycle", "topic", topic, "depth", depth)
 
-	// Update discovery status
-	if webServer != nil {
-		webServer.UpdateDiscoveryStatus("searching", topic, "Searching GitHub for issues...", 0)
-	}
-
-	// Use Claude-powered smart discovery instead of dumb GitHub search
+	// Use Claude-powered smart discovery
 	req := discovery.DiscoveryRequest{
 		Topic:         topic,
 		Languages:     cfg.Languages,
@@ -458,22 +287,14 @@ func runCycle(ctx context.Context) {
 		Labels:        cfg.IncludeLabels,
 		MaxAgeDays:    cfg.MaxIssueAgeDays,
 		ExcludeRepos:  cfg.ExcludeRepos,
-		Limit:         10, // Find more issues, store all in DB for workers
+		Limit:         10,
 		AnalysisDepth: depth,
 	}
 
-	// Update status to analyzing
-	if webServer != nil {
-		webServer.UpdateDiscoveryStatus("analyzing", topic, "Claude is analyzing issues...", 0)
-	}
-
-	discoverer := discovery.NewClaudeDiscoverer(24 * time.Hour) // No practical timeout - let Claude work
+	discoverer := discovery.NewClaudeDiscoverer(24 * time.Hour)
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
 		log.Error("smart discovery failed", "error", err)
-		if webServer != nil {
-			webServer.UpdateDiscoveryStatus("idle", "", "", 0)
-		}
 		return
 	}
 
@@ -482,43 +303,25 @@ func runCycle(ctx context.Context) {
 		"total_candidates", result.Metadata.TotalCandidates,
 	)
 
-	// Update status to complete
-	if webServer != nil {
-		webServer.UpdateDiscoveryStatus("complete", topic,
-			fmt.Sprintf("Found %d issues from %d candidates", len(result.Issues), result.Metadata.TotalCandidates),
-			len(result.Issues))
-	}
-
-	// Submit high-scoring issues to queue
-	submitted := 0
+	// Process high-scoring issues through V2 pipeline
+	var succeeded, failed, skipped int
 	for _, issue := range result.Issues {
-		// Only submit issues with score >= 0.4 (lowered from 0.6)
 		if issue.SuitabilityScore < 0.4 {
-			log.Debug("skipping low score issue",
-				"repo", issue.Repo,
-				"issue", issue.IssueNumber,
-				"score", issue.SuitabilityScore,
-			)
+			skipped++
 			continue
 		}
 
-		// Double-check for existing PR before submitting to queue
+		// Double-check for existing PR
 		hasPR, _ := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
 		if hasPR {
-			log.Debug("skipping issue with existing PR",
-				"repo", issue.Repo,
-				"issue", issue.IssueNumber,
-			)
+			skipped++
 			continue
 		}
 
-		// Check blacklist before saving
+		// Check blacklist
 		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
 		if isBlacklisted {
-			log.Debug("skipping blacklisted repo",
-				"repo", issue.Repo,
-				"issue", issue.IssueNumber,
-			)
+			skipped++
 			continue
 		}
 
@@ -528,86 +331,45 @@ func runCycle(ctx context.Context) {
 			Title:           issue.Title,
 			Body:            issue.Analysis.Recommendation,
 			Language:        cfg.Languages[0],
-			DifficultyScore: issue.SuitabilityScore, // Higher score = higher priority
-			Status:          models.IssueStatusPending, // Workers will pick this up from DB
+			DifficultyScore: issue.SuitabilityScore,
+			Status:          models.IssueStatusDiscovered,
 			DiscoveredAt:    time.Now(),
 			UpdatedAt:       time.Now(),
 		}
 
-		// Save to DB - workers will automatically pick up pending issues
 		if err := database.CreateIssue(dbIssue); err != nil {
 			log.Warn("failed to save issue to DB",
 				"repo", issue.Repo,
 				"issue", issue.IssueNumber,
 				"error", err,
 			)
-		} else {
-			log.Info("saved issue to DB",
+			continue
+		}
+
+		log.Info("processing issue",
+			"repo", issue.Repo,
+			"issue", issue.IssueNumber,
+			"score", issue.SuitabilityScore,
+		)
+
+		// Process through V2 pipeline
+		if err := pipe.ProcessIssue(ctx, dbIssue); err != nil {
+			log.Error("pipeline failed",
 				"repo", issue.Repo,
 				"issue", issue.IssueNumber,
-				"score", issue.SuitabilityScore,
-				"fix_type", issue.Analysis.FixType,
+				"error", err,
 			)
-			submitted++
+			failed++
+		} else {
+			succeeded++
 		}
 	}
 
-	log.Info("cycle complete", "submitted", submitted)
-
-	// Set discovery to idle after cycle completes
-	if webServer != nil {
-		webServer.UpdateDiscoveryStatus("idle", "", "", 0)
-	}
-}
-
-func handleResults(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case result, ok := <-pool.Results():
-			if !ok {
-				return
-			}
-			if result.Success {
-				log.Info("PR created successfully",
-					"worker_id", result.WorkerID,
-					"repo", result.Issue.Repo,
-					"issue", result.Issue.IssueNumber,
-					"pr_url", result.PRURL,
-				)
-			} else {
-				log.Error("worker failed",
-					"worker_id", result.WorkerID,
-					"repo", result.Issue.Repo,
-					"issue", result.Issue.IssueNumber,
-					"error", result.Error,
-				)
-			}
-		}
-	}
-}
-
-func discoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(cfg.IssueCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Get pending issues from database
-			issues, err := database.GetIssuesByStatus(models.IssueStatusDiscovered, 10)
-			if err != nil {
-				continue
-			}
-
-			for _, issue := range issues {
-				pool.Submit(issue)
-			}
-		}
-	}
+	log.Info("cycle complete",
+		"succeeded", succeeded,
+		"failed", failed,
+		"skipped", skipped,
+	)
 }
 
 func truncate(s string, max int) string {
@@ -698,7 +460,7 @@ func runPipeline(cmd *cobra.Command, args []string) error {
 		promptsDir = cfg.PromptsDir
 	}
 
-	fmt.Printf("V2 Pipeline: %s#%d\n", repo, issueNum)
+	fmt.Printf("Pipeline: %s#%d\n", repo, issueNum)
 	fmt.Printf("Stages: Scout → Analyst → Engineer ⇄ Reviewer → Submitter\n\n")
 
 	ctx := context.Background()
@@ -741,7 +503,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	depth, _ := cmd.Flags().GetString("depth")
 	outputPath, _ := cmd.Flags().GetString("output")
 
-	fmt.Printf("🔍 Smart Discovery (Claude-powered)\n")
+	fmt.Printf("Smart Discovery (Claude-powered)\n")
 	fmt.Printf("   Topic: %s\n", topic)
 	fmt.Printf("   Min Stars: %d\n", minStars)
 	fmt.Printf("   Limit: %d\n", limit)
@@ -764,7 +526,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	timeout := 24 * time.Hour
 	discoverer := discovery.NewClaudeDiscoverer(timeout)
 
-	fmt.Println("⏳ Running Claude discovery (this may take a few minutes)...")
+	fmt.Println("Running Claude discovery (this may take a few minutes)...")
 	fmt.Println()
 
 	ctx := context.Background()
@@ -779,11 +541,11 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 		if err := os.WriteFile(outputPath, data, 0644); err != nil {
 			return fmt.Errorf("failed to write output: %w", err)
 		}
-		fmt.Printf("✅ Results saved to: %s\n", outputPath)
+		fmt.Printf("Results saved to: %s\n", outputPath)
 	}
 
 	// Print summary
-	fmt.Printf("📊 Discovery Results\n")
+	fmt.Printf("Discovery Results\n")
 	fmt.Printf("   Total candidates: %d\n", result.Metadata.TotalCandidates)
 	fmt.Printf("   Analyzed: %d\n", result.Metadata.Analyzed)
 	fmt.Printf("   Selected: %d\n", result.Metadata.Selected)
@@ -791,37 +553,36 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Print issues table
-	fmt.Println("🎯 Discovered Issues:")
+	fmt.Println("Discovered Issues:")
 	fmt.Println("─────────────────────────────────────────────────────────────────────────")
 	for i, issue := range result.Issues {
-		scoreEmoji := "🔴"
+		score := "LOW"
 		if issue.SuitabilityScore >= 0.8 {
-			scoreEmoji = "🟢"
+			score = "HIGH"
 		} else if issue.SuitabilityScore >= 0.6 {
-			scoreEmoji = "🟡"
+			score = "MED"
 		}
 
-		fmt.Printf("%d. %s [%.2f] %s#%d\n", i+1, scoreEmoji, issue.SuitabilityScore, issue.Repo, issue.IssueNumber)
-		fmt.Printf("   📝 %s\n", truncate(issue.Title, 60))
-		fmt.Printf("   🔗 %s\n", issue.URL)
-		fmt.Printf("   📋 %s | %s complexity | ~%d files\n",
+		fmt.Printf("%d. [%s %.2f] %s#%d\n", i+1, score, issue.SuitabilityScore, issue.Repo, issue.IssueNumber)
+		fmt.Printf("   %s\n", truncate(issue.Title, 60))
+		fmt.Printf("   %s\n", issue.URL)
+		fmt.Printf("   %s | %s complexity | ~%d files\n",
 			issue.Analysis.FixType, issue.Analysis.Complexity, issue.Analysis.EstimatedFiles)
-		fmt.Printf("   💡 %s\n", issue.Analysis.Recommendation)
+		fmt.Printf("   %s\n", issue.Analysis.Recommendation)
 		if len(issue.Analysis.Blockers) > 0 {
-			fmt.Printf("   ⚠️  Blockers: %v\n", issue.Analysis.Blockers)
+			fmt.Printf("   Blockers: %v\n", issue.Analysis.Blockers)
 		}
 		fmt.Println()
 	}
 
-	// Optionally save to database for later processing
+	// Save high-scoring issues to database
 	if database != nil && len(result.Issues) > 0 {
-		fmt.Println("💾 Saving high-scoring issues to database...")
+		fmt.Println("Saving high-scoring issues to database...")
 		for _, issue := range result.Issues {
 			if issue.SuitabilityScore >= 0.7 {
-				// Check blacklist before saving
 				isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
 				if isBlacklisted {
-					fmt.Printf("   ⚫ Skipping blacklisted repo: %s\n", issue.Repo)
+					fmt.Printf("   Skipping blacklisted repo: %s\n", issue.Repo)
 					continue
 				}
 
@@ -831,15 +592,15 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 					Title:           issue.Title,
 					Body:            issue.Analysis.Recommendation,
 					Language:        cfg.Languages[0],
-					DifficultyScore: 1.0 - issue.SuitabilityScore, // invert for difficulty
+					DifficultyScore: 1.0 - issue.SuitabilityScore,
 					Status:          models.IssueStatusDiscovered,
 					DiscoveredAt:    time.Now(),
 					UpdatedAt:       time.Now(),
 				}
 				if err := database.CreateIssue(dbIssue); err != nil {
-					fmt.Printf("   ⚠️  Failed to save %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
+					fmt.Printf("   Failed to save %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
 				} else {
-					fmt.Printf("   ✅ Saved %s#%d\n", issue.Repo, issue.IssueNumber)
+					fmt.Printf("   Saved %s#%d\n", issue.Repo, issue.IssueNumber)
 				}
 			}
 		}

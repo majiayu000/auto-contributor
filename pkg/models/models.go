@@ -8,9 +8,7 @@ import (
 type IssueStatus string
 
 const (
-	IssueStatusPending    IssueStatus = "pending"    // In DB queue, waiting for worker
-	IssueStatusDiscovered IssueStatus = "discovered" // Legacy: same as pending
-	IssueStatusProcessing IssueStatus = "processing" // Worker is processing
+	IssueStatusDiscovered IssueStatus = "discovered" // Newly found, ready for pipeline
 	IssueStatusCompleted  IssueStatus = "completed"  // Successfully created PR
 	IssueStatusPRCreated  IssueStatus = "pr_created" // Legacy: same as completed
 	IssueStatusFailed     IssueStatus = "failed"     // Failed, won't retry
@@ -254,31 +252,6 @@ type PRMetrics struct {
 	AvgTimeToMerge     float64 `json:"avg_time_to_merge_hours"`
 	AvgTimeToFirstReview float64 `json:"avg_time_to_first_review_hours"`
 	AvgReviewComments  float64 `json:"avg_review_comments"`
-}
-
-// WorkerState represents the current state of a worker
-type WorkerState struct {
-	ID             int       `json:"id"`
-	Status         string    `json:"status"` // idle, running, error
-	CurrentIssue   *Issue    `json:"current_issue,omitempty"`
-	Phase          string    `json:"phase"` // cloning, solving, testing, pr_creating
-	Progress       float64   `json:"progress"`
-	LastOutput     string    `json:"last_output"`
-	StartedAt      time.Time `json:"started_at"`
-	TasksCompleted int       `json:"tasks_completed"`
-	TasksFailed    int       `json:"tasks_failed"`
-}
-
-// SystemStats represents overall system statistics
-type SystemStats struct {
-	ActiveWorkers     int           `json:"active_workers"`
-	IdleWorkers       int           `json:"idle_workers"`
-	QueueSize         int           `json:"queue_size"`
-	TodayAttempted    int           `json:"today_attempted"`
-	TodaySolved       int           `json:"today_solved"`
-	TodaySuccessRate  float64       `json:"today_success_rate"`
-	AvgSolveTime      time.Duration `json:"avg_solve_time"`
-	Workers           []WorkerState `json:"workers"`
 }
 
 // BlacklistEntry represents a blacklisted repository
