@@ -61,7 +61,26 @@ gh pr create --repo {{ .Repo }} \
   --base {{ .BaseBranch }}
 ```
 
-### 5. Verify PR Created
+### 5. CI Failure Triage (if tests failed)
+
+If tests fail, distinguish between:
+
+**Code failure** (your fault — must fix before submitting):
+- Test assertions fail on code you changed
+- Type errors, syntax errors, import errors in your files
+- Lint violations in your changes
+
+**Infrastructure failure** (NOT your fault — OK to submit with comment):
+- Network timeouts, DNS resolution failures
+- Docker/container pull failures
+- Flaky tests that fail on unrelated code
+- CI runner out of memory/disk
+- Rate limiting from external APIs
+
+If infrastructure failure: proceed with PR, add a comment explaining the CI failure is unrelated.
+If code failure: do NOT submit. Output SUBMIT_ABORTED with details.
+
+### 6. Verify PR Created
 
 ```bash
 gh pr view --repo {{ .Repo }} --json url,number,state

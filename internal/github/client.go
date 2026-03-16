@@ -530,6 +530,46 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 	return issues, nil
 }
 
+// CommentOnIssue posts a comment on a GitHub issue (pre-communication).
+func (c *Client) CommentOnIssue(ctx context.Context, repoFullName string, issueNum int, body string) error {
+	cmd := exec.CommandContext(ctx, "gh", "issue", "comment",
+		fmt.Sprintf("%d", issueNum),
+		"-R", repoFullName,
+		"--body", body)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("comment on %s#%d: %s - %w", repoFullName, issueNum, strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+// CloneRepo clones a repo into destDir using gh CLI.
+func (c *Client) CloneRepo(ctx context.Context, repoFullName, destDir string) error {
+	cmd := exec.CommandContext(ctx, "gh", "repo", "clone", repoFullName, destDir, "--", "--depth", "1")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("clone %s: %s - %w", repoFullName, strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+// SetupForkRemote adds a "fork" remote pointing to the user's fork.
+func (c *Client) SetupForkRemote(ctx context.Context, repoDir, repoFullName string) error {
+	// Extract repo name (owner/repo -> repo)
+	parts := strings.Split(repoFullName, "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid repo name: %s", repoFullName)
+	}
+	forkURL := fmt.Sprintf("https://github.com/%s/%s.git", c.config.GitHubUsername, parts[1])
+
+	cmd := exec.CommandContext(ctx, "git", "remote", "add", "fork", forkURL)
+	cmd.Dir = repoDir
+	// Ignore error if remote already exists
+	cmd.CombinedOutput()
+	return nil
+}
+
 func (c *Client) estimateDifficulty(labels []string, repo *RepoInfo) float64 {
 	score := 0.5
 

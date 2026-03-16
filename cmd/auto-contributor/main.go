@@ -659,7 +659,7 @@ func runPipelineAuto(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Process each through the pipeline
-	pipe, err := pipeline.New(cfg, database, promptsDir)
+	pipe, err := pipeline.New(cfg, database, ghClient, promptsDir)
 	if err != nil {
 		return fmt.Errorf("create pipeline: %w", err)
 	}
@@ -722,7 +722,7 @@ func runPipeline(cmd *cobra.Command, args []string) error {
 	database.CreateIssue(issue)
 
 	// Create and run pipeline
-	pipe, err := pipeline.New(cfg, database, promptsDir)
+	pipe, err := pipeline.New(cfg, database, ghClient, promptsDir)
 	if err != nil {
 		return fmt.Errorf("create pipeline: %w", err)
 	}

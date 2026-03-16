@@ -10,13 +10,14 @@ import (
 
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
+	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 	log "github.com/sirupsen/logrus"
 )
 
 // Pipeline orchestrates the 5-stage agent workflow:
-// Scout → Analyst → Engineer ⇄ Reviewer → Submitter
+// Scout → Pre-communicate → Fork/Clone → Analyst → Engineer ⇄ Reviewer → Submitter
 //
 // The orchestrator is a pure state machine. All business logic lives in
 // the prompt templates (prompts/*.md). This design follows the Symphony
@@ -24,13 +25,14 @@ import (
 type Pipeline struct {
 	cfg       *config.Config
 	db        *db.DB
+	gh        *ghclient.Client
 	prompts   *prompt.Store
 	runner    *AgentRunner
 	maxReview int
 }
 
 // New creates a Pipeline. promptsDir is the path to the prompts/ directory.
-func New(cfg *config.Config, database *db.DB, promptsDir string) (*Pipeline, error) {
+func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir string) (*Pipeline, error) {
 	ps := prompt.NewStore(promptsDir)
 	if err := ps.Load(); err != nil {
 		return nil, fmt.Errorf("load prompts: %w", err)
@@ -49,20 +51,16 @@ func New(cfg *config.Config, database *db.DB, promptsDir string) (*Pipeline, err
 	return &Pipeline{
 		cfg:       cfg,
 		db:        database,
+		gh:        gh,
 		prompts:   ps,
 		runner:    NewAgentRunner(ps, timeout),
 		maxReview: maxReview,
 	}, nil
 }
 
-// ProcessIssue runs the full 5-stage pipeline for a single issue.
+// ProcessIssue runs the full pipeline for a single issue.
 // It updates DB status at each stage boundary.
 func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error {
-	workspace, err := p.createWorkspace(issue)
-	if err != nil {
-		return fmt.Errorf("create workspace: %w", err)
-	}
-
 	// Stage 1: Scout
 	scout, err := p.runScout(ctx, issue)
 	if err != nil {
@@ -72,6 +70,16 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	if scout.Verdict != "PROCEED" {
 		p.markAbandoned(issue, fmt.Sprintf("scout: %s", scout.Reason))
 		return nil
+	}
+
+	// Stage 1.5: Pre-communication (Contributor Skill defense #6)
+	p.preComment(ctx, issue, scout)
+
+	// Stage 1.6: Fork + Clone (Contributor Skill Phase 3.1)
+	workspace, err := p.forkAndClone(ctx, issue)
+	if err != nil {
+		p.markFailed(issue, "fork_clone_failed", err.Error())
+		return err
 	}
 
 	// Stage 2: Analyst
@@ -129,15 +137,71 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	}
 
 	log.WithFields(log.Fields{
-		"repo":    issue.Repo,
-		"issue":   issue.IssueNumber,
-		"pr_url":  submit.PRURL,
+		"repo":   issue.Repo,
+		"issue":  issue.IssueNumber,
+		"pr_url": submit.PRURL,
 	}).Info("pipeline completed successfully")
 
 	return nil
 }
 
-// engineerReviewLoop runs the Engineer ⇄ Reviewer cycle up to maxReview rounds.
+// --- Pre-communication (Contributor Skill defense #6) ---
+
+func (p *Pipeline) preComment(ctx context.Context, issue *models.Issue, scout *ScoutResult) {
+	body := fmt.Sprintf(
+		"Hi, I've been looking into this and traced the root cause.\n\n"+
+			"**Proposed approach:** %s\n\n"+
+			"I'll open a draft PR shortly. Happy to adjust based on your preference.",
+		scout.SuggestedApproach)
+
+	if err := p.gh.CommentOnIssue(ctx, issue.Repo, issue.IssueNumber, body); err != nil {
+		log.WithError(err).Warn("pre-communication comment failed (non-blocking)")
+	} else {
+		log.WithFields(log.Fields{
+			"repo":  issue.Repo,
+			"issue": issue.IssueNumber,
+		}).Info("pre-communication comment posted")
+	}
+}
+
+// --- Fork + Clone (Contributor Skill Phase 3.1) ---
+
+func (p *Pipeline) forkAndClone(ctx context.Context, issue *models.Issue) (string, error) {
+	workspace, err := p.createWorkspace(issue)
+	if err != nil {
+		return "", fmt.Errorf("create workspace dir: %w", err)
+	}
+
+	// Check if already cloned (idempotent)
+	if _, err := os.Stat(filepath.Join(workspace, ".git")); err == nil {
+		log.WithField("workspace", workspace).Info("repo already cloned, reusing")
+		return workspace, nil
+	}
+
+	// Fork to user's account
+	log.WithField("repo", issue.Repo).Info("forking repo")
+	if err := p.gh.ForkRepo(ctx, issue.Repo); err != nil {
+		return "", fmt.Errorf("fork %s: %w", issue.Repo, err)
+	}
+
+	// Clone into workspace
+	log.WithField("repo", issue.Repo).Info("cloning repo")
+	// Remove workspace dir first since CloneRepo expects empty target
+	os.RemoveAll(workspace)
+	if err := p.gh.CloneRepo(ctx, issue.Repo, workspace); err != nil {
+		return "", fmt.Errorf("clone %s: %w", issue.Repo, err)
+	}
+
+	// Add fork remote for pushing
+	if err := p.gh.SetupForkRemote(ctx, workspace, issue.Repo); err != nil {
+		log.WithError(err).Warn("setup fork remote (non-blocking)")
+	}
+
+	return workspace, nil
+}
+
+// --- Engineer ⇄ Reviewer loop ---
+
 func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) error {
 	var lastReview *CodeReviewResult
 
@@ -339,7 +403,6 @@ func (p *Pipeline) createWorkspace(issue *models.Issue) (string, error) {
 }
 
 func sanitizeRepoName(repo string) string {
-	// owner/repo → owner-repo
 	result := make([]byte, 0, len(repo))
 	for _, c := range repo {
 		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
