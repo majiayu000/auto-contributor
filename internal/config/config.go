@@ -40,6 +40,10 @@ type Config struct {
 	MinRepoStars   int      `mapstructure:"min_repo_stars"`
 	MaxIssueAgeDays int     `mapstructure:"max_issue_age_days"`
 
+	// Pipeline V2 settings
+	MaxReviewRounds int    `mapstructure:"max_review_rounds"`
+	PromptsDir      string `mapstructure:"prompts_dir"`
+
 	// Web UI
 	WebEnabled bool   `mapstructure:"web_enabled"`
 	WebPort    int    `mapstructure:"web_port"`
@@ -70,6 +74,8 @@ func Default() *Config {
 		ExcludeRepos:      []string{},
 		MinRepoStars:      10,
 		MaxIssueAgeDays:   30,
+		MaxReviewRounds:   3,
+		PromptsDir:        filepath.Join(dataDir, "prompts"),
 		WebEnabled:        true,
 		WebPort:           8080,
 		LogLevel:          "info",

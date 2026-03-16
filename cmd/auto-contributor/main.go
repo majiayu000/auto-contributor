@@ -16,6 +16,7 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/db"
 	"github.com/majiayu000/auto-contributor/internal/discovery"
 	"github.com/majiayu000/auto-contributor/internal/github"
+	"github.com/majiayu000/auto-contributor/internal/pipeline"
 	"github.com/majiayu000/auto-contributor/internal/web"
 	"github.com/majiayu000/auto-contributor/internal/worker"
 	"github.com/majiayu000/auto-contributor/pkg/logger"
@@ -123,7 +124,17 @@ uses AI (Claude or Codex) to create fixes, and submits pull requests.`,
 	smartDiscoverCmd.Flags().StringP("depth", "d", "deep", "Analysis depth: quick, deep, ultrathink")
 	smartDiscoverCmd.Flags().StringP("output", "o", "", "Output file path (optional, defaults to stdout)")
 
-	rootCmd.AddCommand(runCmd, discoverCmd, solveCmd, statsCmd, statusCmd, loopCmd, versionCmd, smartDiscoverCmd)
+	// Pipeline V2 command - process a single issue through the 5-stage agent pipeline
+	pipelineCmd := &cobra.Command{
+		Use:   "pipeline",
+		Short: "Process an issue through the V2 agent pipeline (Scout→Analyst→Engineer⇄Reviewer→Submitter)",
+		RunE:  runPipeline,
+	}
+	pipelineCmd.Flags().StringP("repo", "r", "", "Repository (owner/repo)")
+	pipelineCmd.Flags().IntP("issue", "i", 0, "Issue number")
+	pipelineCmd.Flags().StringP("prompts", "p", "", "Path to prompts directory (default: auto-detect)")
+
+	rootCmd.AddCommand(runCmd, discoverCmd, solveCmd, statsCmd, statusCmd, loopCmd, versionCmd, smartDiscoverCmd, pipelineCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -594,6 +605,56 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func runPipeline(cmd *cobra.Command, args []string) error {
+	repo, _ := cmd.Flags().GetString("repo")
+	issueNum, _ := cmd.Flags().GetInt("issue")
+
+	if repo == "" || issueNum == 0 {
+		return fmt.Errorf("both --repo and --issue are required")
+	}
+
+	// Resolve prompts directory
+	promptsDir, _ := cmd.Flags().GetString("prompts")
+	if promptsDir == "" {
+		promptsDir = cfg.PromptsDir
+	}
+
+	fmt.Printf("V2 Pipeline: %s#%d\n", repo, issueNum)
+	fmt.Printf("Stages: Scout → Analyst → Engineer ⇄ Reviewer → Submitter\n\n")
+
+	ctx := context.Background()
+
+	// Fetch issue from GitHub
+	issue, err := ghClient.GetIssue(ctx, repo, issueNum)
+	if err != nil {
+		return fmt.Errorf("fetch issue: %w", err)
+	}
+
+	repoInfo, err := ghClient.GetRepoInfo(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("fetch repo info: %w", err)
+	}
+
+	issue.Language = repoInfo.Language
+	issue.DifficultyScore = 0.5
+	issue.Status = models.IssueStatusDiscovered
+
+	// Save to database
+	database.CreateIssue(issue)
+
+	// Create and run pipeline
+	pipe, err := pipeline.New(cfg, database, promptsDir)
+	if err != nil {
+		return fmt.Errorf("create pipeline: %w", err)
+	}
+
+	if err := pipe.ProcessIssue(ctx, issue); err != nil {
+		return fmt.Errorf("pipeline failed: %w", err)
+	}
+
+	return nil
 }
 
 func smartDiscover(cmd *cobra.Command, args []string) error {

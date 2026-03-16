@@ -16,6 +16,13 @@ const (
 	IssueStatusFailed     IssueStatus = "failed"     // Failed, won't retry
 	IssueStatusMerged     IssueStatus = "merged"     // PR was merged
 	IssueStatusAbandoned  IssueStatus = "abandoned"  // Manually abandoned
+
+	// V2 pipeline statuses
+	IssueStatusAnalyzing   IssueStatus = "analyzing"   // Analyst agent running
+	IssueStatusEngineering IssueStatus = "engineering"  // Engineer agent running
+	IssueStatusReviewing   IssueStatus = "reviewing"    // Reviewer agent running
+	IssueStatusRework      IssueStatus = "rework"       // Engineer reworking after review
+	IssueStatusSubmitting  IssueStatus = "submitting"   // Submitter agent running
 )
 
 // PRStatus represents the status of a pull request
