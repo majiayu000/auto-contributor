@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"io"
 	"os"
 	"time"
 
@@ -33,6 +34,16 @@ func SetLevel(level string) {
 	case "error":
 		log.SetLevel(logrus.ErrorLevel)
 	}
+}
+
+// SetFile adds a log file output alongside stdout
+func SetFile(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	log.SetOutput(io.MultiWriter(os.Stdout, f))
+	return nil
 }
 
 // SetJSON sets JSON format for logging

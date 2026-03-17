@@ -36,6 +36,12 @@ type Config struct {
 	MaxReviewRounds int    `mapstructure:"max_review_rounds"`
 	PromptsDir      string `mapstructure:"prompts_dir"`
 
+	// Loop settings
+	DiscoveryInterval int    `mapstructure:"discovery_interval"` // minutes between discovery cycles
+	FeedbackInterval  int    `mapstructure:"feedback_interval"`  // minutes between feedback scans
+	Topic             string `mapstructure:"topic"`              // discovery topic (e.g., "ai", "golang")
+	AnalysisDepth     string `mapstructure:"analysis_depth"`     // quick, deep, ultrathink
+
 	// Logging
 	LogLevel string `mapstructure:"log_level"`
 	LogFile  string `mapstructure:"log_file"`
@@ -58,8 +64,12 @@ func Default() *Config {
 		ExcludeRepos:     []string{},
 		MinRepoStars:     10,
 		MaxIssueAgeDays:  30,
-		MaxReviewRounds:  3,
-		PromptsDir:       filepath.Join(dataDir, "prompts"),
+		MaxReviewRounds:   3,
+		PromptsDir:        filepath.Join(dataDir, "prompts"),
+		DiscoveryInterval: 60,
+		FeedbackInterval:  30,
+		Topic:             "ai",
+		AnalysisDepth:     "deep",
 		LogLevel:         "info",
 		LogFile:          filepath.Join(dataDir, "auto-contributor.log"),
 	}
@@ -99,6 +109,15 @@ func Load() (*Config, error) {
 	// Ensure directories exist
 	os.MkdirAll(cfg.WorkspaceDir, 0755)
 	os.MkdirAll(filepath.Dir(cfg.DatabasePath), 0755)
+
+	// Auto-detect prompts directory: prefer ./prompts (project-local) over default
+	homeDir, _ := os.UserHomeDir()
+	defaultPromptsDir := filepath.Join(homeDir, ".auto-contributor", "prompts")
+	if cfg.PromptsDir == defaultPromptsDir {
+		if info, err := os.Stat("prompts"); err == nil && info.IsDir() {
+			cfg.PromptsDir = "prompts"
+		}
+	}
 
 	return cfg, nil
 }

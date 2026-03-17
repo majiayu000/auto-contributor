@@ -27,7 +27,8 @@ const (
 type PRStatus string
 
 const (
-	PRStatusOpen       PRStatus = "open"
+	PRStatusDraft      PRStatus = "draft" // Draft PR, waiting for CI
+	PRStatusOpen       PRStatus = "open"  // Ready for review, checking feedback
 	PRStatusMerged     PRStatus = "merged"
 	PRStatusClosed     PRStatus = "closed"
 	PRStatusResponding PRStatus = "responding"

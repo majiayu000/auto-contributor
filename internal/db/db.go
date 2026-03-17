@@ -489,8 +489,18 @@ func (db *DB) CreateIssue(issue *models.Issue) error {
 	}
 
 	id, _ := result.LastInsertId()
-	issue.ID = id
-	return nil
+	if id > 0 {
+		issue.ID = id
+		return nil
+	}
+
+	// ON CONFLICT update: LastInsertId is 0, query the real ID
+	lookupQuery := fmt.Sprintf(
+		`SELECT id FROM issues WHERE repo = %s AND issue_number = %s`,
+		db.placeholder(1), db.placeholder(2),
+	)
+	err = db.QueryRow(lookupQuery, issue.Repo, issue.IssueNumber).Scan(&issue.ID)
+	return err
 }
 
 // GetIssuesByStatus retrieves issues by status
@@ -570,7 +580,7 @@ func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 			   review_comment_count, first_review_at, last_feedback_check_at, feedback_round,
 			   created_at, updated_at
 		FROM pull_requests
-		WHERE status = 'open'
+		WHERE status IN ('open', 'draft')
 	`)
 	if err != nil {
 		return nil, err
@@ -674,7 +684,8 @@ func (db *DB) GetAttemptCount(issueID int64) (int, error) {
 // GetIssueByID retrieves an issue by its primary key.
 func (db *DB) GetIssueByID(id int64) (*models.Issue, error) {
 	query := fmt.Sprintf(`
-		SELECT id, repo, issue_number, title, body, labels, language, difficulty_score, status, error_message, retry_count, discovered_at, updated_at
+		SELECT id, repo, issue_number, title, COALESCE(body,''), COALESCE(labels,''), COALESCE(language,''),
+			   difficulty_score, status, COALESCE(error_message,''), retry_count, discovered_at, updated_at
 		FROM issues WHERE id = %s
 	`, db.placeholder(1))
 
@@ -708,6 +719,83 @@ func (db *DB) UpdatePRReviewStats(prID int64, commentCount int, firstReviewAt *t
 	`, db.placeholder(1), db.placeholder(2), db.placeholder(3))
 	_, err := db.Exec(query, commentCount, firstReviewAt, prID)
 	return err
+}
+
+// EnsurePRWithIssue creates Issue + PR records if they don't already exist in the DB.
+// Used by feedback-loop to sync GitHub-discovered PRs into the local database.
+func (db *DB) EnsurePRWithIssue(repo string, prNumber int, prURL, branchName, title, body string) (*models.PullRequest, error) {
+	// Check if PR already exists by URL
+	var prID int64
+	query := fmt.Sprintf(`SELECT id FROM pull_requests WHERE pr_url = %s`, db.placeholder(1))
+	err := db.QueryRow(query, prURL).Scan(&prID)
+	if err == nil {
+		return db.getPRByID(prID)
+	}
+
+	// Use negative PR number as issue_number to avoid conflicts
+	// (real issues have positive numbers, synced PRs use -prNumber)
+	issueNumber := -prNumber
+
+	// Create a lightweight issue record
+	issue := &models.Issue{
+		Repo:            repo,
+		IssueNumber:     issueNumber,
+		Title:           title,
+		Body:            body,
+		Status:          models.IssueStatusCompleted,
+		DifficultyScore: 0.5,
+		DiscoveredAt:    time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+	if err := db.CreateIssue(issue); err != nil {
+		return nil, fmt.Errorf("create issue: %w", err)
+	}
+
+	// ON CONFLICT update returns LastInsertId=0 in SQLite, query actual ID
+	if issue.ID == 0 {
+		q := fmt.Sprintf(`SELECT id FROM issues WHERE repo = %s AND issue_number = %s`,
+			db.placeholder(1), db.placeholder(2))
+		db.QueryRow(q, repo, issueNumber).Scan(&issue.ID)
+	}
+	if issue.ID == 0 {
+		return nil, fmt.Errorf("failed to resolve issue ID for %s#%d", repo, prNumber)
+	}
+
+	pr := &models.PullRequest{
+		IssueID:    issue.ID,
+		PRURL:      prURL,
+		PRNumber:   prNumber,
+		BranchName: branchName,
+		Status:     models.PRStatusOpen,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	if err := db.CreatePullRequest(pr); err != nil {
+		return nil, fmt.Errorf("create PR: %w", err)
+	}
+
+	return pr, nil
+}
+
+func (db *DB) getPRByID(id int64) (*models.PullRequest, error) {
+	query := fmt.Sprintf(`
+		SELECT id, issue_id, pr_url, pr_number, branch_name, status, ci_status, retry_count,
+			   review_comment_count, first_review_at, last_feedback_check_at, feedback_round,
+			   created_at, updated_at
+		FROM pull_requests WHERE id = %s
+	`, db.placeholder(1))
+
+	pr := &models.PullRequest{}
+	err := db.QueryRow(query, id).Scan(
+		&pr.ID, &pr.IssueID, &pr.PRURL, &pr.PRNumber, &pr.BranchName,
+		&pr.Status, &pr.CIStatus, &pr.RetryCount,
+		&pr.ReviewCommentCount, &pr.FirstReviewAt, &pr.LastFeedbackCheckAt, &pr.FeedbackRound,
+		&pr.CreatedAt, &pr.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return pr, nil
 }
 
 // MarkIssueCompleted marks an issue as completed with PR info
