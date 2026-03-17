@@ -1,0 +1,315 @@
+package pipeline
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	ghclient "github.com/majiayu000/auto-contributor/internal/github"
+	"github.com/majiayu000/auto-contributor/pkg/models"
+	log "github.com/sirupsen/logrus"
+)
+
+// ProcessPR is the state machine entry point. Called by the feedback loop for each tracked PR.
+func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error {
+	// Extract repo from PR URL (authoritative, not from issue which may be stale)
+	prRepo := repoFromPRURL(pr.PRURL)
+	if prRepo == "" {
+		return fmt.Errorf("cannot parse repo from PR URL: %s", pr.PRURL)
+	}
+
+	// Fetch current state from GitHub
+	prInfo, err := p.gh.GetPRInfo(ctx, prRepo, pr.PRNumber)
+	if err != nil {
+		return fmt.Errorf("get PR info: %w", err)
+	}
+
+	// Terminal state transitions from GitHub
+	switch prInfo.State {
+	case "MERGED":
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
+		log.WithField("pr", pr.PRURL).Info("PR merged")
+		return nil
+	case "CLOSED":
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		log.WithField("pr", pr.PRURL).Info("PR closed")
+		return nil
+	}
+
+	// Dispatch based on local state
+	switch pr.Status {
+	case models.PRStatusDraft:
+		return p.handleDraft(ctx, pr, prRepo, prInfo)
+	case models.PRStatusOpen:
+		return p.handleOpen(ctx, pr, prRepo, prInfo)
+	default:
+		return nil
+	}
+}
+
+// ProcessFeedback is an alias for ProcessPR for backward compatibility.
+func (p *Pipeline) ProcessFeedback(ctx context.Context, pr *models.PullRequest) error {
+	return p.ProcessPR(ctx, pr)
+}
+
+// handleDraft manages draft PRs: check CI, promote to ready, or fix failures.
+func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo) error {
+	// If GitHub says NOT draft anymore (manually marked ready), transition to open
+	if !prInfo.IsDraft {
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
+		log.WithField("pr", pr.PRURL).Info("draft PR manually promoted, transitioning to open")
+		pr.Status = models.PRStatusOpen
+		return p.handleOpen(ctx, pr, prRepo, prInfo)
+	}
+
+	// Check CI status
+	ci := p.gh.GetCIResult(ctx, prRepo, pr.PRNumber)
+	switch {
+	case ci.Status == "success" || ci.Status == "unknown":
+		// All checks pass or no CI configured — promote to ready
+		if err := p.gh.MarkPRReady(ctx, prRepo, pr.PRNumber); err != nil {
+			log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to mark PR ready")
+			return nil
+		}
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
+		log.WithFields(log.Fields{"pr": pr.PRURL, "ci": ci.Status}).Info("draft PR promoted to ready")
+		return nil
+
+	case ci.Status == "failure" && !ci.CodeFailures:
+		// Only metadata checks failed — promote anyway
+		log.WithFields(log.Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Info("only metadata checks failed, promoting draft PR")
+		if err := p.gh.MarkPRReady(ctx, prRepo, pr.PRNumber); err != nil {
+			log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to mark PR ready")
+			return nil
+		}
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
+		return nil
+
+	case ci.Status == "failure" && ci.CodeFailures:
+		// Code checks failed — run engineer agent to fix
+		log.WithFields(log.Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Warn("draft PR has code CI failures, attempting fix")
+		issue, err := p.db.GetIssueByID(pr.IssueID)
+		if err != nil {
+			return fmt.Errorf("load issue %d: %w", pr.IssueID, err)
+		}
+		p.attemptCIFix(ctx, pr, prRepo, issue, ci)
+		return nil
+
+	case ci.Status == "pending":
+		log.WithField("pr", pr.PRURL).Debug("draft PR waiting for CI")
+		return nil
+	}
+
+	return nil
+}
+
+// handleOpen manages open (non-draft) PRs: check for feedback, run responder.
+func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo) error {
+	// If GitHub says it's a draft (was converted back), transition to draft
+	if prInfo.IsDraft {
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusDraft)
+		log.WithField("pr", pr.PRURL).Info("open PR converted to draft")
+		return nil
+	}
+
+	// Load issue from DB
+	issue, err := p.db.GetIssueByID(pr.IssueID)
+	if err != nil {
+		return fmt.Errorf("load issue %d: %w", pr.IssueID, err)
+	}
+
+	// Get reviews + comments from GitHub
+	reviews := prInfo.Reviews
+	comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+	if err != nil {
+		return fmt.Errorf("get comments: %w", err)
+	}
+
+	// Check for new feedback since last check
+	totalFeedback := len(reviews) + len(comments)
+	if totalFeedback == 0 {
+		log.WithField("pr", pr.PRURL).Debug("no feedback on PR")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
+		return nil
+	}
+
+	hasNew := false
+	if pr.LastFeedbackCheckAt == nil {
+		hasNew = totalFeedback > 0
+	} else {
+		for _, r := range reviews {
+			if r.SubmittedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
+				hasNew = true
+				break
+			}
+		}
+		if !hasNew {
+			for _, c := range comments {
+				if c.CreatedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
+					hasNew = true
+					break
+				}
+			}
+		}
+	}
+
+	if !hasNew {
+		log.WithField("pr", pr.PRURL).Debug("no new feedback since last check")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
+		return nil
+	}
+
+	// Cap feedback rounds
+	if pr.FeedbackRound >= p.maxReview {
+		log.WithFields(log.Fields{
+			"pr":    pr.PRURL,
+			"round": pr.FeedbackRound,
+		}).Warn("max feedback rounds exceeded, skipping")
+		return nil
+	}
+
+	// Update review stats
+	firstReview := time.Now()
+	p.db.UpdatePRReviewStats(pr.ID, totalFeedback, &firstReview)
+
+	// Locate workspace
+	workspace, err := p.createWorkspace(issue)
+	if err != nil {
+		return fmt.Errorf("create workspace: %w", err)
+	}
+
+	// Build context for responder agent
+	tmplCtx := p.buildResponderCtx(issue, pr, reviews, comments)
+
+	log.WithFields(log.Fields{
+		"pr":       pr.PRURL,
+		"reviews":  len(reviews),
+		"comments": len(comments),
+		"round":    pr.FeedbackRound + 1,
+	}).Info("processing feedback")
+
+	// Run responder agent
+	var result FeedbackResult
+	if _, err := p.runner.RunJSON(ctx, "responder", workspace, tmplCtx, &result); err != nil {
+		log.WithError(err).Warn("responder parse error, treating as no_action")
+		result.Action = "no_action"
+	}
+
+	// Post replies
+	for _, reply := range result.Replies {
+		if err := p.gh.ReplyToPRComment(ctx, prRepo, pr.PRNumber, reply.CommentID, reply.Body); err != nil {
+			log.WithError(err).Warn("failed to post reply")
+		}
+	}
+
+	// Update DB
+	newRound := pr.FeedbackRound + 1
+	p.db.UpdatePRFeedbackCheck(pr.ID, newRound)
+
+	if result.Action == "close" {
+		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+	}
+
+	log.WithFields(log.Fields{
+		"pr":      pr.PRURL,
+		"action":  result.Action,
+		"summary": result.Summary,
+		"round":   newRound,
+	}).Info("feedback processed")
+
+	return nil
+}
+
+// attemptCIFix runs the engineer agent to fix code-level CI failures on a draft PR.
+func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prRepo string, issue *models.Issue, ci *ghclient.CIResult) {
+	workspace, err := p.createWorkspace(issue)
+	if err != nil {
+		log.WithError(err).Warn("cannot create workspace for CI fix")
+		return
+	}
+
+	tmplCtx := map[string]any{
+		"Repo":         prRepo,
+		"IssueNumber":  issue.IssueNumber,
+		"IssueTitle":   issue.Title,
+		"PRNumber":     pr.PRNumber,
+		"PRURL":        pr.PRURL,
+		"BranchName":   pr.BranchName,
+		"FailedChecks": strings.Join(ci.FailedChecks, ", "),
+		"IsRework":     true,
+		"ReworkRound":  pr.FeedbackRound + 1,
+		"ReworkInstructions": fmt.Sprintf(
+			"CI checks failed: %s. Read the CI logs, identify the root cause, fix the code, and push.",
+			strings.Join(ci.FailedChecks, ", "),
+		),
+	}
+
+	raw, err := p.runner.Run(ctx, "engineer", workspace, tmplCtx)
+	if err != nil {
+		log.WithError(err).WithField("pr", pr.PRURL).Warn("engineer CI fix failed")
+		return
+	}
+
+	if containsMarker(raw, "FIX_COMPLETE") {
+		log.WithField("pr", pr.PRURL).Info("engineer pushed CI fix, will check next cycle")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound+1)
+	} else {
+		log.WithField("pr", pr.PRURL).Warn("engineer could not fix CI failures")
+	}
+}
+
+func (p *Pipeline) buildResponderCtx(
+	issue *models.Issue,
+	pr *models.PullRequest,
+	reviews []ghclient.PRReview,
+	comments []ghclient.PRReviewComment,
+) map[string]any {
+	// Format reviews as readable text
+	var reviewsText string
+	for _, r := range reviews {
+		reviewsText += fmt.Sprintf("- **%s** (%s): %s\n", r.Author, r.State, r.Body)
+	}
+	if reviewsText == "" {
+		reviewsText = "(none)"
+	}
+
+	// Format inline comments
+	var commentsText string
+	for _, c := range comments {
+		commentsText += fmt.Sprintf("- [%s:%d] **%s** (id:%d): %s\n", c.Path, c.Line, c.Author, c.ID, c.Body)
+	}
+	if commentsText == "" {
+		commentsText = "(none)"
+	}
+
+	return map[string]any{
+		"Repo":           issue.Repo,
+		"IssueNumber":    issue.IssueNumber,
+		"IssueTitle":     issue.Title,
+		"IssueBody":      issue.Body,
+		"PRNumber":       pr.PRNumber,
+		"PRURL":          pr.PRURL,
+		"BranchName":     pr.BranchName,
+		"FeedbackRound":  pr.FeedbackRound + 1,
+		"Reviews":        reviewsText,
+		"InlineComments": commentsText,
+	}
+}
+
+// repoFromPRURL extracts "owner/repo" from a GitHub PR URL.
+// e.g. "https://github.com/ollama/ollama/pull/14671" -> "ollama/ollama"
+func repoFromPRURL(prURL string) string {
+	// Expected format: https://github.com/{owner}/{repo}/pull/{number}
+	const prefix = "github.com/"
+	idx := strings.Index(prURL, prefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := prURL[idx+len(prefix):] // "owner/repo/pull/123"
+	parts := strings.SplitN(rest, "/", 4)
+	if len(parts) < 3 || parts[2] != "pull" {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
+}

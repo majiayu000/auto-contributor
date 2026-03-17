@@ -1,0 +1,301 @@
+package github
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// CIResult holds detailed CI check results.
+type CIResult struct {
+	Status       string   // "success", "failure", "pending", "unknown"
+	FailedChecks []string // names of failed checks
+	CodeFailures bool     // true if any non-metadata check failed
+}
+
+// PRReview represents a single review on a PR.
+type PRReview struct {
+	Author      string `json:"author"`
+	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED
+	Body        string `json:"body"`
+	SubmittedAt string `json:"submittedAt"`
+}
+
+// PRReviewComment represents an inline review comment.
+type PRReviewComment struct {
+	ID        int64  `json:"id"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	Path      string `json:"path"`
+	Line      int    `json:"line"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// PRInfo bundles state + reviews from a single gh call.
+type PRInfo struct {
+	State   string     `json:"state"`
+	IsDraft bool       `json:"isDraft"`
+	Reviews []PRReview `json:"reviews"`
+}
+
+// GetPRInfo fetches state and reviews in one gh call to avoid rate limiting.
+func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
+		fmt.Sprintf("%d", prNum),
+		"-R", repo,
+		"--json", "state,isDraft,reviews")
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh pr view %s#%d: %s", repo, prNum, stderr.String())
+	}
+
+	// Parse with nested author object
+	var raw struct {
+		State   string `json:"state"`
+		IsDraft bool   `json:"isDraft"`
+		Reviews []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			State       string `json:"state"`
+			Body        string `json:"body"`
+			SubmittedAt string `json:"submittedAt"`
+		} `json:"reviews"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil, fmt.Errorf("parse PR info: %w", err)
+	}
+
+	info := &PRInfo{State: raw.State, IsDraft: raw.IsDraft}
+	for _, r := range raw.Reviews {
+		info.Reviews = append(info.Reviews, PRReview{
+			Author:      r.Author.Login,
+			State:       r.State,
+			Body:        r.Body,
+			SubmittedAt: r.SubmittedAt,
+		})
+	}
+	return info, nil
+}
+
+// GetPRStatus gets the CI status of a pull request
+func (c *Client) GetPRStatus(ctx context.Context, repoFullName string, prNum int) (string, error) {
+	r := c.GetCIResult(ctx, repoFullName, prNum)
+	return r.Status, nil
+}
+
+// GetCIResult returns detailed CI check status with failure classification.
+func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int) *CIResult {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "checks",
+		fmt.Sprintf("%d", prNum),
+		"--repo", repoFullName,
+		"--json", "name,state")
+
+	output, err := cmd.Output()
+	if err != nil {
+		return &CIResult{Status: "unknown"}
+	}
+
+	var checks []struct {
+		Name  string `json:"name"`
+		State string `json:"state"`
+	}
+	json.Unmarshal(output, &checks)
+
+	result := &CIResult{}
+	hasPending := false
+	for _, check := range checks {
+		if check.State == "FAILURE" || check.State == "ERROR" {
+			result.FailedChecks = append(result.FailedChecks, check.Name)
+			if !isMetadataCheck(check.Name) {
+				result.CodeFailures = true
+			}
+		}
+		if check.State == "PENDING" {
+			hasPending = true
+		}
+	}
+
+	switch {
+	case len(result.FailedChecks) > 0:
+		result.Status = "failure"
+	case hasPending:
+		result.Status = "pending"
+	default:
+		result.Status = "success"
+	}
+	return result
+}
+
+// GetPRReviewComments fetches inline review comments for a PR.
+func (c *Client) GetPRReviewComments(ctx context.Context, repo string, prNum int) ([]PRReviewComment, error) {
+	output, err := c.ghAPI(ctx, fmt.Sprintf("repos/%s/pulls/%d/comments", repo, prNum))
+	if err != nil {
+		return nil, fmt.Errorf("get PR comments: %w", err)
+	}
+
+	var raw []struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		Path      string `json:"path"`
+		Line      *int   `json:"line"`
+		CreatedAt string `json:"created_at"`
+		User      struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil, fmt.Errorf("parse comments: %w", err)
+	}
+
+	var comments []PRReviewComment
+	for _, r := range raw {
+		line := 0
+		if r.Line != nil {
+			line = *r.Line
+		}
+		comments = append(comments, PRReviewComment{
+			ID:        r.ID,
+			Author:    r.User.Login,
+			Body:      r.Body,
+			Path:      r.Path,
+			Line:      line,
+			CreatedAt: r.CreatedAt,
+		})
+	}
+	return comments, nil
+}
+
+// ReplyToPRComment posts a reply to a PR review comment.
+func (c *Client) ReplyToPRComment(ctx context.Context, repo string, prNum int, commentID int64, body string) error {
+	_, err := c.ghAPI(ctx,
+		fmt.Sprintf("repos/%s/pulls/%d/comments/%d/replies", repo, prNum, commentID),
+		"-f", fmt.Sprintf("body=%s", body))
+	if err != nil {
+		return fmt.Errorf("reply to comment %d: %w", commentID, err)
+	}
+	return nil
+}
+
+// CreatePullRequest creates a new pull request using gh
+func (c *Client) CreatePullRequest(ctx context.Context, repoFullName, title, body, head, base string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
+		"--repo", repoFullName,
+		"--title", title,
+		"--body", body,
+		"--head", head,
+		"--base", base)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Include the actual error message from gh CLI
+		return "", 0, fmt.Errorf("create PR: %s - %w", strings.TrimSpace(string(output)), err)
+	}
+
+	// Output is the PR URL
+	prURL := strings.TrimSpace(string(output))
+
+	// Extract PR number from URL
+	parts := strings.Split(prURL, "/")
+	prNum := 0
+	if len(parts) > 0 {
+		fmt.Sscanf(parts[len(parts)-1], "%d", &prNum)
+	}
+
+	return prURL, prNum, nil
+}
+
+// MarkPRReady converts a draft PR to ready for review.
+func (c *Client) MarkPRReady(ctx context.Context, repo string, prNum int) error {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "ready",
+		fmt.Sprintf("%d", prNum),
+		"-R", repo)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh pr ready %s#%d: %s - %w", repo, prNum, strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+// GitHubPR represents an open PR discovered from GitHub.
+type GitHubPR struct {
+	Repo       string `json:"repo"`       // owner/repo
+	Number     int    `json:"number"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	URL        string `json:"url"`
+	BranchName string `json:"headRefName"`
+	State      string `json:"state"`
+}
+
+// ListUserOpenPRs returns all open PRs authored by the configured user.
+func (c *Client) ListUserOpenPRs(ctx context.Context) ([]GitHubPR, error) {
+	username := c.config.GitHubUsername
+	if username == "" {
+		var err error
+		username, err = c.GetUsername(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get username: %w", err)
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, "gh", "search", "prs",
+		"--author", username,
+		"--state", "open",
+		"--limit", "50",
+		"--json", "repository,number,title,body,url",
+	)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("search open PRs: %w", err)
+	}
+
+	var raw []struct {
+		Repository struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"repository"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return nil, fmt.Errorf("parse PR list: %w", err)
+	}
+
+	var prs []GitHubPR
+	for _, r := range raw {
+		prs = append(prs, GitHubPR{
+			Repo:   r.Repository.NameWithOwner,
+			Number: r.Number,
+			Title:  r.Title,
+			Body:   r.Body,
+			URL:    r.URL,
+		})
+	}
+	return prs, nil
+}
+
+// isMetadataCheck returns true for CI checks that validate PR metadata
+// (title, description, labels, DCO) rather than code correctness.
+func isMetadataCheck(name string) bool {
+	lower := strings.ToLower(name)
+	metadataPatterns := []string{
+		"description", "title", "label", "dco",
+		"conventional commit", "semantic", "changelog",
+		"deploy/", "netlify", "pages changed", "redirect", "header rules",
+	}
+	for _, p := range metadataPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
