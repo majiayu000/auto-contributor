@@ -37,6 +37,12 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		return nil
 	}
 
+	log.WithFields(log.Fields{
+		"pr":     pr.PRURL,
+		"status": pr.Status,
+		"state":  prInfo.State,
+	}).Info("processing PR")
+
 	// Dispatch based on local state
 	switch pr.Status {
 	case models.PRStatusDraft:
@@ -129,7 +135,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	// Check for new feedback since last check
 	totalFeedback := len(reviews) + len(comments)
 	if totalFeedback == 0 {
-		log.WithField("pr", pr.PRURL).Debug("no feedback on PR")
+		log.WithField("pr", pr.PRURL).Info("no feedback on PR")
 		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
 		return nil
 	}
@@ -155,7 +161,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	}
 
 	if !hasNew {
-		log.WithField("pr", pr.PRURL).Debug("no new feedback since last check")
+		log.WithField("pr", pr.PRURL).Info("no new feedback since last check")
 		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
 		return nil
 	}
