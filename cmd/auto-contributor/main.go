@@ -60,9 +60,10 @@ to create fixes, and submits pull requests.`,
 	// Loop command - continuous operation with parallel discovery + feedback
 	loopCmd := &cobra.Command{
 		Use:   "loop",
-		Short: "Run continuously: parallel issue discovery + PR feedback scanning",
+		Short: "Run continuously: --mode full (discover+feedback) or followup (feedback only)",
 		RunE:  runLoop,
 	}
+	loopCmd.Flags().StringP("mode", "m", "", "Run mode: full (discover+feedback) or followup (feedback only)")
 
 	// Version command
 	versionCmd := &cobra.Command{

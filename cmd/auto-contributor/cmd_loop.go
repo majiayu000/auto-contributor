@@ -16,10 +16,25 @@ import (
 )
 
 func runLoop(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Running in loop mode (parallel discovery + feedback)\n")
-	fmt.Printf("  Discovery interval: %d min\n", cfg.DiscoveryInterval)
+	// Resolve mode: flag > config > default
+	mode, _ := cmd.Flags().GetString("mode")
+	if mode == "" {
+		mode = cfg.Mode
+	}
+	if mode == "" {
+		mode = "full"
+	}
+
+	switch mode {
+	case "full":
+		fmt.Printf("Running in FULL mode (discovery + feedback)\n")
+		fmt.Printf("  Discovery interval: %d min\n", cfg.DiscoveryInterval)
+	case "followup":
+		fmt.Printf("Running in FOLLOWUP mode (feedback only, no new issues)\n")
+	default:
+		return fmt.Errorf("unknown mode %q: use 'full' or 'followup'", mode)
+	}
 	fmt.Printf("  Feedback interval:  %d min\n", cfg.FeedbackInterval)
-	fmt.Printf("  Topic: %s | Depth: %s\n", cfg.Topic, cfg.AnalysisDepth)
 	fmt.Printf("  Prompts: %s\n", cfg.PromptsDir)
 	fmt.Println()
 
@@ -34,24 +49,26 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create pipeline: %w", err)
 	}
 
-	// Goroutine 1: Issue discovery + pipeline
-	go func() {
-		log.Info("starting discovery goroutine")
-		runDiscoveryCycle(ctx, pipe)
+	// Goroutine 1: Issue discovery + pipeline (full mode only)
+	if mode == "full" {
+		go func() {
+			log.Info("starting discovery goroutine")
+			runDiscoveryCycle(ctx, pipe)
 
-		ticker := time.NewTicker(time.Duration(cfg.DiscoveryInterval) * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				runDiscoveryCycle(ctx, pipe)
+			ticker := time.NewTicker(time.Duration(cfg.DiscoveryInterval) * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					runDiscoveryCycle(ctx, pipe)
+				}
 			}
-		}
-	}()
+		}()
+	}
 
-	// Goroutine 2: PR feedback scanning
+	// Goroutine 2: PR feedback scanning (both modes)
 	go func() {
 		log.Info("starting feedback goroutine")
 		checkOpenPRFeedback(ctx, pipe)

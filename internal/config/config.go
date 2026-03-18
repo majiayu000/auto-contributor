@@ -38,6 +38,7 @@ type Config struct {
 	PromptsDir      string `mapstructure:"prompts_dir"`
 
 	// Loop settings
+	Mode              string `mapstructure:"mode"`               // full or followup
 	DiscoveryInterval int    `mapstructure:"discovery_interval"` // minutes between discovery cycles
 	FeedbackInterval  int    `mapstructure:"feedback_interval"`  // minutes between feedback scans
 	Topic             string `mapstructure:"topic"`              // discovery topic (e.g., "ai", "golang")
@@ -68,6 +69,7 @@ func Default() *Config {
 		MaxReviewRounds:   3,
 		MaxPRsPerRepo:     2,
 		PromptsDir:        filepath.Join(dataDir, "prompts"),
+		Mode:              "full",
 		DiscoveryInterval: 60,
 		FeedbackInterval:  30,
 		Topic:             "ai",
