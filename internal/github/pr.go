@@ -290,8 +290,8 @@ func isMetadataCheck(name string) bool {
 	metadataPatterns := []string{
 		"description", "title", "label", "dco",
 		"conventional commit", "semantic", "changelog",
-		"deploy/", "netlify", "pages changed", "redirect", "header rules",
-		"branch stack", "wip", "cla", "license", "stale",
+		"deploy/", "netlify", "vercel", "pages changed", "redirect", "header rules",
+		"branch stack", "wip", "cla", "license", "stale", "codecov",
 	}
 	for _, p := range metadataPatterns {
 		if strings.Contains(lower, p) {
