@@ -34,6 +34,7 @@ type Config struct {
 
 	// Pipeline V2 settings
 	MaxReviewRounds int    `mapstructure:"max_review_rounds"`
+	MaxPRsPerRepo   int    `mapstructure:"max_prs_per_repo"` // max open PRs per repo before throttling
 	PromptsDir      string `mapstructure:"prompts_dir"`
 
 	// Loop settings
@@ -56,7 +57,7 @@ func Default() *Config {
 		GitHubEmail:      "1835304752@qq.com",
 		ClaudeTimeout:    24 * time.Hour,
 		ClaudeMaxRetries: 3,
-		WorkspaceDir:     filepath.Join(dataDir, "workspace"),
+		WorkspaceDir:     filepath.Join(homeDir, "Desktop", "code", "opensourece", "auto-workspace"),
 		DatabasePath:     filepath.Join(dataDir, "data.db"),
 		Languages:        []string{"go", "python", "typescript", "javascript", "rust"},
 		IncludeLabels:    []string{"good first issue", "help wanted", "bug"},
@@ -65,6 +66,7 @@ func Default() *Config {
 		MinRepoStars:     10,
 		MaxIssueAgeDays:  30,
 		MaxReviewRounds:   3,
+		MaxPRsPerRepo:     2,
 		PromptsDir:        filepath.Join(dataDir, "prompts"),
 		DiscoveryInterval: 60,
 		FeedbackInterval:  30,

@@ -573,6 +573,18 @@ func (db *DB) CreatePullRequest(pr *models.PullRequest) error {
 	return nil
 }
 
+// CountOpenPRsByRepo returns the number of open/draft PRs for a given repo.
+func (db *DB) CountOpenPRsByRepo(repo string) (int, error) {
+	var count int
+	query := fmt.Sprintf(`
+		SELECT COUNT(*) FROM pull_requests p
+		JOIN issues i ON p.issue_id = i.id
+		WHERE i.repo = %s AND p.status IN ('open', 'draft')
+	`, db.placeholder(1))
+	err := db.QueryRow(query, repo).Scan(&count)
+	return count, err
+}
+
 // GetOpenPRs retrieves all open pull requests
 func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 	rows, err := db.Query(`

@@ -60,6 +60,22 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 // ProcessIssue runs the full pipeline for a single issue.
 // It updates DB status at each stage boundary.
 func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error {
+	// Rate limit: max open PRs per repo
+	maxPR := p.cfg.MaxPRsPerRepo
+	if maxPR <= 0 {
+		maxPR = 2
+	}
+	openCount, _ := p.db.CountOpenPRsByRepo(issue.Repo)
+	if openCount >= maxPR {
+		p.markAbandoned(issue, fmt.Sprintf("rate limit: %d open PRs on %s (max %d)", openCount, issue.Repo, maxPR))
+		log.WithFields(log.Fields{
+			"repo":  issue.Repo,
+			"open":  openCount,
+			"max":   maxPR,
+		}).Warn("skipping issue: too many open PRs on this repo")
+		return nil
+	}
+
 	// Stage 1: Scout
 	scout, err := p.runScout(ctx, issue)
 	if err != nil {
