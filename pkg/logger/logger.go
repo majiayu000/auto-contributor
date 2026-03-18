@@ -95,6 +95,11 @@ func (c *ComponentLogger) WithFields(fields logrus.Fields) *logrus.Entry {
 	return c.entry.WithFields(fields)
 }
 
+// GetLogger returns the configured logrus instance for packages that need direct access.
+func GetLogger() *logrus.Logger {
+	return log
+}
+
 // Package-level functions for backward compatibility
 
 // Debug logs a debug message

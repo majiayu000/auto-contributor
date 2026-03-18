@@ -8,7 +8,6 @@ import (
 
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/pkg/models"
-	log "github.com/sirupsen/logrus"
 )
 
 // ProcessPR is the state machine entry point. Called by the feedback loop for each tracked PR.
@@ -37,7 +36,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		return nil
 	}
 
-	log.WithFields(log.Fields{
+	log.WithFields(Fields{
 		"pr":     pr.PRURL,
 		"status": pr.Status,
 		"state":  prInfo.State,
@@ -79,12 +78,12 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 			return nil
 		}
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
-		log.WithFields(log.Fields{"pr": pr.PRURL, "ci": ci.Status}).Info("draft PR promoted to ready")
+		log.WithFields(Fields{"pr": pr.PRURL, "ci": ci.Status}).Info("draft PR promoted to ready")
 		return nil
 
 	case ci.Status == "failure" && !ci.CodeFailures:
 		// Only metadata checks failed — promote anyway
-		log.WithFields(log.Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Info("only metadata checks failed, promoting draft PR")
+		log.WithFields(Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Info("only metadata checks failed, promoting draft PR")
 		if err := p.gh.MarkPRReady(ctx, prRepo, pr.PRNumber); err != nil {
 			log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to mark PR ready")
 			return nil
@@ -94,7 +93,7 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 
 	case ci.Status == "failure" && ci.CodeFailures:
 		// Code checks failed — run engineer agent to fix
-		log.WithFields(log.Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Warn("draft PR has code CI failures, attempting fix")
+		log.WithFields(Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Warn("draft PR has code CI failures, attempting fix")
 		issue, err := p.db.GetIssueByID(pr.IssueID)
 		if err != nil {
 			return fmt.Errorf("load issue %d: %w", pr.IssueID, err)
@@ -168,7 +167,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 
 	// Cap feedback rounds
 	if pr.FeedbackRound >= p.maxReview {
-		log.WithFields(log.Fields{
+		log.WithFields(Fields{
 			"pr":    pr.PRURL,
 			"round": pr.FeedbackRound,
 		}).Warn("max feedback rounds exceeded, skipping")
@@ -188,7 +187,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	// Build context for responder agent
 	tmplCtx := p.buildResponderCtx(issue, pr, reviews, comments)
 
-	log.WithFields(log.Fields{
+	log.WithFields(Fields{
 		"pr":       pr.PRURL,
 		"reviews":  len(reviews),
 		"comments": len(comments),
@@ -217,7 +216,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
 	}
 
-	log.WithFields(log.Fields{
+	log.WithFields(Fields{
 		"pr":      pr.PRURL,
 		"action":  result.Action,
 		"summary": result.Summary,

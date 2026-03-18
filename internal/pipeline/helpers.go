@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
-	log "github.com/sirupsen/logrus"
 )
 
 func containsMarker(output, marker string) bool {
@@ -55,7 +54,7 @@ func (p *Pipeline) markAbandoned(issue *models.Issue, reason string) {
 }
 
 func (p *Pipeline) logReview(issue *models.Issue, review *CodeReviewResult, round int) {
-	log.WithFields(log.Fields{
+	log.WithFields(Fields{
 		"repo":       issue.Repo,
 		"issue":      issue.IssueNumber,
 		"round":      round,

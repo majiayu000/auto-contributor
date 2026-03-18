@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
-	log "github.com/sirupsen/logrus"
 )
 
 // --- Scout ---
@@ -151,7 +150,7 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 
 		// Check engineer markers — warn but continue to reviewer
 		if !containsMarker(raw, "FIX_COMPLETE") {
-			log.WithFields(log.Fields{
+			log.WithFields(Fields{
 				"repo":  issue.Repo,
 				"issue": issue.IssueNumber,
 				"round": round,
@@ -173,7 +172,7 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 		p.logReview(issue, &review, round)
 
 		if review.Verdict == "approve" {
-			log.WithFields(log.Fields{
+			log.WithFields(Fields{
 				"repo":  issue.Repo,
 				"issue": issue.IssueNumber,
 				"round": round,
@@ -192,7 +191,7 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 			return fmt.Errorf("max review rounds exceeded for %s#%d", issue.Repo, issue.IssueNumber)
 		}
 
-		log.WithFields(log.Fields{
+		log.WithFields(Fields{
 			"repo":  issue.Repo,
 			"issue": issue.IssueNumber,
 			"round": round,

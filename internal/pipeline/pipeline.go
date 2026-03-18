@@ -12,7 +12,6 @@ import (
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/pkg/models"
-	log "github.com/sirupsen/logrus"
 )
 
 // Pipeline orchestrates the 5-stage agent workflow:
@@ -68,7 +67,7 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	openCount, _ := p.db.CountOpenPRsByRepo(issue.Repo)
 	if openCount >= maxPR {
 		p.markAbandoned(issue, fmt.Sprintf("rate limit: %d open PRs on %s (max %d)", openCount, issue.Repo, maxPR))
-		log.WithFields(log.Fields{
+		log.WithFields(Fields{
 			"repo":  issue.Repo,
 			"open":  openCount,
 			"max":   maxPR,
@@ -151,7 +150,7 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 		log.WithError(err).Warn("update status to completed")
 	}
 
-	log.WithFields(log.Fields{
+	log.WithFields(Fields{
 		"repo":   issue.Repo,
 		"issue":  issue.IssueNumber,
 		"pr_url": submit.PRURL,
@@ -172,7 +171,7 @@ func (p *Pipeline) preComment(ctx context.Context, issue *models.Issue, scout *S
 	if err := p.gh.CommentOnIssue(ctx, issue.Repo, issue.IssueNumber, body); err != nil {
 		log.WithError(err).Warn("pre-communication comment failed (non-blocking)")
 	} else {
-		log.WithFields(log.Fields{
+		log.WithFields(Fields{
 			"repo":  issue.Repo,
 			"issue": issue.IssueNumber,
 		}).Info("pre-communication comment posted")

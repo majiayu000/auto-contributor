@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/majiayu000/auto-contributor/internal/prompt"
-	log "github.com/sirupsen/logrus"
 )
 
 // AgentRunner executes Claude CLI with a rendered prompt and parses JSON output.
@@ -39,7 +38,7 @@ func (r *AgentRunner) Run(ctx context.Context, agentName string, workDir string,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	log.WithFields(log.Fields{
+	log.WithFields(Fields{
 		"agent":   agentName,
 		"workdir": workDir,
 	}).Info("running agent")
