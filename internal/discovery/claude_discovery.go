@@ -178,71 +178,78 @@ func (d *ClaudeDiscoverer) Discover(ctx context.Context, req DiscoveryRequest) (
 }
 
 func (d *ClaudeDiscoverer) buildDiscoveryPrompt(req DiscoveryRequest) string {
-	lang := "go"
-	if len(req.Languages) > 0 {
-		lang = req.Languages[0]
+	langs := req.Languages
+	if len(langs) == 0 {
+		langs = []string{"go"}
 	}
 
 	excludeRepos := ""
 	if len(req.ExcludeRepos) > 0 {
-		excludeRepos = fmt.Sprintf("\n排除这些仓库: %s", strings.Join(req.ExcludeRepos, ", "))
+		excludeRepos = fmt.Sprintf("\n排除这些仓库（不要搜索、不要推荐）: %s", strings.Join(req.ExcludeRepos, ", "))
 	}
 
-	return fmt.Sprintf(`你是一个GitHub贡献顾问。你的任务是找到真正可以贡献的issue。
+	minStars := req.MinStars
+	if minStars <= 0 {
+		minStars = 100
+	}
+
+	// Build language search commands for each language
+	var langSearches strings.Builder
+	for _, lang := range langs {
+		fmt.Fprintf(&langSearches, "gh search repos \"%s\" --language=%s --stars=\">%d\" --sort=stars --json name,owner,stargazersCount,updatedAt --limit 15\n",
+			req.Topic, lang, minStars)
+	}
+
+	labels := "good first issue,help wanted,bug"
+	if len(req.Labels) > 0 {
+		labels = strings.Join(req.Labels, ",")
+	}
+
+	return fmt.Sprintf(`你是一个GitHub贡献顾问。你的任务是找到真正适合贡献的高质量issue。
 
 ## 搜索策略
 
-### 第一步：搜索热门库
-使用ultrathink思考搜索策略，然后执行：
+### 第一步：发现高星活跃项目
+使用ultrathink思考搜索策略。优先找**高星、活跃维护、有明确label**的项目。
 
-# 搜索AI相关的trending库
-gh search repos "ai OR llm OR agent OR machine-learning" --language=%s --stars=">1000" --sort=updated --json name,owner,stargazersCount,updatedAt --limit 20
-
-# 也搜索工具类库
-gh search repos "cli OR tool OR framework" --language=%s --stars=">1000" --sort=updated --json name,owner,stargazersCount,updatedAt --limit 10
+执行以下搜索（覆盖多种语言）：
+%s
 %s
 
 ### 第二步：对每个库检查issue
 对于每个找到的库，执行：
-gh issue list --repo <owner/repo> --state open --label "good first issue,help wanted,bug" --json number,title,createdAt,assignees --limit 15
+gh issue list --repo <owner/repo> --state open --label "%s" --json number,title,createdAt,assignees --limit 15
 
-**重要：跳过已有assignee的issue！** 如果assignees数组不为空，说明有人正在处理。
+**跳过已有assignee的issue！**
 
 ### 第三步：验证issue没有关联的PR
-对于每个候选issue，用**一次**API调用验证：
-
+对于每个候选issue，执行一次验证：
 gh pr list --repo <owner/repo> --state all --search "<issue_number>" --limit 1
 
-如果返回为空，说明没有PR关联。不要用多种方法重复验证！
+返回为空 = 没有关联PR。不要重复验证！
 
-### 第四步：递归降级搜索
-如果高星库(>1000)的issue都有PR了，自动降级：
+### 第四步：降级搜索（仅在高星库issue不足时）
+如果stars>%d的库issue都已有PR，依次降级：
+- stars %d..%d
+- stars %d..%d
+降级后重复第二、三步。**不要降到 stars < %d。**
 
-# 第一次降级: 500-1000 stars
-gh search repos "ai OR llm OR agent" --language=%s --stars="500..1000" --sort=updated --limit 15
-
-# 第二次降级: 100-500 stars
-gh search repos "ai OR llm OR agent" --language=%s --stars="100..500" --sort=updated --limit 15
-
-# 第三次降级: 50-100 stars
-gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=updated --limit 15
-
-重复第二、三步，直到找到%d个确认没有PR的issue。
-
-## 使用ultrathink分析
+## issue质量评估
 对每个候选issue，深度分析：
-1. issue是否定义清晰？
+1. issue是否定义清晰、可操作？
 2. 修复范围是否明确？（修改哪些文件）
-3. 是否需要添加测试？
-4. 预估复杂度？（low/medium/high）
-5. 是否有阻塞因素？（需要外部服务、权限等）
+3. 预估复杂度？（low/medium/high）
+4. 是否有阻塞因素？（需要外部服务、权限等）
+5. 仓库是否活跃接受外部PR？（看最近merged的外部PR）
+
+**优先推荐**：高星(>5000) + 定义清晰 + 复杂度low/medium + 无阻塞。
 
 ## 重要规则
-1. **跳过已assign的issue**：如果issue有assignee，说明有人在处理，跳过！
-2. **必须验证**：每个issue都要确认没有关联PR
-3. **不要猜测**：如果无法确认，跳过这个issue
-4. **递归搜索**：如果高星库没有可用issue，自动降级到低星库
-5. **最终结果**：至少找到%d个确认没有PR且没有assignee的issue
+1. **跳过已assign的issue**
+2. **必须验证无关联PR**
+3. **不要猜测**：无法确认就跳过
+4. **每个仓库最多推荐2个issue**：避免集中在同一仓库
+5. **至少找到%d个**确认没有PR且没有assignee的issue
 
 ## 输出格式
 **严格要求：只输出JSON，不要任何其他文字、解释或markdown代码块！**
@@ -258,7 +265,7 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
       "suitability_score": 0.85,
       "verified_no_pr": true,
       "has_assignee": false,
-      "verification_method": "searched PRs with 'fixes #123', no results, no assignees",
+      "verification_method": "searched PRs with issue number, no results",
       "analysis": {
         "is_well_defined": true,
         "has_reproduction_steps": true,
@@ -267,7 +274,7 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
         "complexity": "low",
         "estimated_files": 2,
         "blockers": [],
-        "recommendation": "Clear bug with reproduction steps, good first contribution"
+        "recommendation": "Clear bug with reproduction steps"
       },
       "repo_context": {
         "stars": 1500,
@@ -283,12 +290,14 @@ gh search repos "ai OR llm OR agent" --language=%s --stars="50..100" --sort=upda
     "analyzed": 50,
     "issues_with_pr": 45,
     "selected": %d,
-    "star_threshold_used": 1000
+    "star_threshold_used": %d
   }
 }
 
 开始搜索！记住：只输出JSON，不要任何解释文字！
-`, lang, lang, excludeRepos, lang, lang, lang, req.Limit, req.Limit, req.Limit)
+`, langSearches.String(), excludeRepos, labels,
+		minStars, minStars/2, minStars, minStars/5, minStars/2, minStars/5,
+		req.Limit, req.Limit, minStars)
 }
 
 func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string, error) {
