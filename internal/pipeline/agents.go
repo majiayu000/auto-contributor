@@ -124,7 +124,14 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 	}
 
 	var result SubmitResult
-	if _, err := p.runner.RunJSON(ctx, "submitter", workspace, tmplCtx, &result); err != nil {
+	raw, err := p.runner.RunJSON(ctx, "submitter", workspace, tmplCtx, &result)
+	if err != nil {
+		log.WithFields(Fields{
+			"repo":       issue.Repo,
+			"issue":      issue.IssueNumber,
+			"output_len": len(raw),
+			"output_tail": truncate(raw, 500),
+		}).Warn("submitter failed to produce valid JSON")
 		return nil, err
 	}
 	return &result, nil
