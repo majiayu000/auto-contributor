@@ -109,7 +109,7 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 	json.Unmarshal(output, &checks)
 
 	result := &CIResult{}
-	hasPending := false
+	hasCodePending := false
 	for _, check := range checks {
 		if check.State == "FAILURE" || check.State == "ERROR" {
 			result.FailedChecks = append(result.FailedChecks, check.Name)
@@ -117,15 +117,15 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 				result.CodeFailures = true
 			}
 		}
-		if check.State == "PENDING" {
-			hasPending = true
+		if check.State == "PENDING" && !isMetadataCheck(check.Name) {
+			hasCodePending = true
 		}
 	}
 
 	switch {
 	case len(result.FailedChecks) > 0:
 		result.Status = "failure"
-	case hasPending:
+	case hasCodePending:
 		result.Status = "pending"
 	default:
 		result.Status = "success"
