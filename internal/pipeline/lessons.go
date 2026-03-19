@@ -161,6 +161,20 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 	}).Info("extracted review lessons")
 }
 
+// isNonActionable returns true for reviews that are just approvals/LGTM with no actionable content.
+func isNonActionable(body string) bool {
+	lower := strings.ToLower(strings.TrimSpace(body))
+	if len(lower) < 30 {
+		nonActionable := []string{"lgtm", "looks good", "approved", "ship it", "+1", "👍", "🚀"}
+		for _, p := range nonActionable {
+			if strings.Contains(lower, p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // formatLessonsForPrompt formats stored lessons into text suitable for injection into agent prompts.
 func formatLessonsForPrompt(lessons []*models.ReviewLesson) string {
 	if len(lessons) == 0 {

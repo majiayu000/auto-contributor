@@ -139,12 +139,19 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("get comments: %w", err)
 	}
 
-	// Filter out bot reviews and comments
+	// Filter out bot reviews, approvals, and non-actionable feedback
 	var humanReviews []ghclient.PRReview
 	for _, r := range reviews {
-		if !isBot(r.Author) {
-			humanReviews = append(humanReviews, r)
+		if isBot(r.Author) {
+			continue
 		}
+		if r.State == "APPROVED" || r.State == "DISMISSED" {
+			continue
+		}
+		if isNonActionable(r.Body) {
+			continue
+		}
+		humanReviews = append(humanReviews, r)
 	}
 	var humanComments []ghclient.PRReviewComment
 	for _, c := range comments {
