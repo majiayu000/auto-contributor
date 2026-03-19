@@ -139,8 +139,22 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("get comments: %w", err)
 	}
 
-	// Check for new feedback since last check
-	totalFeedback := len(reviews) + len(comments)
+	// Filter out bot reviews and comments
+	var humanReviews []ghclient.PRReview
+	for _, r := range reviews {
+		if !isBot(r.Author) {
+			humanReviews = append(humanReviews, r)
+		}
+	}
+	var humanComments []ghclient.PRReviewComment
+	for _, c := range comments {
+		if !isBot(c.Author) {
+			humanComments = append(humanComments, c)
+		}
+	}
+
+	// Check for new feedback since last check (humans only)
+	totalFeedback := len(humanReviews) + len(humanComments)
 	if totalFeedback == 0 {
 		log.WithField("pr", pr.PRURL).Info("no feedback on PR")
 		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
@@ -151,14 +165,14 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	if pr.LastFeedbackCheckAt == nil {
 		hasNew = totalFeedback > 0
 	} else {
-		for _, r := range reviews {
+		for _, r := range humanReviews {
 			if r.SubmittedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
 				hasNew = true
 				break
 			}
 		}
 		if !hasNew {
-			for _, c := range comments {
+			for _, c := range humanComments {
 				if c.CreatedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
 					hasNew = true
 					break
@@ -179,6 +193,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 			"pr":    pr.PRURL,
 			"round": pr.FeedbackRound,
 		}).Warn("max feedback rounds exceeded, skipping")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
 		return nil
 	}
 
@@ -192,13 +207,13 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("create workspace: %w", err)
 	}
 
-	// Build context for responder agent
-	tmplCtx := p.buildResponderCtx(issue, pr, reviews, comments)
+	// Build context for responder agent (human feedback only)
+	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments)
 
 	log.WithFields(Fields{
 		"pr":       pr.PRURL,
-		"reviews":  len(reviews),
-		"comments": len(comments),
+		"reviews":  len(humanReviews),
+		"comments": len(humanComments),
 		"round":    pr.FeedbackRound + 1,
 	}).Info("processing feedback")
 
