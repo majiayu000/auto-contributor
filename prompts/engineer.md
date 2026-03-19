@@ -35,6 +35,10 @@ Previous review found issues. You MUST address ALL of them:
 Do NOT repeat the same mistakes. Focus on fixing exactly what the reviewer flagged.
 {{ end }}
 
+{{ if .PastLessons }}
+{{ .PastLessons }}
+{{ end }}
+
 ## Implementation Rules
 
 1. **Minimal fix only** — change ONLY what's necessary to fix the issue

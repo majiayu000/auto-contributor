@@ -76,6 +76,12 @@ func (p *Pipeline) buildEngineerCtx(issue *models.Issue, analyst *AnalystResult,
 		ctx["IssuesFound"] = lastReview.IssuesFound
 	}
 
+	// Inject lessons from past reviews
+	lessons, err := p.db.GetRecentLessons(10)
+	if err == nil && len(lessons) > 0 {
+		ctx["PastLessons"] = formatLessonsForPrompt(lessons)
+	}
+
 	return ctx
 }
 

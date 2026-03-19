@@ -34,10 +34,12 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	switch prInfo.State {
 	case "MERGED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
+		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
 		return nil
 	}

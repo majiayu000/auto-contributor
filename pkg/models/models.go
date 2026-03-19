@@ -265,3 +265,16 @@ type BlacklistEntry struct {
 	Reason  string    `db:"reason" json:"reason,omitempty"`
 	AddedAt time.Time `db:"added_at" json:"added_at"`
 }
+
+// ReviewLesson represents a lesson learned from upstream reviewer feedback.
+// These are extracted from PR reviews and used to improve future contributions.
+type ReviewLesson struct {
+	ID            int64     `db:"id" json:"id"`
+	PRID          int64     `db:"pr_id" json:"pr_id"`
+	Repo          string    `db:"repo" json:"repo"`
+	Category      string    `db:"category" json:"category"`           // testing, style, scope, docs, ci, logic
+	Lesson        string    `db:"lesson" json:"lesson"`               // extracted actionable lesson
+	SourceComment string    `db:"source_comment" json:"source_comment"` // original reviewer text
+	Reviewer      string    `db:"reviewer" json:"reviewer"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+}

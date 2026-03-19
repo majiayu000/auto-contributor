@@ -108,6 +108,7 @@ func (db *DB) Migrate() error {
 
 	// Run migrations (ignore errors for columns that already exist)
 	db.runMigrations()
+	db.MigrateLessons()
 
 	return nil
 }
