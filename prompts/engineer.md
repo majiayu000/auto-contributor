@@ -40,7 +40,7 @@ Do NOT repeat the same mistakes. Focus on fixing exactly what the reviewer flagg
 1. **Minimal fix only** — change ONLY what's necessary to fix the issue
 2. **Match project style** — follow existing patterns, naming, conventions
 3. **No over-engineering** — no abstractions, no "improvements", no refactoring
-4. **Add tests** — follow the project's existing test patterns
+4. **Tests: only when warranted** — add tests ONLY if the fix involves non-trivial logic (e.g. new branching, edge cases, parsing). Do NOT add mock tests for simple/obvious changes like config fixes, typos, one-liner corrections, or flag additions. When adding tests, follow the project's existing test patterns and prefer integration-style tests over mocks.
 5. **No hardcoding** — unless the project already does it in the same context
 
 ## Verification Steps
