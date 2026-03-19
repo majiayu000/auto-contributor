@@ -209,11 +209,19 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		result.Action = "no_action"
 	}
 
-	// Post replies
+	// Post replies and collect replied comment IDs
+	repliedIDs := make(map[int64]bool)
 	for _, reply := range result.Replies {
 		if err := p.gh.ReplyToPRComment(ctx, prRepo, pr.PRNumber, reply.CommentID, reply.Body); err != nil {
 			log.WithError(err).Warn("failed to post reply")
+			continue
 		}
+		repliedIDs[reply.CommentID] = true
+	}
+
+	// Resolve review threads for addressed comments
+	if result.Action == "addressed" && len(repliedIDs) > 0 {
+		p.resolveAddressedThreads(ctx, prRepo, pr.PRNumber, repliedIDs)
 	}
 
 	// Update DB
@@ -269,6 +277,34 @@ func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prR
 		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound+1)
 	} else {
 		log.WithField("pr", pr.PRURL).Warn("engineer could not fix CI failures")
+	}
+}
+
+// resolveAddressedThreads resolves review threads whose comments were replied to by the responder.
+func (p *Pipeline) resolveAddressedThreads(ctx context.Context, repo string, prNum int, repliedIDs map[int64]bool) {
+	threads, err := p.gh.GetReviewThreads(ctx, repo, prNum)
+	if err != nil {
+		log.WithError(err).Warn("failed to fetch review threads for resolving")
+		return
+	}
+
+	resolved := 0
+	for _, t := range threads {
+		if t.IsResolved {
+			continue
+		}
+		if !repliedIDs[t.CommentID] {
+			continue
+		}
+		if err := p.gh.ResolveReviewThread(ctx, t.ThreadID); err != nil {
+			log.WithError(err).WithField("thread", t.ThreadID).Warn("failed to resolve thread")
+			continue
+		}
+		resolved++
+	}
+
+	if resolved > 0 {
+		log.WithFields(Fields{"repo": repo, "pr": prNum, "resolved": resolved}).Info("resolved review threads")
 	}
 }
 

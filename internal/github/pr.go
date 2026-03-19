@@ -172,6 +172,93 @@ func (c *Client) GetPRReviewComments(ctx context.Context, repo string, prNum int
 	return comments, nil
 }
 
+// ReviewThread maps a review thread's GraphQL ID to its first comment's REST database ID.
+type ReviewThread struct {
+	ThreadID   string // GraphQL node ID (e.g., "PRRT_kwDO...")
+	CommentID  int64  // REST API database ID of the first comment
+	IsResolved bool
+}
+
+// GetReviewThreads fetches unresolved review thread IDs mapped to comment database IDs.
+func (c *Client) GetReviewThreads(ctx context.Context, repo string, prNum int) ([]ReviewThread, error) {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid repo format: %s", repo)
+	}
+
+	query := fmt.Sprintf(`query {
+		repository(owner:"%s", name:"%s") {
+			pullRequest(number:%d) {
+				reviewThreads(first:50) {
+					nodes {
+						id
+						isResolved
+						comments(first:1) {
+							nodes { databaseId }
+						}
+					}
+				}
+			}
+		}
+	}`, parts[0], parts[1], prNum)
+
+	output, err := c.ghAPI(ctx, "graphql", "-f", fmt.Sprintf("query=%s", query))
+	if err != nil {
+		return nil, fmt.Errorf("get review threads: %w", err)
+	}
+
+	var resp struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID         string `json:"id"`
+							IsResolved bool   `json:"isResolved"`
+							Comments   struct {
+								Nodes []struct {
+									DatabaseID int64 `json:"databaseId"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return nil, fmt.Errorf("parse review threads: %w", err)
+	}
+
+	var threads []ReviewThread
+	for _, n := range resp.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		if len(n.Comments.Nodes) == 0 {
+			continue
+		}
+		threads = append(threads, ReviewThread{
+			ThreadID:   n.ID,
+			CommentID:  n.Comments.Nodes[0].DatabaseID,
+			IsResolved: n.IsResolved,
+		})
+	}
+	return threads, nil
+}
+
+// ResolveReviewThread marks a review thread as resolved via GraphQL.
+func (c *Client) ResolveReviewThread(ctx context.Context, threadID string) error {
+	query := fmt.Sprintf(`mutation {
+		resolveReviewThread(input:{threadId:"%s"}) {
+			thread { isResolved }
+		}
+	}`, threadID)
+
+	_, err := c.ghAPI(ctx, "graphql", "-f", fmt.Sprintf("query=%s", query))
+	if err != nil {
+		return fmt.Errorf("resolve thread %s: %w", threadID, err)
+	}
+	return nil
+}
+
 // ReplyToPRComment posts a reply to a PR review comment.
 func (c *Client) ReplyToPRComment(ctx context.Context, repo string, prNum int, commentID int64, body string) error {
 	_, err := c.ghAPI(ctx,

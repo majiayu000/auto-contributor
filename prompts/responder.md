@@ -64,6 +64,12 @@ git commit -s -m "fix: address review feedback on PR #{{ .PRNumber }}"
 git push fork {{ .BranchName }}
 ```
 
+## Reply Rules
+
+- For EVERY inline comment (id:NNN), include a reply in the `replies` array with the matching `comment_id`
+- Reply text should confirm the fix ("Done, fixed in this commit") or explain why not
+- Do NOT skip comments — the system will automatically resolve threads you reply to
+
 ## Output Format
 
 Respond with JSON only:
@@ -75,7 +81,7 @@ Respond with JSON only:
   "replies": [
     {
       "comment_id": 123,
-      "body": "reply text"
+      "body": "Done, fixed in this commit."
     }
   ],
   "summary": "one-line summary of what was done"
