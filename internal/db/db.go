@@ -845,11 +845,12 @@ func (db *DB) GetStats(days int) (map[string]interface{}, error) {
 	var totalAttempts, successfulAttempts int
 	var avgDuration sql.NullFloat64
 
-	db.QueryRow(`
+	query := fmt.Sprintf(`
 		SELECT COUNT(*), SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), AVG(duration_seconds)
 		FROM solve_attempts
-		WHERE started_at >= ?
-	`, cutoff).Scan(&totalAttempts, &successfulAttempts, &avgDuration)
+		WHERE started_at >= %s
+	`, db.placeholder(1))
+	db.QueryRow(query, cutoff).Scan(&totalAttempts, &successfulAttempts, &avgDuration)
 
 	stats["total_attempts"] = totalAttempts
 	stats["successful_attempts"] = successfulAttempts
@@ -884,22 +885,14 @@ func (db *DB) GetPRMetrics() (*models.PRMetrics, error) {
 
 	// Average time to merge (in hours)
 	var avgMerge sql.NullFloat64
-	db.QueryRow(`
-		SELECT AVG((julianday(merged_at) - julianday(created_at)) * 24)
-		FROM pull_requests
-		WHERE merged_at IS NOT NULL
-	`).Scan(&avgMerge)
+	db.QueryRow(db.avgHoursQuery("merged_at", "created_at")).Scan(&avgMerge)
 	if avgMerge.Valid {
 		metrics.AvgTimeToMerge = avgMerge.Float64
 	}
 
 	// Average time to first review (in hours)
 	var avgReview sql.NullFloat64
-	db.QueryRow(`
-		SELECT AVG((julianday(first_review_at) - julianday(created_at)) * 24)
-		FROM pull_requests
-		WHERE first_review_at IS NOT NULL
-	`).Scan(&avgReview)
+	db.QueryRow(db.avgHoursQuery("first_review_at", "created_at")).Scan(&avgReview)
 	if avgReview.Valid {
 		metrics.AvgTimeToFirstReview = avgReview.Float64
 	}
@@ -996,7 +989,7 @@ func (db *DB) GetRepoMetrics(repo string) ([]*models.RepoMetrics, error) {
 	var rows *sql.Rows
 	var err error
 	if repo != "" {
-		whereClause = "WHERE i.repo = ?"
+		whereClause = fmt.Sprintf("WHERE i.repo = %s", db.placeholder(1))
 		rows, err = db.Query(fmt.Sprintf(query, whereClause), repo)
 	} else {
 		rows, err = db.Query(fmt.Sprintf(query, whereClause))
@@ -1066,27 +1059,39 @@ func (db *DB) GetFailureReasonStats() (map[string]int, error) {
 	return stats, nil
 }
 
+// avgHoursQuery returns a SQL query to compute AVG hours between two timestamp columns.
+// SQLite uses julianday(), PostgreSQL uses EXTRACT(EPOCH FROM ...).
+func (db *DB) avgHoursQuery(endCol, startCol string) string {
+	if db.IsPostgres() {
+		return fmt.Sprintf(`
+			SELECT AVG(EXTRACT(EPOCH FROM (%s - %s)) / 3600)
+			FROM pull_requests WHERE %s IS NOT NULL
+		`, endCol, startCol, endCol)
+	}
+	return fmt.Sprintf(`
+		SELECT AVG((julianday(%s) - julianday(%s)) * 24)
+		FROM pull_requests WHERE %s IS NOT NULL
+	`, endCol, startCol, endCol)
+}
+
 // UpdatePRStatus updates a PR's status and related timestamps
 func (db *DB) UpdatePRStatus(prID int64, status models.PRStatus) error {
 	now := time.Now()
 	switch status {
 	case models.PRStatusMerged:
-		_, err := db.Exec(`
-			UPDATE pull_requests SET status = ?, merged_at = ?, updated_at = ?
-			WHERE id = ?
-		`, status, now, now, prID)
+		q := fmt.Sprintf(`UPDATE pull_requests SET status = %s, merged_at = %s, updated_at = %s WHERE id = %s`,
+			db.placeholder(1), db.placeholder(2), db.placeholder(3), db.placeholder(4))
+		_, err := db.Exec(q, status, now, now, prID)
 		return err
 	case models.PRStatusClosed:
-		_, err := db.Exec(`
-			UPDATE pull_requests SET status = ?, closed_at = ?, updated_at = ?
-			WHERE id = ?
-		`, status, now, now, prID)
+		q := fmt.Sprintf(`UPDATE pull_requests SET status = %s, closed_at = %s, updated_at = %s WHERE id = %s`,
+			db.placeholder(1), db.placeholder(2), db.placeholder(3), db.placeholder(4))
+		_, err := db.Exec(q, status, now, now, prID)
 		return err
 	default:
-		_, err := db.Exec(`
-			UPDATE pull_requests SET status = ?, updated_at = ?
-			WHERE id = ?
-		`, status, now, prID)
+		q := fmt.Sprintf(`UPDATE pull_requests SET status = %s, updated_at = %s WHERE id = %s`,
+			db.placeholder(1), db.placeholder(2), db.placeholder(3))
+		_, err := db.Exec(q, status, now, prID)
 		return err
 	}
 }
