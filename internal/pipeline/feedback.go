@@ -18,10 +18,16 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		return fmt.Errorf("cannot parse repo from PR URL: %s", pr.PRURL)
 	}
 
-	// Fetch current state from GitHub
+	// Fetch current state from GitHub (retry once on transient EOF)
 	prInfo, err := p.gh.GetPRInfo(ctx, prRepo, pr.PRNumber)
 	if err != nil {
-		return fmt.Errorf("get PR info: %w", err)
+		if strings.Contains(err.Error(), "EOF") {
+			time.Sleep(3 * time.Second)
+			prInfo, err = p.gh.GetPRInfo(ctx, prRepo, pr.PRNumber)
+		}
+		if err != nil {
+			return fmt.Errorf("get PR info: %w", err)
+		}
 	}
 
 	// Terminal state transitions from GitHub
