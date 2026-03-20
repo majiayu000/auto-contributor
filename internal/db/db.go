@@ -39,7 +39,7 @@ func NewWithURL(databaseURL, sqlitePath string) (*DB, error) {
 	var err error
 	var dbType DBType
 
-	if databaseURL != "" && strings.HasPrefix(databaseURL, "postgres") {
+	if databaseURL != "" && (strings.HasPrefix(databaseURL, "postgres") || strings.Contains(databaseURL, "host=")) {
 		// PostgreSQL
 		sqlDB, err = sql.Open("postgres", databaseURL)
 		if err != nil {

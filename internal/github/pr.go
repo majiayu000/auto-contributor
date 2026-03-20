@@ -370,6 +370,29 @@ func (c *Client) ListUserOpenPRs(ctx context.Context) ([]GitHubPR, error) {
 	return prs, nil
 }
 
+// ClosePR closes a pull request with an optional comment.
+func (c *Client) ClosePR(ctx context.Context, repo string, prNum int, comment string) error {
+	if comment != "" {
+		cmd := exec.CommandContext(ctx, "gh", "pr", "close",
+			fmt.Sprintf("%d", prNum),
+			"-R", repo,
+			"-c", comment)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("gh pr close %s#%d: %s - %w", repo, prNum, strings.TrimSpace(string(output)), err)
+		}
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "gh", "pr", "close",
+		fmt.Sprintf("%d", prNum),
+		"-R", repo)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh pr close %s#%d: %s - %w", repo, prNum, strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
 // isMetadataCheck returns true for CI checks that validate PR metadata
 // (title, description, labels, DCO) rather than code correctness.
 func isMetadataCheck(name string) bool {

@@ -67,7 +67,7 @@ func Default() *Config {
 		MinRepoStars:     10,
 		MaxIssueAgeDays:  30,
 		MaxReviewRounds:   3,
-		MaxPRsPerRepo:     2,
+		MaxPRsPerRepo:     1,
 		PromptsDir:        filepath.Join(dataDir, "prompts"),
 		Mode:              "full",
 		DiscoveryInterval: 60,

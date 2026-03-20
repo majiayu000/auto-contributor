@@ -50,6 +50,17 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		"state":  prInfo.State,
 	}).Info("processing PR")
 
+	// Auto-close stale PRs: 30 days open with no human review
+	if p.shouldAutoClose(pr, prInfo) {
+		log.WithField("pr", pr.PRURL).Info("auto-closing stale PR")
+		if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing due to extended inactivity. Happy to reopen if there's still interest."); err != nil {
+			log.WithError(err).Warn("failed to auto-close stale PR")
+		} else {
+			p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		}
+		return nil
+	}
+
 	// Dispatch based on local state
 	switch pr.Status {
 	case models.PRStatusDraft:
@@ -100,6 +111,16 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 		return nil
 
 	case ci.Status == "failure" && ci.CodeFailures:
+		// Auto-close if CI has been failing for 7+ days
+		if time.Since(pr.CreatedAt) > 7*24*time.Hour && pr.FeedbackRound >= 2 {
+			log.WithField("pr", pr.PRURL).Warn("CI failing for 7+ days with no fix, auto-closing")
+			if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing: CI failures remain unresolved after multiple attempts."); err != nil {
+				log.WithError(err).Warn("failed to auto-close CI-failed PR")
+			} else {
+				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			}
+			return nil
+		}
 		// Code checks failed — run engineer agent to fix
 		log.WithFields(Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Warn("draft PR has code CI failures, attempting fix")
 		issue, err := p.db.GetIssueByID(pr.IssueID)
@@ -366,6 +387,27 @@ func (p *Pipeline) buildResponderCtx(
 		"Reviews":        reviewsText,
 		"InlineComments": commentsText,
 	}
+}
+
+// shouldAutoClose returns true if a PR should be auto-closed due to staleness.
+// Criteria: 30+ days old with no human review activity.
+func (p *Pipeline) shouldAutoClose(pr *models.PullRequest, prInfo *ghclient.PRInfo) bool {
+	age := time.Since(pr.CreatedAt)
+	if age < 30*24*time.Hour {
+		return false
+	}
+
+	// Don't close if any human reviewed (approved or changes_requested)
+	for _, r := range prInfo.Reviews {
+		if isBot(r.Author) {
+			continue
+		}
+		if r.State == "APPROVED" || r.State == "CHANGES_REQUESTED" || r.State == "COMMENTED" {
+			return false // has human engagement, don't auto-close
+		}
+	}
+
+	return true
 }
 
 // repoFromPRURL extracts "owner/repo" from a GitHub PR URL.
