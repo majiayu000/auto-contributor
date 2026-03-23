@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,6 +38,15 @@ func runLoop(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Feedback interval:  %d min\n", cfg.FeedbackInterval)
 	fmt.Printf("  Prompts: %s\n", cfg.PromptsDir)
 	fmt.Println()
+
+	// Print PRs needing manual attention at startup
+	if attentionPRs, err := database.GetNeedsAttentionPRs(); err == nil && len(attentionPRs) > 0 {
+		fmt.Printf("⚠️  %d PR(s) require manual attention (e.g. CLA signing):\n", len(attentionPRs))
+		for _, pr := range attentionPRs {
+			fmt.Printf("   - %s\n", pr.PRURL)
+		}
+		fmt.Println()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -97,6 +107,19 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 
 	log.Info("starting discovery cycle", "topic", topic, "depth", depth)
 
+	// Query slow-response repos (open PRs with no feedback for 7+ days)
+	slowRepos, err := database.GetSlowRepos()
+	if err != nil {
+		log.Warn("failed to query slow repos", "error", err)
+	}
+	if len(slowRepos) > 0 {
+		log.Info("deprioritizing slow repos", "count", len(slowRepos), "repos", slowRepos)
+	}
+
+	// Merge exclude lists: config + slow repos
+	excludeRepos := append([]string{}, cfg.ExcludeRepos...)
+	excludeRepos = append(excludeRepos, slowRepos...)
+
 	// Use Claude-powered smart discovery
 	req := discovery.DiscoveryRequest{
 		Topic:         topic,
@@ -104,7 +127,8 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 		MinStars:      cfg.MinRepoStars,
 		Labels:        cfg.IncludeLabels,
 		MaxAgeDays:    cfg.MaxIssueAgeDays,
-		ExcludeRepos:  cfg.ExcludeRepos,
+		ExcludeRepos:  excludeRepos,
+		PriorityRepos: cfg.PriorityRepos,
 		Limit:         10,
 		AnalysisDepth: depth,
 	}
@@ -121,25 +145,44 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 		"total_candidates", result.Metadata.TotalCandidates,
 	)
 
-	// Process high-scoring issues through V2 pipeline
-	var succeeded, failed, skipped int
+	// Process high-scoring issues through V2 pipeline (concurrent worker pool)
+	maxWorkers := cfg.MaxConcurrentPipelines
+	if maxWorkers <= 0 {
+		maxWorkers = 3
+	}
+
+	var (
+		mu        sync.Mutex
+		succeeded int
+		failed    int
+		skipped   int
+		wg        sync.WaitGroup
+		sem       = make(chan struct{}, maxWorkers)
+	)
+
 	for _, issue := range result.Issues {
 		if issue.SuitabilityScore < 0.4 {
+			mu.Lock()
 			skipped++
+			mu.Unlock()
 			continue
 		}
 
 		// Double-check for existing PR
 		hasPR, _ := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
 		if hasPR {
+			mu.Lock()
 			skipped++
+			mu.Unlock()
 			continue
 		}
 
 		// Check blacklist
 		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
 		if isBlacklisted {
+			mu.Lock()
 			skipped++
+			mu.Unlock()
 			continue
 		}
 
@@ -170,18 +213,30 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 			"score", issue.SuitabilityScore,
 		)
 
-		// Process through V2 pipeline
-		if err := pipe.ProcessIssue(ctx, dbIssue); err != nil {
-			log.Error("pipeline failed",
-				"repo", issue.Repo,
-				"issue", issue.IssueNumber,
-				"error", err,
-			)
-			failed++
-		} else {
-			succeeded++
-		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(iss *models.Issue) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := pipe.ProcessIssue(ctx, iss); err != nil {
+				log.Error("pipeline failed",
+					"repo", iss.Repo,
+					"issue", iss.IssueNumber,
+					"error", err,
+				)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+			} else {
+				mu.Lock()
+				succeeded++
+				mu.Unlock()
+			}
+		}(dbIssue)
 	}
+
+	wg.Wait()
 
 	log.Info("discovery cycle complete",
 		"succeeded", succeeded,

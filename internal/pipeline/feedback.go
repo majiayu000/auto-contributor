@@ -18,20 +18,28 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		return fmt.Errorf("cannot parse repo from PR URL: %s", pr.PRURL)
 	}
 
-	// Fetch current state from GitHub
+	// Fetch current state from GitHub (retry once on transient EOF)
 	prInfo, err := p.gh.GetPRInfo(ctx, prRepo, pr.PRNumber)
 	if err != nil {
-		return fmt.Errorf("get PR info: %w", err)
+		if strings.Contains(err.Error(), "EOF") {
+			time.Sleep(3 * time.Second)
+			prInfo, err = p.gh.GetPRInfo(ctx, prRepo, pr.PRNumber)
+		}
+		if err != nil {
+			return fmt.Errorf("get PR info: %w", err)
+		}
 	}
 
 	// Terminal state transitions from GitHub
 	switch prInfo.State {
 	case "MERGED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
+		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
 		return nil
 	}
@@ -41,6 +49,17 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		"status": pr.Status,
 		"state":  prInfo.State,
 	}).Info("processing PR")
+
+	// Auto-close stale PRs: 30 days open with no human review
+	if p.shouldAutoClose(pr, prInfo) {
+		log.WithField("pr", pr.PRURL).Info("auto-closing stale PR")
+		if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing due to extended inactivity. Happy to reopen if there's still interest."); err != nil {
+			log.WithError(err).Warn("failed to auto-close stale PR")
+		} else {
+			p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		}
+		return nil
+	}
 
 	// Dispatch based on local state
 	switch pr.Status {
@@ -92,6 +111,16 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 		return nil
 
 	case ci.Status == "failure" && ci.CodeFailures:
+		// Auto-close if CI has been failing for 7+ days
+		if time.Since(pr.CreatedAt) > 7*24*time.Hour && pr.FeedbackRound >= 2 {
+			log.WithField("pr", pr.PRURL).Warn("CI failing for 7+ days with no fix, auto-closing")
+			if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing: CI failures remain unresolved after multiple attempts."); err != nil {
+				log.WithError(err).Warn("failed to auto-close CI-failed PR")
+			} else {
+				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			}
+			return nil
+		}
 		// Code checks failed — run engineer agent to fix
 		log.WithFields(Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Warn("draft PR has code CI failures, attempting fix")
 		issue, err := p.db.GetIssueByID(pr.IssueID)
@@ -131,8 +160,29 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("get comments: %w", err)
 	}
 
-	// Check for new feedback since last check
-	totalFeedback := len(reviews) + len(comments)
+	// Filter out bot reviews, approvals, and non-actionable feedback
+	var humanReviews []ghclient.PRReview
+	for _, r := range reviews {
+		if isBot(r.Author) {
+			continue
+		}
+		if r.State == "APPROVED" || r.State == "DISMISSED" {
+			continue
+		}
+		if isNonActionable(r.Body) {
+			continue
+		}
+		humanReviews = append(humanReviews, r)
+	}
+	var humanComments []ghclient.PRReviewComment
+	for _, c := range comments {
+		if !isBot(c.Author) {
+			humanComments = append(humanComments, c)
+		}
+	}
+
+	// Check for new feedback since last check (humans only)
+	totalFeedback := len(humanReviews) + len(humanComments)
 	if totalFeedback == 0 {
 		log.WithField("pr", pr.PRURL).Info("no feedback on PR")
 		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
@@ -143,14 +193,14 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	if pr.LastFeedbackCheckAt == nil {
 		hasNew = totalFeedback > 0
 	} else {
-		for _, r := range reviews {
+		for _, r := range humanReviews {
 			if r.SubmittedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
 				hasNew = true
 				break
 			}
 		}
 		if !hasNew {
-			for _, c := range comments {
+			for _, c := range humanComments {
 				if c.CreatedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
 					hasNew = true
 					break
@@ -171,6 +221,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 			"pr":    pr.PRURL,
 			"round": pr.FeedbackRound,
 		}).Warn("max feedback rounds exceeded, skipping")
+		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
 		return nil
 	}
 
@@ -184,13 +235,13 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("create workspace: %w", err)
 	}
 
-	// Build context for responder agent
-	tmplCtx := p.buildResponderCtx(issue, pr, reviews, comments)
+	// Build context for responder agent (human feedback only)
+	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments)
 
 	log.WithFields(Fields{
 		"pr":       pr.PRURL,
-		"reviews":  len(reviews),
-		"comments": len(comments),
+		"reviews":  len(humanReviews),
+		"comments": len(humanComments),
 		"round":    pr.FeedbackRound + 1,
 	}).Info("processing feedback")
 
@@ -201,11 +252,19 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		result.Action = "no_action"
 	}
 
-	// Post replies
+	// Post replies and collect replied comment IDs
+	repliedIDs := make(map[int64]bool)
 	for _, reply := range result.Replies {
 		if err := p.gh.ReplyToPRComment(ctx, prRepo, pr.PRNumber, reply.CommentID, reply.Body); err != nil {
 			log.WithError(err).Warn("failed to post reply")
+			continue
 		}
+		repliedIDs[reply.CommentID] = true
+	}
+
+	// Resolve review threads for addressed comments
+	if result.Action == "addressed" && len(repliedIDs) > 0 {
+		p.resolveAddressedThreads(ctx, prRepo, pr.PRNumber, repliedIDs)
 	}
 
 	// Update DB
@@ -264,6 +323,34 @@ func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prR
 	}
 }
 
+// resolveAddressedThreads resolves review threads whose comments were replied to by the responder.
+func (p *Pipeline) resolveAddressedThreads(ctx context.Context, repo string, prNum int, repliedIDs map[int64]bool) {
+	threads, err := p.gh.GetReviewThreads(ctx, repo, prNum)
+	if err != nil {
+		log.WithError(err).Warn("failed to fetch review threads for resolving")
+		return
+	}
+
+	resolved := 0
+	for _, t := range threads {
+		if t.IsResolved {
+			continue
+		}
+		if !repliedIDs[t.CommentID] {
+			continue
+		}
+		if err := p.gh.ResolveReviewThread(ctx, t.ThreadID); err != nil {
+			log.WithError(err).WithField("thread", t.ThreadID).Warn("failed to resolve thread")
+			continue
+		}
+		resolved++
+	}
+
+	if resolved > 0 {
+		log.WithFields(Fields{"repo": repo, "pr": prNum, "resolved": resolved}).Info("resolved review threads")
+	}
+}
+
 func (p *Pipeline) buildResponderCtx(
 	issue *models.Issue,
 	pr *models.PullRequest,
@@ -300,6 +387,27 @@ func (p *Pipeline) buildResponderCtx(
 		"Reviews":        reviewsText,
 		"InlineComments": commentsText,
 	}
+}
+
+// shouldAutoClose returns true if a PR should be auto-closed due to staleness.
+// Criteria: 30+ days old with no human review activity.
+func (p *Pipeline) shouldAutoClose(pr *models.PullRequest, prInfo *ghclient.PRInfo) bool {
+	age := time.Since(pr.CreatedAt)
+	if age < 30*24*time.Hour {
+		return false
+	}
+
+	// Don't close if any human reviewed (approved or changes_requested)
+	for _, r := range prInfo.Reviews {
+		if isBot(r.Author) {
+			continue
+		}
+		if r.State == "APPROVED" || r.State == "CHANGES_REQUESTED" || r.State == "COMMENTED" {
+			return false // has human engagement, don't auto-close
+		}
+	}
+
+	return true
 }
 
 // repoFromPRURL extracts "owner/repo" from a GitHub PR URL.

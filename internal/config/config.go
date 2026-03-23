@@ -29,13 +29,15 @@ type Config struct {
 	IncludeLabels  []string `mapstructure:"include_labels"`
 	ExcludeLabels  []string `mapstructure:"exclude_labels"`
 	ExcludeRepos   []string `mapstructure:"exclude_repos"`
+	PriorityRepos  []string `mapstructure:"priority_repos"` // repos to check first before searching
 	MinRepoStars   int      `mapstructure:"min_repo_stars"`
 	MaxIssueAgeDays int     `mapstructure:"max_issue_age_days"`
 
 	// Pipeline V2 settings
-	MaxReviewRounds int    `mapstructure:"max_review_rounds"`
-	MaxPRsPerRepo   int    `mapstructure:"max_prs_per_repo"` // max open PRs per repo before throttling
-	PromptsDir      string `mapstructure:"prompts_dir"`
+	MaxReviewRounds        int    `mapstructure:"max_review_rounds"`
+	MaxPRsPerRepo          int    `mapstructure:"max_prs_per_repo"`          // max open PRs per repo before throttling
+	MaxConcurrentPipelines int    `mapstructure:"max_concurrent_pipelines"` // number of parallel issue workers
+	PromptsDir             string `mapstructure:"prompts_dir"`
 
 	// Loop settings
 	Mode              string `mapstructure:"mode"`               // full or followup
@@ -43,6 +45,10 @@ type Config struct {
 	FeedbackInterval  int    `mapstructure:"feedback_interval"`  // minutes between feedback scans
 	Topic             string `mapstructure:"topic"`              // discovery topic (e.g., "ai", "golang")
 	AnalysisDepth     string `mapstructure:"analysis_depth"`     // quick, deep, ultrathink
+
+	// Self-learning
+	RulesDir          string `mapstructure:"rules_dir"`
+	SynthesisInterval int    `mapstructure:"synthesis_interval"` // hours between synthesis cycles
 
 	// Logging
 	LogLevel string `mapstructure:"log_level"`
@@ -64,16 +70,20 @@ func Default() *Config {
 		IncludeLabels:    []string{"good first issue", "help wanted", "bug"},
 		ExcludeLabels:    []string{"wontfix", "duplicate", "invalid"},
 		ExcludeRepos:     []string{},
-		MinRepoStars:     10,
+		PriorityRepos:    []string{},
+		MinRepoStars:     1000,
 		MaxIssueAgeDays:  30,
-		MaxReviewRounds:   3,
-		MaxPRsPerRepo:     2,
+		MaxReviewRounds:        3,
+		MaxPRsPerRepo:          1,
+		MaxConcurrentPipelines: 3,
 		PromptsDir:        filepath.Join(dataDir, "prompts"),
 		Mode:              "full",
 		DiscoveryInterval: 60,
 		FeedbackInterval:  30,
 		Topic:             "ai",
 		AnalysisDepth:     "deep",
+		RulesDir:          "",
+		SynthesisInterval: 24,
 		LogLevel:         "info",
 		LogFile:          filepath.Join(dataDir, "auto-contributor.log"),
 	}
