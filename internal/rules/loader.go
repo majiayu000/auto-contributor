@@ -25,6 +25,11 @@ func NewRuleLoader(rulesDir string) *RuleLoader {
 	return &RuleLoader{rulesDir: rulesDir}
 }
 
+// RulesDir returns the rules directory path.
+func (rl *RuleLoader) RulesDir() string {
+	return rl.rulesDir
+}
+
 // Load reads all YAML files from the rules directory.
 func (rl *RuleLoader) Load() error {
 	if rl.rulesDir == "" {

@@ -95,6 +95,33 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	// Goroutine 3: Rule synthesis (periodic self-learning)
+	go func() {
+		interval := cfg.SynthesisInterval
+		if interval <= 0 {
+			interval = 24
+		}
+		// Wait before first run to let events accumulate
+		time.Sleep(1 * time.Hour)
+		log.Info("starting synthesis goroutine")
+		if err := pipe.RunSynthesis(ctx); err != nil {
+			log.Warn("synthesis cycle failed", "error", err)
+		}
+
+		ticker := time.NewTicker(time.Duration(interval) * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := pipe.RunSynthesis(ctx); err != nil {
+					log.Warn("synthesis cycle failed", "error", err)
+				}
+			}
+		}
+	}()
+
 	<-sigChan
 	fmt.Println("\nShutting down...")
 	cancel()

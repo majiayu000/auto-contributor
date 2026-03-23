@@ -84,3 +84,36 @@ type FeedbackReply struct {
 	CommentID int64  `json:"comment_id"`
 	Body      string `json:"body"`
 }
+
+// SynthesizerResult is the output from the rule synthesizer agent.
+type SynthesizerResult struct {
+	NewRules     []SynthesizedRule `json:"new_rules"`
+	UpdatedRules []RuleUpdate      `json:"updated_rules"`
+	RetiredRules []RuleRetirement  `json:"retired_rules"`
+	Summary      string            `json:"summary"`
+}
+
+// SynthesizedRule is a new rule proposed by the synthesizer.
+type SynthesizedRule struct {
+	ID            string   `json:"id"`
+	Stage         string   `json:"stage"`
+	Severity      string   `json:"severity"`
+	Confidence    float64  `json:"confidence"`
+	EvidenceCount int      `json:"evidence_count"`
+	Tags          []string `json:"tags"`
+	Condition     string   `json:"condition"`
+	Body          string   `json:"body"`
+}
+
+// RuleUpdate adjusts confidence on an existing rule.
+type RuleUpdate struct {
+	ID            string  `json:"id"`
+	NewConfidence float64 `json:"new_confidence"`
+	Reason        string  `json:"reason"`
+}
+
+// RuleRetirement marks a rule for removal.
+type RuleRetirement struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
