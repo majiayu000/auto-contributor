@@ -114,6 +114,22 @@ func summarizeToLesson(body string) string {
 }
 
 // isBot returns true for known bot account patterns.
+func isCodecovBot(author string) bool {
+	lower := strings.ToLower(author)
+	return strings.Contains(lower, "codecov")
+}
+
+func isCLABot(author string) bool {
+	lower := strings.ToLower(author)
+	claPatterns := []string{"cla-assistant", "claassistant", "cla-bot", "contributor-assistant"}
+	for _, p := range claPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func isBot(author string) bool {
 	lower := strings.ToLower(author)
 	botPatterns := []string{"bot", "codecov", "netlify", "vercel", "dependabot", "renovate", "github-actions"}
@@ -159,6 +175,15 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 		"pr":      pr.PRURL,
 		"lessons": saved,
 	}).Info("extracted review lessons")
+
+	// Label all pipeline events for this PR/issue with the outcome
+	issueComments, _ := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
+	label := ClassifyOutcome(prInfo, issueComments, pr)
+	if err := p.db.LabelEventsByIssue(pr.IssueID, label); err != nil {
+		log.WithFields(Fields{"error": err}).Warn("failed to label pipeline events")
+	} else {
+		log.WithFields(Fields{"pr": pr.PRURL, "outcome": label}).Info("labeled pipeline events")
+	}
 }
 
 // isNonActionable returns true for reviews that are just approvals/LGTM with no actionable content.
