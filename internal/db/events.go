@@ -79,11 +79,16 @@ func (db *DB) RecordEvent(event *models.PipelineEvent) error {
 		db.placeholder(13),
 	)
 
+	successInt := 0
+	if event.Success {
+		successInt = 1
+	}
+
 	_, err := db.Exec(query,
 		event.IssueID, event.PRID, event.Repo, event.IssueNumber,
 		event.Stage, event.Round, event.StartedAt, event.CompletedAt,
 		event.DurationSeconds, event.OutputSummary, event.Verdict,
-		event.Success, event.ErrorMessage,
+		successInt, event.ErrorMessage,
 	)
 	return err
 }
