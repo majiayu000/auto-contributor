@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -169,14 +170,33 @@ func (c *Client) ForkRepo(ctx context.Context, repoFullName string) error {
 	return lastErr
 }
 
-// CloneRepo clones a repo into destDir using gh CLI.
+// CloneRepo clones a repo into destDir using gh CLI with retry on network errors.
 func (c *Client) CloneRepo(ctx context.Context, repoFullName, destDir string) error {
-	cmd := exec.CommandContext(ctx, "gh", "repo", "clone", repoFullName, destDir, "--", "--depth", "1")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("clone %s: %s - %w", repoFullName, strings.TrimSpace(string(output)), err)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		cmd := exec.CommandContext(ctx, "gh", "repo", "clone", repoFullName, destDir, "--", "--depth", "1")
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("clone %s: %s - %w", repoFullName, strings.TrimSpace(string(output)), err)
+
+		outputStr := string(output)
+		// Don't retry on permission/not-found errors
+		if strings.Contains(outputStr, "not found") ||
+			strings.Contains(outputStr, "permission") ||
+			strings.Contains(outputStr, "Could not resolve") {
+			return lastErr
+		}
+
+		// Clean up failed clone dir before retry
+		os.RemoveAll(destDir)
+
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 5 * time.Second)
+		}
 	}
-	return nil
+	return lastErr
 }
 
 // SetupForkRemote adds a "fork" remote pointing to the user's fork.
