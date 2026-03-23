@@ -79,6 +79,10 @@ Run project verification:
 - Lint: {{ .CICommands.Lint }}
 {{ end }}
 
+{{ if .Rules }}
+{{ .Rules }}
+{{ end }}
+
 ## Output Format
 
 Respond with JSON only:

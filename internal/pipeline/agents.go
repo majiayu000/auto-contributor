@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
@@ -17,12 +18,17 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 		"IssueTitle":  issue.Title,
 		"IssueBody":   issue.Body,
 		"IssueLabels": issue.Labels,
+		"Rules":       p.ruleLoader.FormatForPrompt("scout"),
 	}
 
+	start := time.Now()
 	var result ScoutResult
 	if _, err := p.runner.RunJSON(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result); err != nil {
+		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error())
 		return nil, err
 	}
+	summary, _ := json.Marshal(map[string]any{"verdict": result.Verdict, "difficulty": result.Difficulty, "competing_pr": result.HasCompetingPR})
+	p.recordEvent(issue, nil, "scout", 1, start, result.Verdict, result.Verdict == "PROCEED", string(summary), "")
 	return &result, nil
 }
 
@@ -37,18 +43,25 @@ func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspac
 		"IssueTitle":  issue.Title,
 		"IssueBody":   issue.Body,
 		"ScoutResult": string(scoutJSON),
+		"Rules":       p.ruleLoader.FormatForPrompt("analyst"),
 	}
 
+	start := time.Now()
 	var result AnalystResult
 	if _, err := p.runner.RunJSON(ctx, "analyst", workspace, tmplCtx, &result); err != nil {
+		p.recordEvent(issue, nil, "analyst", 1, start, "", false, "", err.Error())
 		return nil, err
 	}
 
-	// Default base branch
 	if result.BaseBranch == "" {
 		result.BaseBranch = "main"
 	}
 
+	verdict := "can_fix"
+	if !result.CanFix {
+		verdict = "cannot_fix"
+	}
+	p.recordEvent(issue, nil, "analyst", 1, start, verdict, result.CanFix, fmt.Sprintf("base_branch=%s files=%d", result.BaseBranch, len(result.FixPlan.FilesToModify)), "")
 	return &result, nil
 }
 
@@ -82,6 +95,7 @@ func (p *Pipeline) buildEngineerCtx(issue *models.Issue, analyst *AnalystResult,
 		ctx["PastLessons"] = formatLessonsForPrompt(lessons)
 	}
 
+	ctx["Rules"] = p.ruleLoader.FormatForPrompt("engineer")
 	return ctx
 }
 
@@ -107,6 +121,7 @@ func (p *Pipeline) buildReviewerCtx(issue *models.Issue, analyst *AnalystResult,
 		ctx["PreviousReview"] = string(prevJSON)
 	}
 
+	ctx["Rules"] = p.ruleLoader.FormatForPrompt("reviewer")
 	return ctx
 }
 
@@ -127,8 +142,10 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 		"PRTitle":        issue.Title,
 		"ChangesSummary": analyst.FixPlan.Description,
 		"TestPlan":       analyst.FixPlan.TestStrategy,
+		"Rules":          p.ruleLoader.FormatForPrompt("submitter"),
 	}
 
+	start := time.Now()
 	var result SubmitResult
 	raw, err := p.runner.RunJSON(ctx, "submitter", workspace, tmplCtx, &result)
 	if err != nil {
@@ -138,8 +155,10 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 			"output_len": len(raw),
 			"output_tail": truncate(raw, 500),
 		}).Warn("submitter failed to produce valid JSON")
+		p.recordEvent(issue, nil, "submitter", 1, start, "", false, "", err.Error())
 		return nil, err
 	}
+	p.recordEvent(issue, nil, "submitter", 1, start, result.Status, result.Status == "submitted", fmt.Sprintf("pr=%s", result.PRURL), "")
 	return &result, nil
 }
 
@@ -155,20 +174,23 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 		}
 
 		engCtx := p.buildEngineerCtx(issue, analyst, lastReview, round)
+		engStart := time.Now()
 		raw, err := p.runner.Run(ctx, "engineer", workspace, engCtx)
 		if err != nil {
+			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error())
 			p.markFailed(issue, "engineer_failed", err.Error())
 			return err
 		}
 
-		// Check engineer markers — warn but continue to reviewer
-		if !containsMarker(raw, "FIX_COMPLETE") {
+		fixComplete := containsMarker(raw, "FIX_COMPLETE")
+		if !fixComplete {
 			log.WithFields(Fields{
 				"repo":  issue.Repo,
 				"issue": issue.IssueNumber,
 				"round": round,
 			}).Warn("engineer did not produce FIX_COMPLETE marker, proceeding to review anyway")
 		}
+		p.recordEvent(issue, nil, "engineer", round, engStart, fmt.Sprintf("fix_complete=%v", fixComplete), fixComplete, "", "")
 
 		// Reviewer
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
@@ -177,10 +199,13 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 
 		var review CodeReviewResult
 		revCtx := p.buildReviewerCtx(issue, analyst, round, lastReview)
+		revStart := time.Now()
 		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &review); err != nil {
 			log.WithError(err).Warn("reviewer parse error, treating as approve")
 			review.Verdict = "approve"
 		}
+		reviewSummary, _ := json.Marshal(map[string]any{"verdict": review.Verdict, "confidence": review.Confidence, "issues": len(review.IssuesFound)})
+		p.recordEvent(issue, nil, "reviewer", round, revStart, review.Verdict, review.Verdict == "approve", string(reviewSummary), "")
 
 		p.logReview(issue, &review, round)
 

@@ -64,6 +64,10 @@ Design the minimal fix:
 - What tests to add
 - What commands to verify
 
+{{ if .Rules }}
+{{ .Rules }}
+{{ end }}
+
 ## Output Format
 
 Respond with JSON only:

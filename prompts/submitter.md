@@ -40,25 +40,40 @@ git push fork {{ .BranchName }}
 
 ### 4. Create Draft PR
 
-Get default branch:
+Get the correct base branch (use scout's `target_branch` result, fallback to default):
 ```bash
 gh repo view {{ .Repo }} --json defaultBranchRef -q .defaultBranchRef.name
 ```
+
+Fetch the repo's PR template to include required sections (CLA, checklists):
+```bash
+gh api repos/{{ .Repo }}/contents/.github/PULL_REQUEST_TEMPLATE.md --jq '.content' | base64 -d 2>/dev/null \
+  || gh api repos/{{ .Repo }}/contents/.github/pull_request_template.md --jq '.content' | base64 -d 2>/dev/null
+```
+
+If a PR template exists, use it as the body base and fill in the required fields.
+If the template contains a CLA checkbox, check it (replace `[ ]` with `[x]` on the CLA line).
+If the template contains an AI-generated code checkbox, check the appropriate one.
 
 Create as Draft PR:
 ```bash
 gh pr create --repo {{ .Repo }} \
   --draft \
   --title "fix: {{ .PRTitle }}" \
-  --body "Fixes #{{ .IssueNumber }}
+  --body "<filled PR template or fallback below>" \
+  --head majiayu000:{{ .BranchName }} \
+  --base {{ .BaseBranch }}
+```
 
-## Changes
+Fallback body if no template exists:
+```
+Fixes #{{ .IssueNumber }}
+
+## Summary
 {{ .ChangesSummary }}
 
 ## Test Plan
-{{ .TestPlan }}" \
-  --head majiayu000:{{ .BranchName }} \
-  --base {{ .BaseBranch }}
+{{ .TestPlan }}
 ```
 
 ### 5. CI Failure Triage (if tests failed)
@@ -93,6 +108,10 @@ gh pr view --repo {{ .Repo }} --json url,number,state
 - NEVER add "Co-Authored-By" headers
 - Keep PR body short, direct, human-like
 - Include "Fixes #NNN" for auto-linking
+
+{{ if .Rules }}
+{{ .Rules }}
+{{ end }}
 
 ## Output Format
 

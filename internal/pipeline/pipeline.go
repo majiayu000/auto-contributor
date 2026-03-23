@@ -11,6 +11,7 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/db"
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
+	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -21,12 +22,13 @@ import (
 // the prompt templates (prompts/*.md). This design follows the Symphony
 // pattern: orchestrator schedules, agents handle business logic.
 type Pipeline struct {
-	cfg       *config.Config
-	db        *db.DB
-	gh        *ghclient.Client
-	prompts   *prompt.Store
-	runner    *AgentRunner
-	maxReview int
+	cfg        *config.Config
+	db         *db.DB
+	gh         *ghclient.Client
+	prompts    *prompt.Store
+	runner     *AgentRunner
+	ruleLoader *rules.RuleLoader
+	maxReview  int
 }
 
 // New creates a Pipeline. promptsDir is the path to the prompts/ directory.
@@ -46,23 +48,63 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		maxReview = 3
 	}
 
+	// Load self-learning rules
+	rulesDir := cfg.RulesDir
+	if rulesDir == "" {
+		rulesDir = filepath.Join(filepath.Dir(promptsDir), "rules")
+	}
+	rl := rules.NewRuleLoader(rulesDir)
+	if err := rl.Load(); err != nil {
+		log.WithFields(Fields{"error": err}).Warn("failed to load rules, continuing without self-learning rules")
+	} else if len(rl.All()) > 0 {
+		log.WithFields(Fields{"count": len(rl.All())}).Info("loaded self-learning rules")
+	}
+
 	return &Pipeline{
-		cfg:       cfg,
-		db:        database,
-		gh:        gh,
-		prompts:   ps,
-		runner:    NewAgentRunner(ps, timeout),
-		maxReview: maxReview,
+		cfg:        cfg,
+		db:         database,
+		gh:         gh,
+		prompts:    ps,
+		runner:     NewAgentRunner(ps, timeout),
+		ruleLoader: rl,
+		maxReview:  maxReview,
 	}, nil
+}
+
+// recordEvent records a pipeline event for learning. Non-fatal on error.
+func (p *Pipeline) recordEvent(issue *models.Issue, prID *int64, stage string, round int, startedAt time.Time, verdict string, success bool, outputSummary string, errMsg string) {
+	now := time.Now()
+	event := &models.PipelineEvent{
+		IssueID:         issue.ID,
+		PRID:            prID,
+		Repo:            issue.Repo,
+		IssueNumber:     issue.IssueNumber,
+		Stage:           stage,
+		Round:           round,
+		StartedAt:       startedAt,
+		CompletedAt:     &now,
+		DurationSeconds: now.Sub(startedAt).Seconds(),
+		OutputSummary:   truncate(outputSummary, 500),
+		Verdict:         verdict,
+		Success:         success,
+		ErrorMessage:    truncate(errMsg, 500),
+	}
+	if err := p.db.RecordEvent(event); err != nil {
+		log.WithFields(Fields{"error": err, "stage": stage}).Warn("failed to record pipeline event")
+	}
 }
 
 // ProcessIssue runs the full pipeline for a single issue.
 // It updates DB status at each stage boundary.
 func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error {
-	// Rate limit: max open PRs per repo
+	// Rate limit: max open PRs per repo (higher for repos that merged our PRs)
 	maxPR := p.cfg.MaxPRsPerRepo
 	if maxPR <= 0 {
 		maxPR = 2
+	}
+	mergedCount, _ := p.db.CountMergedPRsByRepo(issue.Repo)
+	if mergedCount > 0 {
+		maxPR = maxPR + mergedCount // e.g. 1 merged → max 2, 2 merged → max 3
 	}
 	openCount, _ := p.db.CountOpenPRsByRepo(issue.Repo)
 	if openCount >= maxPR {

@@ -160,6 +160,78 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("get comments: %w", err)
 	}
 
+	// Check issue-level comments for CLA bot requests
+	issueComments, err := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
+	if err != nil {
+		log.WithError(err).Warn("failed to fetch issue comments, skipping CLA check")
+	} else {
+		for _, c := range issueComments {
+			if !isCLABot(c.Author) {
+				continue
+			}
+			body := strings.ToLower(c.Body)
+			if pr.Status == models.PRStatusNeedsAttention {
+				// Check if CLA has since been signed
+				if strings.Contains(body, "signed") || strings.Contains(body, "thank") || strings.Contains(body, "all contributors") {
+					log.WithField("pr", pr.PRURL).Info("CLA signed — restoring to open")
+					p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
+					pr.Status = models.PRStatusOpen
+				}
+				// Still waiting — skip
+				return nil
+			}
+			// First time seeing CLA request
+			if strings.Contains(body, "cla") && !strings.Contains(body, "signed") && !strings.Contains(body, "thank") {
+				log.WithFields(Fields{"pr": pr.PRURL, "bot": c.Author}).Warn("CLA required — marking needs_attention")
+				p.db.UpdatePRStatus(pr.ID, models.PRStatusNeedsAttention)
+				return nil
+			}
+		}
+	}
+
+	// Check for Codecov coverage gaps — trigger engineer to add tests
+	if issueComments != nil {
+		for _, c := range issueComments {
+			if !isCodecovBot(c.Author) {
+				continue
+			}
+			if strings.Contains(c.Body, "missing coverage") || strings.Contains(c.Body, ":x:") {
+				// Only act once per PR (check if we already handled this)
+				if pr.FeedbackRound > 0 {
+					break
+				}
+				log.WithField("pr", pr.PRURL).Info("codecov reports missing coverage — triggering engineer to add tests")
+				issue, err := p.db.GetIssueByID(pr.IssueID)
+				if err != nil {
+					break
+				}
+				workspace, err := p.createWorkspace(issue)
+				if err != nil {
+					break
+				}
+				tmplCtx := map[string]any{
+					"Repo":        prRepo,
+					"IssueNumber": issue.IssueNumber,
+					"IssueTitle":  issue.Title,
+					"PRNumber":    pr.PRNumber,
+					"PRURL":       pr.PRURL,
+					"BranchName":  pr.BranchName,
+					"IsRework":    true,
+					"ReworkRound": pr.FeedbackRound + 1,
+					"ReworkInstructions": "Codecov reports missing test coverage on changed lines. " +
+						"Read the Codecov comment on the PR to identify which lines need coverage. " +
+						"Add tests to cover the missing lines, then push.",
+				}
+				raw, err := p.runner.Run(ctx, "engineer", workspace, tmplCtx)
+				if err == nil && containsMarker(raw, "FIX_COMPLETE") {
+					log.WithField("pr", pr.PRURL).Info("engineer pushed coverage fix")
+					p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound+1)
+				}
+				break
+			}
+		}
+	}
+
 	// Filter out bot reviews, approvals, and non-actionable feedback
 	var humanReviews []ghclient.PRReview
 	for _, r := range reviews {
@@ -386,6 +458,7 @@ func (p *Pipeline) buildResponderCtx(
 		"FeedbackRound":  pr.FeedbackRound + 1,
 		"Reviews":        reviewsText,
 		"InlineComments": commentsText,
+		"Rules":          p.ruleLoader.FormatForPrompt("responder"),
 	}
 }
 

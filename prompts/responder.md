@@ -70,6 +70,10 @@ git push fork {{ .BranchName }}
 - Reply text should confirm the fix ("Done, fixed in this commit") or explain why not
 - Do NOT skip comments — the system will automatically resolve threads you reply to
 
+{{ if .Rules }}
+{{ .Rules }}
+{{ end }}
+
 ## Output Format
 
 Respond with JSON only:

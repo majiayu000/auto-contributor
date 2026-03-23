@@ -78,6 +78,10 @@ git config user.email "1835304752@qq.com"
 - NEVER add "Co-Authored-By" headers
 - Keep commit message concise and human-like
 
+{{ if .Rules }}
+{{ .Rules }}
+{{ end }}
+
 ## Output Markers
 
 Output ONE of these on its own line:
