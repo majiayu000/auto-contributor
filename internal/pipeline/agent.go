@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	jsonrepair "github.com/RealAlexandreAI/json-repair"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 )
 
@@ -114,6 +115,7 @@ func (r *AgentRunner) runWithPrompt(ctx context.Context, agentName, workDir, ren
 // 1. JSON inside markdown code fences (```json ... ```)
 // 2. The last complete, valid JSON object in the text
 // 3. The first complete JSON object (original behavior)
+// 4. json-repair: attempt to fix malformed JSON from LLM output
 func extractJSON(text string, dest any) error {
 	// Strategy 1: markdown code fence
 	if s := extractFromCodeFence(text); s != "" {
@@ -131,10 +133,39 @@ func extractJSON(text string, dest any) error {
 
 	// Strategy 3: first JSON object (original behavior)
 	s := extractFirstJSONObject(text)
+	if s != "" {
+		if err := json.Unmarshal([]byte(s), dest); err == nil {
+			return nil
+		}
+	}
+
+	// Strategy 4: json-repair on the entire text (handles truncated/malformed JSON from LLMs)
+	if repaired, err := jsonrepair.RepairJSON(text); err == nil && repaired != "" {
+		// Extract object from repaired text (repair may return valid JSON wrapped in text)
+		if json.Unmarshal([]byte(repaired), dest) == nil {
+			return nil
+		}
+		// Try extracting object from repaired output
+		if obj := extractFirstJSONObject(repaired); obj != "" {
+			if json.Unmarshal([]byte(obj), dest) == nil {
+				return nil
+			}
+		}
+	}
+
+	// Strategy 4b: repair just the extracted fragment
+	if s != "" {
+		if repaired, err := jsonrepair.RepairJSON(s); err == nil {
+			if json.Unmarshal([]byte(repaired), dest) == nil {
+				return nil
+			}
+		}
+	}
+
 	if s == "" {
 		return fmt.Errorf("no JSON object found in output")
 	}
-	return json.Unmarshal([]byte(s), dest)
+	return fmt.Errorf("JSON found but could not be parsed or repaired")
 }
 
 // extractFromCodeFence extracts content from ```json ... ``` or ``` ... ``` fences.
