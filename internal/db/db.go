@@ -109,6 +109,7 @@ func (db *DB) Migrate() error {
 	// Run migrations (ignore errors for columns that already exist)
 	db.runMigrations()
 	db.MigrateLessons()
+	db.MigrateEvents()
 
 	return nil
 }
@@ -586,6 +587,18 @@ func (db *DB) CountOpenPRsByRepo(repo string) (int, error) {
 	return count, err
 }
 
+// CountMergedPRsByRepo returns the number of merged PRs for a given repo.
+func (db *DB) CountMergedPRsByRepo(repo string) (int, error) {
+	var count int
+	query := fmt.Sprintf(`
+		SELECT COUNT(*) FROM pull_requests p
+		JOIN issues i ON p.issue_id = i.id
+		WHERE i.repo = %s AND p.status = 'merged'
+	`, db.placeholder(1))
+	err := db.QueryRow(query, repo).Scan(&count)
+	return count, err
+}
+
 // GetOpenPRs retrieves all open pull requests
 func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 	rows, err := db.Query(`
@@ -593,7 +606,7 @@ func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 			   review_comment_count, first_review_at, last_feedback_check_at, feedback_round,
 			   created_at, updated_at
 		FROM pull_requests
-		WHERE status IN ('open', 'draft')
+		WHERE status IN ('open', 'draft', 'needs_attention')
 	`)
 	if err != nil {
 		return nil, err
@@ -616,6 +629,69 @@ func (db *DB) GetOpenPRs() ([]*models.PullRequest, error) {
 	}
 
 	return prs, nil
+}
+
+// GetNeedsAttentionPRs retrieves PRs that require manual action (e.g. CLA signing).
+func (db *DB) GetNeedsAttentionPRs() ([]*models.PullRequest, error) {
+	rows, err := db.Query(`
+		SELECT id, issue_id, pr_url, pr_number, branch_name, status, ci_status, retry_count,
+			   review_comment_count, first_review_at, last_feedback_check_at, feedback_round,
+			   created_at, updated_at
+		FROM pull_requests
+		WHERE status = 'needs_attention'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var prs []*models.PullRequest
+	for rows.Next() {
+		pr := &models.PullRequest{}
+		err := rows.Scan(
+			&pr.ID, &pr.IssueID, &pr.PRURL, &pr.PRNumber, &pr.BranchName,
+			&pr.Status, &pr.CIStatus, &pr.RetryCount,
+			&pr.ReviewCommentCount, &pr.FirstReviewAt, &pr.LastFeedbackCheckAt, &pr.FeedbackRound,
+			&pr.CreatedAt, &pr.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		prs = append(prs, pr)
+	}
+	return prs, nil
+}
+
+// GetSlowRepos returns repos that have open PRs with no feedback for 7+ days.
+func (db *DB) GetSlowRepos() ([]string, error) {
+	var timeExpr string
+	if db.IsPostgres() {
+		timeExpr = "NOW() - INTERVAL '7 days'"
+	} else {
+		timeExpr = "datetime('now', '-7 days')"
+	}
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT DISTINCT i.repo
+		FROM pull_requests pr
+		JOIN issues i ON pr.issue_id = i.id
+		WHERE pr.status IN ('open', 'draft')
+		  AND pr.review_comment_count = 0
+		  AND pr.created_at < %s
+	`, timeExpr))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var repos []string
+	for rows.Next() {
+		var repo string
+		if err := rows.Scan(&repo); err != nil {
+			return nil, err
+		}
+		repos = append(repos, repo)
+	}
+	return repos, nil
 }
 
 // CreateSolveAttempt inserts a new solve attempt

@@ -31,7 +31,8 @@ const (
 	PRStatusOpen       PRStatus = "open"  // Ready for review, checking feedback
 	PRStatusMerged     PRStatus = "merged"
 	PRStatusClosed     PRStatus = "closed"
-	PRStatusResponding PRStatus = "responding"
+	PRStatusResponding     PRStatus = "responding"
+	PRStatusNeedsAttention PRStatus = "needs_attention" // Requires manual action (e.g. CLA signing)
 )
 
 // FailureReason categorizes why an attempt failed
@@ -277,4 +278,24 @@ type ReviewLesson struct {
 	SourceComment string    `db:"source_comment" json:"source_comment"` // original reviewer text
 	Reviewer      string    `db:"reviewer" json:"reviewer"`
 	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+}
+
+// PipelineEvent records a single agent invocation in the pipeline.
+type PipelineEvent struct {
+	ID               int64      `db:"id" json:"id"`
+	IssueID          int64      `db:"issue_id" json:"issue_id"`
+	PRID             *int64     `db:"pr_id" json:"pr_id,omitempty"`
+	Repo             string     `db:"repo" json:"repo"`
+	IssueNumber      int        `db:"issue_number" json:"issue_number"`
+	Stage            string     `db:"stage" json:"stage"`
+	Round            int        `db:"round" json:"round"`
+	StartedAt        time.Time  `db:"started_at" json:"started_at"`
+	CompletedAt      *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	DurationSeconds  float64    `db:"duration_seconds" json:"duration_seconds"`
+	OutputSummary    string     `db:"output_summary" json:"output_summary"`
+	Verdict          string     `db:"verdict" json:"verdict"`
+	Success          bool       `db:"success" json:"success"`
+	ErrorMessage     string     `db:"error_message" json:"error_message,omitempty"`
+	OutcomeLabel     string     `db:"outcome_label" json:"outcome_label,omitempty"`
+	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
 }
