@@ -1,0 +1,16 @@
+id: detect-dev-branch
+stage: analyst
+severity: high
+confidence: 0.95
+source: manual
+created_at: "2026-03-23"
+evidence_count: 3
+tags: [branch, contribution-gate]
+condition: |
+  Some repos require PRs to target dev/develop instead of main/master.
+body: |
+  Check if the repo has a dev/develop/next/staging branch:
+  gh api repos/{owner}/{repo}/branches --jq '.[].name' | grep -E '^(dev|develop|next|staging)$'
+
+  Also check CONTRIBUTING.md and recent merged PRs to see which base branch maintainers expect.
+  Set BaseBranch accordingly. Submitting to the wrong branch causes immediate rejection.

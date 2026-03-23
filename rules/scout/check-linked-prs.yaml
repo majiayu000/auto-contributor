@@ -1,0 +1,17 @@
+id: check-linked-prs
+stage: scout
+severity: critical
+confidence: 1.0
+source: manual
+created_at: "2026-03-23"
+evidence_count: 2
+tags: [competition, duplicate]
+condition: |
+  Always check issue timeline for linked PRs and referenced commits.
+body: |
+  Use the issue timeline API to detect existing work:
+  gh api repos/{owner}/{repo}/issues/{number}/timeline --jq '.[] | select(.event == "cross-referenced" or .event == "referenced")'
+
+  Also read issue comments for mentions of PRs, commits, or "already fixed".
+  If ANY existing PR or fix is found, output VERDICT: SKIP with reason "competing PR exists".
+  This catches cases where PR titles don't contain the issue number.

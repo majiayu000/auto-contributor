@@ -1,0 +1,19 @@
+id: minimal-changes-only
+stage: engineer
+severity: high
+confidence: 0.90
+source: manual
+created_at: "2026-03-23"
+evidence_count: 8
+tags: [scope, quality]
+condition: |
+  Always applies. Upstream reviewers consistently reject scope creep.
+body: |
+  Make ONLY the changes required to fix the issue. Do not:
+  - Refactor surrounding code
+  - Add features not asked for
+  - Change code style in files you didn't need to modify
+  - Add extra error handling beyond what's needed
+  - Add comments or docstrings to code you didn't change
+
+  Keep the diff minimal. A 3-line fix is better than a 30-line "improvement".

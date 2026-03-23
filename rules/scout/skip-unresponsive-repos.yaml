@@ -1,0 +1,14 @@
+id: skip-unresponsive-repos
+stage: scout
+severity: high
+confidence: 0.90
+source: manual
+created_at: "2026-03-23"
+evidence_count: 5
+tags: [repo-quality, timeout]
+condition: |
+  Repo has open PRs with zero feedback for 14+ days.
+body: |
+  If this repo historically ignores contributor PRs (no review, no merge,
+  no close for 14+ days), output VERDICT: SKIP with reason
+  "repo historically unresponsive to contributions".

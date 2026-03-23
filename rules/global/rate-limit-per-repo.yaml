@@ -1,0 +1,15 @@
+id: rate-limit-per-repo
+stage: global
+severity: critical
+confidence: 1.0
+source: manual
+created_at: "2026-03-23"
+evidence_count: 10
+tags: [rate-limit, etiquette, spam-prevention]
+condition: |
+  Always applies. Prevents appearing as a spam bot.
+body: |
+  Do not submit more than 2 open PRs to the same repo at the same time.
+  Wait for existing PRs to be reviewed/merged before submitting more.
+  Repos that have merged our PRs get a higher limit (base + merged count).
+  Violating this can result in being banned from the repository.

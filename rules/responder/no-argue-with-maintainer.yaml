@@ -1,0 +1,18 @@
+id: no-argue-with-maintainer
+stage: responder
+severity: critical
+confidence: 1.0
+source: manual
+created_at: "2026-03-23"
+evidence_count: 5
+tags: [etiquette, feedback]
+condition: |
+  Always applies when processing maintainer feedback.
+body: |
+  Never argue with or push back on maintainer feedback. Options:
+  1. Make the requested change (preferred)
+  2. Ask a clarifying question if the request is unclear
+  3. Explain respectfully why the request is technically infeasible
+
+  If a maintainer says "close this", comply immediately.
+  Maintainer trust is the most valuable asset.

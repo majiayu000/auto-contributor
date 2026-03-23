@@ -1,0 +1,18 @@
+id: comment-before-pr
+stage: global
+severity: medium
+confidence: 0.85
+source: manual
+created_at: "2026-03-23"
+evidence_count: 6
+tags: [etiquette, communication]
+condition: |
+  Always comment on the issue before starting work.
+body: |
+  Before writing any code, post a comment on the issue explaining:
+  1. Your understanding of the problem
+  2. Your proposed approach (brief)
+  3. That you will open a draft PR shortly
+
+  This gives maintainers a chance to redirect you if your approach is wrong,
+  and signals to other contributors that someone is working on it.

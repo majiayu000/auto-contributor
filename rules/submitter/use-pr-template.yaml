@@ -1,0 +1,17 @@
+id: use-pr-template
+stage: submitter
+severity: high
+confidence: 0.95
+source: manual
+created_at: "2026-03-23"
+evidence_count: 3
+tags: [pr-template, contribution-gate]
+condition: |
+  Always check for PR template before creating PR.
+body: |
+  Before creating the PR, fetch the repo's PR template:
+  gh api repos/{owner}/{repo}/contents/.github/PULL_REQUEST_TEMPLATE.md --jq '.content' | base64 -d
+
+  If a template exists, use it as the PR body and fill in all required fields.
+  If the template has checkboxes (CLA, AI-generated code), check the appropriate ones.
+  Missing PR template fields is a common reason for immediate PR closure.

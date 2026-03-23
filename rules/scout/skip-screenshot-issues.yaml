@@ -1,0 +1,15 @@
+id: skip-screenshot-issues
+stage: scout
+severity: high
+confidence: 0.95
+source: manual
+created_at: "2026-03-23"
+evidence_count: 3
+tags: [ui, visual, automation-limit]
+condition: |
+  Issue requires screenshot or visual demonstration of the fix.
+body: |
+  Skip issues where the PR result must be demonstrated via screenshot or UI recording.
+  Look for: "screenshot", "screen recording", "before/after image", "demo gif", "visual proof".
+  Also skip purely UI/CSS/styling changes with no logic involved.
+  Output VERDICT: SKIP with reason "requires visual demonstration".
