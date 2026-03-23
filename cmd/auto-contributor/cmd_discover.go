@@ -67,6 +67,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 		Labels:        cfg.IncludeLabels,
 		MaxAgeDays:    cfg.MaxIssueAgeDays,
 		ExcludeRepos:  cfg.ExcludeRepos,
+		PriorityRepos: cfg.PriorityRepos,
 		Limit:         limit,
 		AnalysisDepth: depth,
 	}

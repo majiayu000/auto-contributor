@@ -26,8 +26,14 @@ func (c *Client) ghAPI(ctx context.Context, endpoint string, args ...string) ([]
 	cmdArgs := []string{"api", endpoint}
 	cmdArgs = append(cmdArgs, args...)
 
+	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "gh", cmdArgs...)
-	return cmd.Output()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
 }
 
 // GetUsername gets the authenticated username

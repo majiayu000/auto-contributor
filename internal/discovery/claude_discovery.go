@@ -20,6 +20,7 @@ type DiscoveryRequest struct {
 	Labels        []string `json:"labels"`         // e.g., ["good first issue"]
 	MaxAgeDays    int      `json:"max_age_days"`   // max issue age
 	ExcludeRepos  []string `json:"exclude_repos"`  // repos to skip
+	PriorityRepos []string `json:"priority_repos"` // repos to check first
 	Limit         int      `json:"limit"`          // max issues to return
 	AnalysisDepth string   `json:"analysis_depth"` // "quick", "deep", "ultrathink"
 }
@@ -188,6 +189,11 @@ func (d *ClaudeDiscoverer) buildDiscoveryPrompt(req DiscoveryRequest) string {
 		excludeRepos = fmt.Sprintf("\n排除这些仓库（不要搜索、不要推荐）: %s", strings.Join(req.ExcludeRepos, ", "))
 	}
 
+	prioritySection := "（无指定库，跳过此步，直接进入搜索。）"
+	if len(req.PriorityRepos) > 0 {
+		prioritySection = fmt.Sprintf("以下是指定的优先库，**先检查这些库的 issue**，然后再搜索新库：\n- %s\n\n对每个库先执行 issue 检查（第二步），有合适的就直接加入候选。", strings.Join(req.PriorityRepos, "\n- "))
+	}
+
 	minStars := req.MinStars
 	if minStars <= 0 {
 		minStars = 100
@@ -200,6 +206,16 @@ func (d *ClaudeDiscoverer) buildDiscoveryPrompt(req DiscoveryRequest) string {
 			req.Topic, lang, minStars)
 	}
 
+	// Build trending topic searches to catch high-star repos not matched by keyword (e.g. dify, open-webui)
+	aiTopics := []string{"llm", "ai", "machine-learning", "deep-learning", "generative-ai"}
+	var trendingSearches strings.Builder
+	for _, topic := range aiTopics {
+		for _, lang := range langs {
+			fmt.Fprintf(&trendingSearches, "gh search repos --topic=%s --language=%s --stars=\">10000\" --sort=updated --json name,owner,stargazersCount,updatedAt --limit 10\n",
+				topic, lang)
+		}
+	}
+
 	labels := "good first issue,help wanted,bug"
 	if len(req.Labels) > 0 {
 		labels = strings.Join(req.Labels, ",")
@@ -209,12 +225,21 @@ func (d *ClaudeDiscoverer) buildDiscoveryPrompt(req DiscoveryRequest) string {
 
 ## 搜索策略
 
-### 第一步：发现高星活跃项目
-使用ultrathink思考搜索策略。优先找**高星、活跃维护、有明确label**的项目。
+### 第零步：优先检查指定库
+%s
+
+### 第一步：搜索补充发现新库
+使用ultrathink思考搜索策略。在已知库之外，额外搜索新的高星活跃项目。
 
 执行以下搜索（覆盖多种语言）：
+
+**关键词搜索：**
+%s
+**Topic trending 搜索（补充高星但名字不含关键词的库，如 dify/open-webui）：**
 %s
 %s
+
+**重要：跳过已知库列表中已经检查过的库，只关注新发现的库。**
 
 ### 第二步：对每个库检查issue
 对于每个找到的库，执行：
@@ -294,8 +319,13 @@ gh pr list --repo <owner/repo> --state all --search "<issue_number>" --limit 1
   }
 }
 
-开始搜索！记住：只输出JSON，不要任何解释文字！
-`, langSearches.String(), excludeRepos, labels,
+开始搜索！
+
+## 关键约束
+1. **禁止使用 Agent 工具** — 你必须自己直接执行所有搜索，不要委派给子 agent
+2. **最终输出必须是且仅是一个 JSON 对象** — 第一个字符是 {，最后一个字符是 }
+3. **不要输出任何解释、总结或 markdown** — 只输出 JSON
+`, prioritySection, langSearches.String(), trendingSearches.String(), excludeRepos, labels,
 		minStars, minStars/2, minStars, minStars/5, minStars/2, minStars/5,
 		req.Limit, req.Limit, minStars)
 }
