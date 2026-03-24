@@ -12,6 +12,7 @@ import (
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/internal/rules"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -43,6 +44,13 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		timeout = 30 * time.Minute
 	}
 
+	// Initialize agent runtime
+	rt, err := runtime.New(cfg.RuntimeType, cfg.RuntimePath)
+	if err != nil {
+		return nil, fmt.Errorf("create runtime: %w", err)
+	}
+	log.WithFields(Fields{"runtime": rt.Name()}).Info("agent runtime initialized")
+
 	maxReview := cfg.MaxReviewRounds
 	if maxReview <= 0 {
 		maxReview = 3
@@ -65,7 +73,7 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		db:         database,
 		gh:         gh,
 		prompts:    ps,
-		runner:     NewAgentRunner(ps, timeout),
+		runner:     NewAgentRunner(ps, rt, timeout),
 		ruleLoader: rl,
 		maxReview:  maxReview,
 	}, nil
@@ -266,6 +274,21 @@ func (p *Pipeline) createWorkspace(issue *models.Issue) (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// cleanupWorkspace removes the workspace directory for a PR after it reaches a terminal state.
+func (p *Pipeline) cleanupWorkspace(pr *models.PullRequest) {
+	issue, err := p.db.GetIssueByID(pr.IssueID)
+	if err != nil || issue == nil {
+		return
+	}
+	dir := filepath.Join(p.cfg.WorkspaceDir, fmt.Sprintf("%s-%d",
+		sanitizeRepoName(issue.Repo), issue.IssueNumber))
+	if err := os.RemoveAll(dir); err != nil {
+		log.WithFields(Fields{"dir": dir, "error": err}).Warn("failed to cleanup workspace")
+	} else {
+		log.WithFields(Fields{"dir": dir, "pr": pr.PRURL}).Info("workspace cleaned up")
+	}
 }
 
 func sanitizeRepoName(repo string) string {

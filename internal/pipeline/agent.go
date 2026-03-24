@@ -1,27 +1,27 @@
 package pipeline
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	jsonrepair "github.com/RealAlexandreAI/json-repair"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 )
 
-// AgentRunner executes Claude CLI with a rendered prompt and parses JSON output.
+// AgentRunner executes an agent runtime with a rendered prompt and parses JSON output.
 type AgentRunner struct {
 	prompts *prompt.Store
+	runtime runtime.Runtime
 	timeout time.Duration
 }
 
-// NewAgentRunner creates a runner bound to the given prompt store.
-func NewAgentRunner(ps *prompt.Store, timeout time.Duration) *AgentRunner {
-	return &AgentRunner{prompts: ps, timeout: timeout}
+// NewAgentRunner creates a runner bound to the given prompt store and runtime.
+func NewAgentRunner(ps *prompt.Store, rt runtime.Runtime, timeout time.Duration) *AgentRunner {
+	return &AgentRunner{prompts: ps, runtime: rt, timeout: timeout}
 }
 
 // Run renders the named prompt template with ctx, invokes Claude CLI in workDir,
@@ -35,8 +35,8 @@ func (r *AgentRunner) Run(ctx context.Context, agentName string, workDir string,
 }
 
 // RunJSON is like Run but also extracts a JSON object from the output.
-// If the first attempt fails to parse JSON, it retries once with an explicit
-// "output only JSON" instruction appended to the prompt.
+// If extraction fails, it does a lightweight retry: passes the raw output to a
+// short Claude call that only converts it to JSON (avoids re-running the full agent).
 func (r *AgentRunner) RunJSON(ctx context.Context, agentName string, workDir string, tmplCtx map[string]any, dest any) (string, error) {
 	rendered, err := r.prompts.Render(agentName, tmplCtx)
 	if err != nil {
@@ -52,20 +52,40 @@ func (r *AgentRunner) RunJSON(ctx context.Context, agentName string, workDir str
 		return raw, nil
 	}
 
-	// Retry with explicit JSON-only instruction
-	retryPrompt := rendered + "\n\nOutput ONLY the JSON object, no markdown, no explanation."
-	raw, err = r.runWithPrompt(ctx, agentName, workDir, retryPrompt)
+	// Log the failed output for debugging
+	log.WithFields(Fields{
+		"agent":      agentName,
+		"output_len": len(raw),
+		"output_tail": truncate(raw[max(0, len(raw)-500):], 500),
+	}).Warn("JSON extraction failed, attempting lightweight recovery")
+
+	// Lightweight retry: ask Claude to extract JSON from the existing output
+	// instead of re-running the entire agent (which costs 3-7 min)
+	tail := raw
+	if len(tail) > 3000 {
+		tail = tail[len(tail)-3000:]
+	}
+	recoveryPrompt := fmt.Sprintf(`The following is output from an agent that was supposed to return JSON but the JSON is missing or malformed.
+Extract or reconstruct the JSON result based on the analysis below. Output ONLY a valid JSON object, nothing else.
+
+--- Agent Output (last 3000 chars) ---
+%s
+--- End ---
+
+Output the JSON now:`, tail)
+
+	recoveryRaw, err := r.runWithPrompt(ctx, agentName, workDir, recoveryPrompt)
 	if err != nil {
-		return raw, err
+		return raw, fmt.Errorf("parse %s JSON output: recovery failed: %w", agentName, err)
 	}
 
-	if err := extractJSON(raw, dest); err != nil {
+	if err := extractJSON(recoveryRaw, dest); err != nil {
 		return raw, fmt.Errorf("parse %s JSON output: %w", agentName, err)
 	}
 	return raw, nil
 }
 
-// runWithPrompt invokes Claude CLI with an already-rendered prompt string.
+// runWithPrompt invokes the configured runtime with an already-rendered prompt string.
 func (r *AgentRunner) runWithPrompt(ctx context.Context, agentName, workDir, rendered string) (string, error) {
 	timeout := r.timeout
 	if timeout == 0 {
@@ -79,36 +99,12 @@ func (r *AgentRunner) runWithPrompt(ctx context.Context, agentName, workDir, ren
 		"workdir": workDir,
 	}).Info("running agent")
 
-	cmd := exec.CommandContext(ctx, "claude",
-		"--print",
-		"--dangerously-skip-permissions",
-		"-p", rendered,
-		"--output-format", "text")
-	cmd.Dir = workDir
-
-	stdout, err := cmd.StdoutPipe()
+	output, err := r.runtime.Execute(ctx, workDir, rendered)
 	if err != nil {
-		return "", fmt.Errorf("stdout pipe: %w", err)
+		return output, fmt.Errorf("agent %s (%s) failed: %w", agentName, r.runtime.Name(), err)
 	}
 
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start claude for %s: %w", agentName, err)
-	}
-
-	var out strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		out.WriteString(line + "\n")
-	}
-
-	if err := cmd.Wait(); err != nil {
-		return out.String(), fmt.Errorf("agent %s exited with error: %w\noutput: %s", agentName, err, truncate(out.String(), 500))
-	}
-
-	return out.String(), nil
+	return output, nil
 }
 
 // extractJSON finds and unmarshals a JSON object from text using multiple strategies:

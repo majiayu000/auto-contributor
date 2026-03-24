@@ -12,6 +12,7 @@ import (
 
 	"github.com/majiayu000/auto-contributor/internal/discovery"
 	"github.com/majiayu000/auto-contributor/internal/pipeline"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 	"github.com/spf13/cobra"
 )
@@ -160,7 +161,12 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 		AnalysisDepth: depth,
 	}
 
-	discoverer := discovery.NewClaudeDiscoverer(24 * time.Hour)
+	rt, err := runtime.New(cfg.RuntimeType, cfg.RuntimePath)
+	if err != nil {
+		log.Error("create runtime for discovery", "error", err)
+		return
+	}
+	discoverer := discovery.NewClaudeDiscoverer(rt, 24*time.Hour)
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
 		log.Error("smart discovery failed", "error", err)
