@@ -21,6 +21,11 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 		"Rules":       p.ruleLoader.FormatForPrompt("scout"),
 	}
 
+	// Inject repo_structure lessons so scout can detect wrong-repo patterns
+	if lessons, err := p.db.GetRecentLessons(10); err == nil && len(lessons) > 0 {
+		tmplCtx["PastLessons"] = formatLessonsForPrompt(lessons)
+	}
+
 	start := time.Now()
 	var result ScoutResult
 	if _, err := p.runner.RunJSON(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result); err != nil {
