@@ -20,6 +20,7 @@ var lessonCategories = []struct {
 	{"docs", []string{"comment", "docstring", "documentation", "readme", "typo"}},
 	{"ci", []string{"ci", "build", "compile", "workflow", "action"}},
 	{"logic", []string{"bug", "logic", "incorrect", "wrong", "fix", "error", "crash", "race", "nil"}},
+	{"repo_structure", []string{"upstream", "belongs in", "other repo", "separate repo", "dependency bump", "go-mysql-server", "the actual change is in", "change is in"}},
 }
 
 // categorizeComment returns the best-matching category for a reviewer comment.
@@ -95,6 +96,38 @@ func extractLessons(
 	return lessons
 }
 
+// extractLessonsFromIssueComments extracts lessons from issue-level comments on a closed PR.
+// Maintainers often explain close reasons here (e.g. "fix belongs in upstream dependency X").
+func extractLessonsFromIssueComments(
+	pr *models.PullRequest,
+	repo string,
+	comments []ghclient.IssueComment,
+) []*models.ReviewLesson {
+	var lessons []*models.ReviewLesson
+	for _, c := range comments {
+		if c.Body == "" || len(c.Body) < 20 {
+			continue
+		}
+		if isBot(c.Author) {
+			continue
+		}
+		category := categorizeComment(c.Body)
+		// Only record comments that match a known actionable category
+		if category == "other" {
+			continue
+		}
+		lessons = append(lessons, &models.ReviewLesson{
+			PRID:          pr.ID,
+			Repo:          repo,
+			Category:      category,
+			Lesson:        summarizeToLesson(c.Body),
+			SourceComment: truncate(c.Body, 500),
+			Reviewer:      c.Author,
+		})
+	}
+	return lessons
+}
+
 // summarizeToLesson trims a reviewer comment to a concise actionable lesson.
 func summarizeToLesson(body string) string {
 	// Take first sentence or first 200 chars, whichever is shorter
@@ -150,16 +183,21 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 		return
 	}
 
-	// Get inline comments
+	// Get inline review comments
 	comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
 	if err != nil {
 		log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to fetch comments for lesson extraction")
 		comments = nil
 	}
 
+	// Get issue-level comments — maintainers often explain close reasons here
+	issueComments, _ := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
+
 	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments)
-	if len(lessons) == 0 {
-		return
+
+	// Also extract from issue comments when PR was closed without merge
+	if prInfo.State == "CLOSED" {
+		lessons = append(lessons, extractLessonsFromIssueComments(pr, prRepo, issueComments)...)
 	}
 
 	saved := 0
@@ -171,13 +209,14 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 		saved++
 	}
 
-	log.WithFields(Fields{
-		"pr":      pr.PRURL,
-		"lessons": saved,
-	}).Info("extracted review lessons")
+	if saved > 0 {
+		log.WithFields(Fields{
+			"pr":      pr.PRURL,
+			"lessons": saved,
+		}).Info("extracted review lessons")
+	}
 
 	// Label all pipeline events for this PR/issue with the outcome
-	issueComments, _ := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
 	label := ClassifyOutcome(prInfo, issueComments, pr)
 	if err := p.db.LabelEventsByIssue(pr.IssueID, label); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to label pipeline events")

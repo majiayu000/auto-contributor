@@ -56,6 +56,19 @@ Read CI config to identify:
 - Understand the code structure around the bug
 - Identify test patterns used in the project
 
+### 4b. Check Dependency Boundaries
+
+Before declaring `can_fix: true`, verify the code to change actually lives in **this** repo:
+
+- **Go**: read `go.mod` — if the relevant package is listed under `require`, the fix belongs upstream in that module
+- **Node.js**: read `package.json` — if the code lives in `node_modules/`, it belongs upstream
+- **Rust**: read `Cargo.toml` — if the relevant crate is a dependency entry, it belongs upstream
+
+If the required change is in a dependency, set:
+```json
+{ "can_fix": false, "reason": "fix belongs in upstream dependency <owner/repo>" }
+```
+
 ### 5. Create Fix Plan
 
 Design the minimal fix:

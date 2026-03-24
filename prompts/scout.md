@@ -11,6 +11,15 @@ Evaluate whether GitHub issue #{{ .IssueNumber }} in {{ .Repo }} is a viable con
 {{ .IssueBody }}
 **Labels:** {{ .IssueLabels }}
 
+{{ if .PastLessons }}
+## Lessons from Past Contributions
+
+{{ .PastLessons }}
+
+If any `repo_structure` lesson indicates that changes for **{{ .Repo }}** belong in a different repository,
+output VERDICT: SKIP with reason referencing that lesson.
+
+{{ end }}
 ## Checks (execute ALL before making a decision)
 
 ### 1. Upstream Redirection Check
