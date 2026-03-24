@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/majiayu000/auto-contributor/internal/discovery"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 	"github.com/spf13/cobra"
 )
@@ -72,9 +73,13 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 		AnalysisDepth: depth,
 	}
 
-	// Create discoverer - no practical timeout
+	// Create runtime and discoverer
+	rt, err := runtime.New(cfg.RuntimeType, cfg.RuntimePath)
+	if err != nil {
+		return fmt.Errorf("create runtime: %w", err)
+	}
 	timeout := 24 * time.Hour
-	discoverer := discovery.NewClaudeDiscoverer(timeout)
+	discoverer := discovery.NewClaudeDiscoverer(rt, timeout)
 
 	fmt.Println("Running Claude discovery (this may take a few minutes)...")
 	fmt.Println()

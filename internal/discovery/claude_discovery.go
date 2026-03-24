@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/logger"
 )
 
@@ -116,15 +117,17 @@ func toInt(v interface{}) int {
 	}
 }
 
-// ClaudeDiscoverer uses Claude to find and analyze issues
+// ClaudeDiscoverer uses an agent runtime to find and analyze issues
 type ClaudeDiscoverer struct {
+	rt      runtime.Runtime
 	timeout time.Duration
 	log     *logger.ComponentLogger
 }
 
-// NewClaudeDiscoverer creates a new discoverer
-func NewClaudeDiscoverer(timeout time.Duration) *ClaudeDiscoverer {
+// NewClaudeDiscoverer creates a new discoverer with the given runtime
+func NewClaudeDiscoverer(rt runtime.Runtime, timeout time.Duration) *ClaudeDiscoverer {
 	return &ClaudeDiscoverer{
+		rt:      rt,
 		timeout: timeout,
 		log:     logger.NewComponent("discovery"),
 	}
@@ -179,107 +182,25 @@ func (d *ClaudeDiscoverer) Discover(ctx context.Context, req DiscoveryRequest) (
 }
 
 func (d *ClaudeDiscoverer) buildDiscoveryPrompt(req DiscoveryRequest) string {
-	langs := req.Languages
-	if len(langs) == 0 {
-		langs = []string{"go"}
-	}
-
-	excludeRepos := ""
+	excludeSection := ""
 	if len(req.ExcludeRepos) > 0 {
-		excludeRepos = fmt.Sprintf("\n排除这些仓库（不要搜索、不要推荐）: %s", strings.Join(req.ExcludeRepos, ", "))
+		excludeSection = fmt.Sprintf("\n\n这些库不要推荐（黑名单或已有 PR 在跑）:\n%s", strings.Join(req.ExcludeRepos, ", "))
 	}
 
-	prioritySection := "（无指定库，跳过此步，直接进入搜索。）"
-	if len(req.PriorityRepos) > 0 {
-		prioritySection = fmt.Sprintf("以下是指定的优先库，**先检查这些库的 issue**，然后再搜索新库：\n- %s\n\n对每个库先执行 issue 检查（第二步），有合适的就直接加入候选。", strings.Join(req.PriorityRepos, "\n- "))
+	langList := strings.Join(req.Languages, ", ")
+	if langList == "" {
+		langList = "go, python, typescript, javascript, rust"
 	}
 
-	minStars := req.MinStars
-	if minStars <= 0 {
-		minStars = 100
-	}
+	return fmt.Sprintf(`帮我看下 GitHub 的 trending 库或者 AI 相关的库，维护频繁的，有哪些 issue 没有 PR 的，可以提交 PR 的。
+我想做一些贡献，你可以搜索一下，使用 ultrathink 对这些库做一个排行，出一个列表给我。
+如果这些知名库都找不到合适的，就自己想办法找别的库，一点点降低标准。
 
-	// Build language search commands for each language
-	var langSearches strings.Builder
-	for _, lang := range langs {
-		fmt.Fprintf(&langSearches, "gh search repos \"%s\" --language=%s --stars=\">%d\" --sort=stars --json name,owner,stargazersCount,updatedAt --limit 15\n",
-			req.Topic, lang, minStars)
-	}
+语言范围: %s%s
 
-	// Build trending topic searches to catch high-star repos not matched by keyword (e.g. dify, open-webui)
-	aiTopics := []string{"llm", "ai", "machine-learning", "deep-learning", "generative-ai"}
-	var trendingSearches strings.Builder
-	for _, topic := range aiTopics {
-		for _, lang := range langs {
-			fmt.Fprintf(&trendingSearches, "gh search repos --topic=%s --language=%s --stars=\">10000\" --sort=updated --json name,owner,stargazersCount,updatedAt --limit 10\n",
-				topic, lang)
-		}
-	}
+最终只输出 JSON，第一个字符是 {，最后一个字符是 }，不要任何其他文字。
 
-	labels := "good first issue,help wanted,bug"
-	if len(req.Labels) > 0 {
-		labels = strings.Join(req.Labels, ",")
-	}
-
-	return fmt.Sprintf(`你是一个GitHub贡献顾问。你的任务是找到真正适合贡献的高质量issue。
-
-## 搜索策略
-
-### 第零步：优先检查指定库
-%s
-
-### 第一步：搜索补充发现新库
-使用ultrathink思考搜索策略。在已知库之外，额外搜索新的高星活跃项目。
-
-执行以下搜索（覆盖多种语言）：
-
-**关键词搜索：**
-%s
-**Topic trending 搜索（补充高星但名字不含关键词的库，如 dify/open-webui）：**
-%s
-%s
-
-**重要：跳过已知库列表中已经检查过的库，只关注新发现的库。**
-
-### 第二步：对每个库检查issue
-对于每个找到的库，执行：
-gh issue list --repo <owner/repo> --state open --label "%s" --json number,title,createdAt,assignees --limit 15
-
-**跳过已有assignee的issue！**
-
-### 第三步：验证issue没有关联的PR
-对于每个候选issue，执行一次验证：
-gh pr list --repo <owner/repo> --state all --search "<issue_number>" --limit 1
-
-返回为空 = 没有关联PR。不要重复验证！
-
-### 第四步：降级搜索（仅在高星库issue不足时）
-如果stars>%d的库issue都已有PR，依次降级：
-- stars %d..%d
-- stars %d..%d
-降级后重复第二、三步。**不要降到 stars < %d。**
-
-## issue质量评估
-对每个候选issue，深度分析：
-1. issue是否定义清晰、可操作？
-2. 修复范围是否明确？（修改哪些文件）
-3. 预估复杂度？（low/medium/high）
-4. 是否有阻塞因素？（需要外部服务、权限等）
-5. 仓库是否活跃接受外部PR？（看最近merged的外部PR）
-
-**优先推荐**：高星(>5000) + 定义清晰 + 复杂度low/medium + 无阻塞。
-
-## 重要规则
-1. **跳过已assign的issue**
-2. **必须验证无关联PR**
-3. **不要猜测**：无法确认就跳过
-4. **每个仓库最多推荐2个issue**：避免集中在同一仓库
-5. **至少找到%d个**确认没有PR且没有assignee的issue
-
-## 输出格式
-**严格要求：只输出JSON，不要任何其他文字、解释或markdown代码块！**
-**第一个字符必须是 { ，最后一个字符必须是 }**
-
+JSON 格式:
 {
   "issues": [
     {
@@ -289,58 +210,29 @@ gh pr list --repo <owner/repo> --state all --search "<issue_number>" --limit 1
       "url": "https://github.com/owner/repo/issues/123",
       "suitability_score": 0.85,
       "verified_no_pr": true,
-      "has_assignee": false,
-      "verification_method": "searched PRs with issue number, no results",
       "analysis": {
-        "is_well_defined": true,
-        "has_reproduction_steps": true,
-        "is_self_contained": true,
         "fix_type": "bug",
         "complexity": "low",
         "estimated_files": 2,
-        "blockers": [],
         "recommendation": "Clear bug with reproduction steps"
       },
       "repo_context": {
-        "stars": 1500,
-        "has_contributing": true,
-        "has_claude_md": false,
-        "test_framework": "pytest",
-        "ci_system": "github-actions"
+        "stars": 50000
       }
     }
   ],
   "metadata": {
     "total_candidates": 50,
-    "analyzed": 50,
     "issues_with_pr": 45,
-    "selected": %d,
-    "star_threshold_used": %d
+    "selected": 12
   }
 }
-
-开始搜索！
-
-## 关键约束
-1. **禁止使用 Agent 工具** — 你必须自己直接执行所有搜索，不要委派给子 agent
-2. **最终输出必须是且仅是一个 JSON 对象** — 第一个字符是 {，最后一个字符是 }
-3. **不要输出任何解释、总结或 markdown** — 只输出 JSON
-`, prioritySection, langSearches.String(), trendingSearches.String(), excludeRepos, labels,
-		minStars, minStars/2, minStars, minStars/5, minStars/2, minStars/5,
-		req.Limit, req.Limit, minStars)
+`, langList, excludeSection)
 }
 
 func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "claude",
-		"--print",
-		"--dangerously-skip-permissions",
-		"--output-format", "text",
-	)
-
-	cmd.Stdin = strings.NewReader(prompt)
 
 	// Start progress logger
 	startTime := time.Now()
@@ -359,27 +251,16 @@ func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string
 		}
 	}()
 
-	// Use CombinedOutput to capture stderr as well
-	output, err := cmd.CombinedOutput()
-	close(done) // Stop progress logger
+	output, err := d.rt.ExecuteStdin(ctx, prompt)
+	close(done)
 
 	if err != nil {
-		// Log stderr for debugging
-		if len(output) > 0 {
-			preview := string(output)
-			if len(preview) > 1000 {
-				preview = preview[:1000] + "..."
-			}
-			d.log.Error("claude error output", "output", preview)
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("claude timed out after %v", d.timeout)
-		}
-		return "", fmt.Errorf("claude command failed: %w", err)
+		d.log.Error("discovery agent failed", "error", err)
+		return "", fmt.Errorf("discovery agent failed: %w", err)
 	}
 
-	d.log.Info("claude finished", "elapsed", time.Since(startTime).Round(time.Second).String(), "output_bytes", len(output))
-	return string(output), nil
+	d.log.Info("discovery finished", "elapsed", time.Since(startTime).Round(time.Second).String(), "output_bytes", len(output))
+	return output, nil
 }
 
 func (d *ClaudeDiscoverer) parseDiscoveryResult(output string) (*DiscoveryResult, error) {
@@ -417,7 +298,5 @@ func (d *ClaudeDiscoverer) DiscoverAndSave(ctx context.Context, req DiscoveryReq
 }
 
 func writeFile(path string, data []byte) error {
-	cmd := exec.Command("tee", path)
-	cmd.Stdin = strings.NewReader(string(data))
-	return cmd.Run()
+	return os.WriteFile(path, data, 0644)
 }

@@ -46,6 +46,10 @@ type Config struct {
 	Topic             string `mapstructure:"topic"`              // discovery topic (e.g., "ai", "golang")
 	AnalysisDepth     string `mapstructure:"analysis_depth"`     // quick, deep, ultrathink
 
+	// Agent runtime
+	RuntimeType string `mapstructure:"runtime"`      // claude, codex (default: claude)
+	RuntimePath string `mapstructure:"runtime_path"` // override CLI binary path
+
 	// Self-learning
 	RulesDir          string `mapstructure:"rules_dir"`
 	SynthesisInterval int    `mapstructure:"synthesis_interval"` // hours between synthesis cycles
@@ -75,10 +79,10 @@ func Default() *Config {
 		MaxIssueAgeDays:  30,
 		MaxReviewRounds:        3,
 		MaxPRsPerRepo:          1,
-		MaxConcurrentPipelines: 3,
+		MaxConcurrentPipelines: 5,
 		PromptsDir:        filepath.Join(dataDir, "prompts"),
 		Mode:              "full",
-		DiscoveryInterval: 60,
+		DiscoveryInterval: 30,
 		FeedbackInterval:  30,
 		Topic:             "ai",
 		AnalysisDepth:     "deep",
