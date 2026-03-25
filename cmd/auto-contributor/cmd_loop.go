@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -60,11 +59,14 @@ func runLoop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create pipeline: %w", err)
 	}
 
-	// Goroutine 1: Issue discovery + pipeline (full mode only)
+	// Issue queue: discovery pushes issues, workers pull and process
+	issueCh := make(chan *models.Issue, 50)
+
+	// Goroutine 1a: Discovery — finds issues and pushes to queue
 	if mode == "full" {
 		go func() {
 			log.Info("starting discovery goroutine")
-			runDiscoveryCycle(ctx, pipe)
+			runDiscovery(ctx, issueCh)
 
 			ticker := time.NewTicker(time.Duration(cfg.DiscoveryInterval) * time.Minute)
 			defer ticker.Stop()
@@ -73,8 +75,39 @@ func runLoop(cmd *cobra.Command, args []string) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					runDiscoveryCycle(ctx, pipe)
+					runDiscovery(ctx, issueCh)
 				}
+			}
+		}()
+	}
+
+	// Goroutine 1b: Worker pool — pulls issues from queue and processes them
+	if mode == "full" {
+		go func() {
+			maxWorkers := cfg.MaxConcurrentPipelines
+			if maxWorkers <= 0 {
+				maxWorkers = 5
+			}
+			sem := make(chan struct{}, maxWorkers)
+			log.Info("starting pipeline workers", "count", maxWorkers)
+
+			for issue := range issueCh {
+				select {
+				case <-ctx.Done():
+					return
+				case sem <- struct{}{}:
+				}
+
+				go func(iss *models.Issue) {
+					defer func() { <-sem }()
+					if err := pipe.ProcessIssue(ctx, iss); err != nil {
+						log.Error("pipeline failed",
+							"repo", iss.Repo,
+							"issue", iss.IssueNumber,
+							"error", err,
+						)
+					}
+				}(issue)
 			}
 		}()
 	}
@@ -129,7 +162,9 @@ func runLoop(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
+// runDiscovery finds issues and pushes them to the channel for workers to process.
+// It returns immediately after queuing — does NOT wait for pipeline completion.
+func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 	topic := cfg.Topic
 	depth := cfg.AnalysisDepth
 
@@ -178,44 +213,24 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 		"total_candidates", result.Metadata.TotalCandidates,
 	)
 
-	// Process high-scoring issues through V2 pipeline (concurrent worker pool)
-	maxWorkers := cfg.MaxConcurrentPipelines
-	if maxWorkers <= 0 {
-		maxWorkers = 3
-	}
-
-	var (
-		mu        sync.Mutex
-		succeeded int
-		failed    int
-		skipped   int
-		wg        sync.WaitGroup
-		sem       = make(chan struct{}, maxWorkers)
-	)
-
+	var queued, skipped int
 	for _, issue := range result.Issues {
 		if issue.SuitabilityScore < 0.4 {
-			mu.Lock()
 			skipped++
-			mu.Unlock()
 			continue
 		}
 
 		// Double-check for existing PR
 		hasPR, _ := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
 		if hasPR {
-			mu.Lock()
 			skipped++
-			mu.Unlock()
 			continue
 		}
 
 		// Check blacklist
 		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
 		if isBlacklisted {
-			mu.Lock()
 			skipped++
-			mu.Unlock()
 			continue
 		}
 
@@ -240,40 +255,18 @@ func runDiscoveryCycle(ctx context.Context, pipe *pipeline.Pipeline) {
 			continue
 		}
 
-		log.Info("processing issue",
+		log.Info("queued issue",
 			"repo", issue.Repo,
 			"issue", issue.IssueNumber,
 			"score", issue.SuitabilityScore,
 		)
 
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(iss *models.Issue) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			if err := pipe.ProcessIssue(ctx, iss); err != nil {
-				log.Error("pipeline failed",
-					"repo", iss.Repo,
-					"issue", iss.IssueNumber,
-					"error", err,
-				)
-				mu.Lock()
-				failed++
-				mu.Unlock()
-			} else {
-				mu.Lock()
-				succeeded++
-				mu.Unlock()
-			}
-		}(dbIssue)
+		issueCh <- dbIssue
+		queued++
 	}
 
-	wg.Wait()
-
 	log.Info("discovery cycle complete",
-		"succeeded", succeeded,
-		"failed", failed,
+		"queued", queued,
 		"skipped", skipped,
 	)
 }

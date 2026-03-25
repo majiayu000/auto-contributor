@@ -25,7 +25,7 @@ func (r *CodexRuntime) Name() string { return "codex" }
 func (r *CodexRuntime) Execute(ctx context.Context, workDir string, prompt string) (string, error) {
 	cmd := exec.CommandContext(ctx, r.cliPath,
 		"exec",
-		"--full-auto",
+		"--dangerously-bypass-approvals-and-sandbox",
 		prompt,
 	)
 	cmd.Dir = workDir
@@ -44,7 +44,7 @@ func (r *CodexRuntime) ExecuteStdin(ctx context.Context, prompt string) (string,
 	// Codex exec doesn't support stdin prompts, pass as argument
 	cmd := exec.CommandContext(ctx, r.cliPath,
 		"exec",
-		"--full-auto",
+		"--dangerously-bypass-approvals-and-sandbox",
 		prompt,
 	)
 

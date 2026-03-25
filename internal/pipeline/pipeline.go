@@ -139,7 +139,7 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	// Stage 1.5: Pre-communication (Contributor Skill defense #6)
 	p.preComment(ctx, issue, scout)
 
-	// Stage 1.6: Fork + Clone (Contributor Skill Phase 3.1)
+	// Stage 1.6: Fork + Clone
 	workspace, err := p.forkAndClone(ctx, issue)
 	if err != nil {
 		p.markFailed(issue, "fork_clone_failed", err.Error())

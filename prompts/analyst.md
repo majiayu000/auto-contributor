@@ -50,9 +50,24 @@ Read CI config to identify:
 - Type checking commands
 - Build commands
 
-### 4. Locate Relevant Code
+### 4. Root Cause Analysis (CRITICAL — do this before writing any fix plan)
 
-- Find files related to the issue
+**Read ALL comments on the issue**, not just the title and body:
+```bash
+gh api repos/{{ .Repo }}/issues/{{ .IssueNumber }}/comments --jq '.[] | "\(.user.login): \(.body)"'
+```
+
+Then answer these questions before proceeding:
+1. **What exactly is broken?** Distinguish between multiple symptoms in the issue — the reporter may describe several problems but only one is the actual bug.
+2. **What is the maintainer's design intent?** If a maintainer has commented, their explanation of expected behavior overrides the reporter's assumption. Do NOT propose a fix that contradicts the maintainer's stated design.
+3. **Is this truly a bug, or working-as-designed?** If the behavior is intentional (maintainer says so, or the code has explicit comments/docs explaining it), set `can_fix: false` with reason.
+4. **Where is the root cause?** Trace the error to the exact line of code. Don't fix a symptom upstream if the bug is downstream.
+
+If the issue describes a multi-step reproduction, identify **which specific step** produces the unexpected behavior. The fix must target that step, not earlier steps that work as designed.
+
+### 4a. Locate Relevant Code
+
+- Find files related to the root cause (not just the symptom)
 - Understand the code structure around the bug
 - Identify test patterns used in the project
 
