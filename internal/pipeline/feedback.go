@@ -35,11 +35,13 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	case "MERGED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
 		return nil
 	}
@@ -253,8 +255,16 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		}
 	}
 
+	// Include non-bot issue-level comments (e.g. maintainer replies like "the intended behaviour is...")
+	var humanIssueComments []ghclient.IssueComment
+	for _, c := range issueComments {
+		if !isBot(c.Author) && !isCLABot(c.Author) && !isCodecovBot(c.Author) {
+			humanIssueComments = append(humanIssueComments, c)
+		}
+	}
+
 	// Check for new feedback since last check (humans only)
-	totalFeedback := len(humanReviews) + len(humanComments)
+	totalFeedback := len(humanReviews) + len(humanComments) + len(humanIssueComments)
 	if totalFeedback == 0 {
 		log.WithField("pr", pr.PRURL).Info("no feedback on PR")
 		p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound)
@@ -273,6 +283,14 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		}
 		if !hasNew {
 			for _, c := range humanComments {
+				if c.CreatedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
+					hasNew = true
+					break
+				}
+			}
+		}
+		if !hasNew {
+			for _, c := range humanIssueComments {
 				if c.CreatedAt > pr.LastFeedbackCheckAt.Format(time.RFC3339) {
 					hasNew = true
 					break
@@ -308,7 +326,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	}
 
 	// Build context for responder agent (human feedback only)
-	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments)
+	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments, humanIssueComments)
 
 	log.WithFields(Fields{
 		"pr":       pr.PRURL,
@@ -428,6 +446,7 @@ func (p *Pipeline) buildResponderCtx(
 	pr *models.PullRequest,
 	reviews []ghclient.PRReview,
 	comments []ghclient.PRReviewComment,
+	issueComments []ghclient.IssueComment,
 ) map[string]any {
 	// Format reviews as readable text
 	var reviewsText string
@@ -447,6 +466,15 @@ func (p *Pipeline) buildResponderCtx(
 		commentsText = "(none)"
 	}
 
+	// Format issue-level comments (maintainer replies on the PR thread)
+	var issueCommentsText string
+	for _, c := range issueComments {
+		issueCommentsText += fmt.Sprintf("- **%s** (id:%d): %s\n", c.Author, c.ID, c.Body)
+	}
+	if issueCommentsText == "" {
+		issueCommentsText = "(none)"
+	}
+
 	return map[string]any{
 		"Repo":           issue.Repo,
 		"IssueNumber":    issue.IssueNumber,
@@ -458,6 +486,7 @@ func (p *Pipeline) buildResponderCtx(
 		"FeedbackRound":  pr.FeedbackRound + 1,
 		"Reviews":        reviewsText,
 		"InlineComments": commentsText,
+		"IssueComments":  issueCommentsText,
 		"Rules":          p.ruleLoader.FormatForPrompt("responder"),
 	}
 }
