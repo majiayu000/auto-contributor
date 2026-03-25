@@ -305,8 +305,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return nil
 	}
 
-	// Cap feedback rounds
-	if pr.FeedbackRound >= p.maxReview {
+	// Cap feedback rounds (separate from pipeline review rounds — feedback needs more iterations)
+	maxFeedbackRounds := 10
+	if pr.FeedbackRound >= maxFeedbackRounds {
 		log.WithFields(Fields{
 			"pr":    pr.PRURL,
 			"round": pr.FeedbackRound,
@@ -476,19 +477,42 @@ func (p *Pipeline) buildResponderCtx(
 	}
 
 	return map[string]any{
-		"Repo":           issue.Repo,
-		"IssueNumber":    issue.IssueNumber,
-		"IssueTitle":     issue.Title,
-		"IssueBody":      issue.Body,
-		"PRNumber":       pr.PRNumber,
-		"PRURL":          pr.PRURL,
-		"BranchName":     pr.BranchName,
-		"FeedbackRound":  pr.FeedbackRound + 1,
-		"Reviews":        reviewsText,
-		"InlineComments": commentsText,
-		"IssueComments":  issueCommentsText,
-		"Rules":          p.ruleLoader.FormatForPrompt("responder"),
+		"Repo":                 issue.Repo,
+		"IssueNumber":          issue.IssueNumber,
+		"IssueTitle":           issue.Title,
+		"IssueBody":            issue.Body,
+		"OriginalIssueComments": p.fetchOriginalIssueComments(issue),
+		"PRNumber":             pr.PRNumber,
+		"PRURL":                pr.PRURL,
+		"BranchName":           pr.BranchName,
+		"FeedbackRound":        pr.FeedbackRound + 1,
+		"Reviews":              reviewsText,
+		"InlineComments":       commentsText,
+		"IssueComments":        issueCommentsText,
+		"Rules":                p.ruleLoader.FormatForPrompt("responder"),
 	}
+}
+
+// fetchOriginalIssueComments fetches recent comments from the original issue (not the PR).
+// Maintainers may add clarifications, new context, or updated requirements on the issue.
+func (p *Pipeline) fetchOriginalIssueComments(issue *models.Issue) string {
+	ctx := context.Background()
+	comments, err := p.gh.GetPRIssueComments(ctx, issue.Repo, issue.IssueNumber)
+	if err != nil || len(comments) == 0 {
+		return "(none)"
+	}
+
+	var sb strings.Builder
+	for _, c := range comments {
+		if isBot(c.Author) {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", c.Author, c.Body))
+	}
+	if sb.Len() == 0 {
+		return "(none)"
+	}
+	return sb.String()
 }
 
 // shouldAutoClose returns true if a PR should be auto-closed due to staleness.

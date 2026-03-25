@@ -9,6 +9,13 @@ Address maintainer review feedback on PR #{{ .PRNumber }} in {{ .Repo }}.
 **Issue #{{ .IssueNumber }}:** {{ .IssueTitle }}
 {{ .IssueBody }}
 
+### Recent Comments on the Original Issue
+{{ .OriginalIssueComments }}
+
+**Important:** If maintainers added new context, clarifications, or changed requirements
+on the original issue, factor those into your response. The issue may have evolved since
+the PR was first created.
+
 ## PR Details
 
 - PR URL: {{ .PRURL }}
