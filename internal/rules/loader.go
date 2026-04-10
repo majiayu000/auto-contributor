@@ -142,17 +142,6 @@ func (rl *RuleLoader) ForStage(stage string) []*Rule {
 	return matched
 }
 
-// IDsForStage returns the IDs of rules that pass the confidence filter for a given stage.
-// This is used to record which rules were active when an agent ran (for Q-value tracking).
-func (rl *RuleLoader) IDsForStage(stage string) []string {
-	matched := rl.ForStage(stage)
-	ids := make([]string, 0, len(matched))
-	for _, r := range matched {
-		ids = append(ids, r.ID)
-	}
-	return ids
-}
-
 // IDsForPrompt returns the participation keys of rules actually included in the
 // prompt for a given stage, honouring the same MaxPromptChars budget as
 // FormatForPrompt. Keys are returned as "stage/ruleID" so that Q-value updates
