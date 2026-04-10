@@ -8,6 +8,8 @@ import (
 )
 
 // MigrateTrajectories creates the trajectories table for experience replay.
+// issue_id is intentionally NOT unique: multiple attempts (retries, separate PRs)
+// for the same issue are stored as separate rows so no history is overwritten.
 func (db *DB) MigrateTrajectories() {
 	if db.IsPostgres() {
 		db.Exec(`
@@ -32,12 +34,13 @@ func (db *DB) MigrateTrajectories() {
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
-		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_trajectories_issue_unique ON trajectories(issue_id)`)
+		// Drop the old unique index if it exists (created by earlier schema versions).
+		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
 	} else {
 		db.Exec(`
 			CREATE TABLE IF NOT EXISTS trajectories (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				issue_id INTEGER NOT NULL UNIQUE,
+				issue_id INTEGER NOT NULL,
 				repo TEXT NOT NULL,
 				issue_number INTEGER NOT NULL,
 				issue_title TEXT NOT NULL,
@@ -53,12 +56,15 @@ func (db *DB) MigrateTrajectories() {
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 			)`)
+		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
 	}
 }
 
-// SaveTrajectory inserts or replaces a trajectory record.
+// SaveTrajectory inserts a new trajectory record for this attempt.
+// Each call always creates a new row so that retries and multiple PR attempts
+// for the same issue are preserved independently (no overwrite).
 func (db *DB) SaveTrajectory(t *models.Trajectory) error {
 	successInt := 0
 	if t.Success {
@@ -72,17 +78,7 @@ func (db *DB) SaveTrajectory(t *models.Trajectory) error {
 				(issue_id, repo, issue_number, issue_title, issue_body, keywords,
 				 scout_verdict, scout_approach, analyst_plan, review_rounds,
 				 review_summary, outcome_label, success, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-			ON CONFLICT (issue_id) DO UPDATE SET
-				keywords = EXCLUDED.keywords,
-				scout_verdict = EXCLUDED.scout_verdict,
-				scout_approach = EXCLUDED.scout_approach,
-				analyst_plan = EXCLUDED.analyst_plan,
-				review_rounds = EXCLUDED.review_rounds,
-				review_summary = EXCLUDED.review_summary,
-				outcome_label = EXCLUDED.outcome_label,
-				success = EXCLUDED.success,
-				updated_at = EXCLUDED.updated_at`
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`
 		_, err := db.Exec(query,
 			t.IssueID, t.Repo, t.IssueNumber, t.IssueTitle, t.IssueBody,
 			t.Keywords, t.ScoutVerdict, t.ScoutApproach, t.AnalystPlan,
@@ -91,9 +87,8 @@ func (db *DB) SaveTrajectory(t *models.Trajectory) error {
 		return err
 	}
 
-	// SQLite: use INSERT OR REPLACE
 	query := `
-		INSERT OR REPLACE INTO trajectories
+		INSERT INTO trajectories
 			(issue_id, repo, issue_number, issue_title, issue_body, keywords,
 			 scout_verdict, scout_approach, analyst_plan, review_rounds,
 			 review_summary, outcome_label, success, created_at, updated_at)
@@ -106,18 +101,32 @@ func (db *DB) SaveTrajectory(t *models.Trajectory) error {
 	return err
 }
 
-// UpdateTrajectoryOutcome sets the outcome label and success flag for a trajectory.
+// UpdateTrajectoryOutcome sets the outcome label and success flag on the most recent
+// trajectory row for the given issue. Targeting the latest row avoids a race between
+// concurrent PR closures for the same issue overwriting each other's outcome.
 func (db *DB) UpdateTrajectoryOutcome(issueID int64, outcomeLabel string, success bool) error {
 	successInt := 0
 	if success {
 		successInt = 1
 	}
-	query := fmt.Sprintf(`
-		UPDATE trajectories
-		SET outcome_label = %s, success = %s, updated_at = %s
-		WHERE issue_id = %s`,
-		db.placeholder(1), db.placeholder(2), db.placeholder(3), db.placeholder(4),
-	)
+	var query string
+	if db.IsPostgres() {
+		query = `
+			UPDATE trajectories
+			SET outcome_label = $1, success = $2, updated_at = $3
+			WHERE id = (
+				SELECT id FROM trajectories WHERE issue_id = $4
+				ORDER BY created_at DESC LIMIT 1
+			)`
+	} else {
+		query = `
+			UPDATE trajectories
+			SET outcome_label = ?, success = ?, updated_at = ?
+			WHERE id = (
+				SELECT id FROM trajectories WHERE issue_id = ?
+				ORDER BY created_at DESC LIMIT 1
+			)`
+	}
 	_, err := db.Exec(query, outcomeLabel, successInt, time.Now(), issueID)
 	return err
 }
@@ -166,6 +175,7 @@ func (db *DB) GetRecentTrajectories(limit int) ([]*models.Trajectory, error) {
 func scanTrajectories(rows interface {
 	Next() bool
 	Scan(...any) error
+	Err() error
 }) ([]*models.Trajectory, error) {
 	var trajectories []*models.Trajectory
 	for rows.Next() {
@@ -182,6 +192,9 @@ func scanTrajectories(rows interface {
 		}
 		t.Success = successInt != 0
 		trajectories = append(trajectories, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return trajectories, nil
 }

@@ -5,9 +5,40 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
+
+// sanitizeForPrompt strips characters and patterns from user-controlled text that could
+// be used to inject instructions into an LLM prompt. It collapses newlines to spaces
+// and removes sequences that look like markdown headings or role markers.
+func sanitizeForPrompt(s string) string {
+	// Replace newlines/tabs with a space so multi-line content cannot introduce
+	// new prompt sections.
+	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(s)
+
+	// Remove markdown heading markers (###, ##, #) that could introduce fake sections.
+	for strings.Contains(s, "##") || strings.HasPrefix(strings.TrimSpace(s), "#") {
+		s = strings.ReplaceAll(s, "##", "")
+		if strings.HasPrefix(strings.TrimSpace(s), "#") {
+			s = strings.TrimLeft(s, "#")
+		}
+	}
+
+	// Remove common role-marker prefixes used in prompt injection.
+	for _, prefix := range []string{"SYSTEM:", "ASSISTANT:", "USER:", "HUMAN:", "AI:", "<|im_start|>", "<|im_end|>"} {
+		s = strings.ReplaceAll(s, prefix, "")
+	}
+
+	// Collapse multiple spaces.
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+
+	return strings.TrimSpace(s)
+}
 
 // stopWords is a minimal set of common English words to exclude from keyword extraction.
 var stopWords = map[string]bool{
@@ -27,35 +58,43 @@ var stopWords = map[string]bool{
 }
 
 // extractKeywords tokenizes title + body into a deduplicated sorted keyword list.
-// Tokens shorter than 3 chars or in stopWords are skipped.
+// Tokens shorter than 3 runes or in stopWords are skipped.
+// Uses unicode-aware letter/digit detection so non-ASCII issue text is handled correctly.
 func extractKeywords(title, body string) string {
 	combined := strings.ToLower(title + " " + body)
 
 	seen := make(map[string]bool)
 	var tokens []string
 
-	start := -1
-	for i := 0; i <= len(combined); i++ {
-		ch := byte(0)
-		if i < len(combined) {
-			ch = combined[i]
-		}
-		isAlnum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+	inWord := false
+	wordStart := 0
+	for i, r := range combined {
+		isAlnum := unicode.IsLetter(r) || unicode.IsDigit(r)
 		if isAlnum {
-			if start < 0 {
-				start = i
+			if !inWord {
+				inWord = true
+				wordStart = i
 			}
 		} else {
-			if start >= 0 {
-				tok := combined[start:i]
-				start = -1
-				if len(tok) >= 3 && !stopWords[tok] && !seen[tok] {
+			if inWord {
+				tok := combined[wordStart:i]
+				inWord = false
+				if utf8.RuneCountInString(tok) >= 3 && !stopWords[tok] && !seen[tok] {
 					seen[tok] = true
 					tokens = append(tokens, tok)
 				}
 			}
 		}
 	}
+	// Handle word at end of string
+	if inWord {
+		tok := combined[wordStart:]
+		if utf8.RuneCountInString(tok) >= 3 && !stopWords[tok] && !seen[tok] {
+			seen[tok] = true
+			tokens = append(tokens, tok)
+		}
+	}
+
 	sort.Strings(tokens)
 	return strings.Join(tokens, " ")
 }
@@ -178,31 +217,31 @@ func formatTrajectoriesForPrompt(trajectories []*models.Trajectory) string {
 			}
 		}
 
-		fmt.Fprintf(&b, "### Trajectory %d [%s] — %s#%d\n", i+1, label, t.Repo, t.IssueNumber)
-		fmt.Fprintf(&b, "**Issue:** %s\n", t.IssueTitle)
+		fmt.Fprintf(&b, "Trajectory %d [%s] - %s#%d\n", i+1, label, sanitizeForPrompt(t.Repo), t.IssueNumber)
+		fmt.Fprintf(&b, "Issue: %s\n", sanitizeForPrompt(t.IssueTitle))
 
 		if t.ScoutApproach != "" {
-			fmt.Fprintf(&b, "**Approach taken:** %s\n", t.ScoutApproach)
+			fmt.Fprintf(&b, "Approach taken: %s\n", sanitizeForPrompt(t.ScoutApproach))
 		}
 
 		if t.AnalystPlan != "" {
 			var plan FixPlan
 			if err := json.Unmarshal([]byte(t.AnalystPlan), &plan); err == nil {
 				if plan.Description != "" {
-					fmt.Fprintf(&b, "**Fix plan:** %s\n", plan.Description)
+					fmt.Fprintf(&b, "Fix plan: %s\n", sanitizeForPrompt(plan.Description))
 				}
 				if len(plan.FilesToModify) > 0 {
-					fmt.Fprintf(&b, "**Files modified:** %s\n", strings.Join(plan.FilesToModify, ", "))
+					fmt.Fprintf(&b, "Files modified: %s\n", strings.Join(plan.FilesToModify, ", "))
 				}
 			}
 		}
 
 		if t.ReviewRounds > 0 {
-			fmt.Fprintf(&b, "**Review rounds:** %d\n", t.ReviewRounds)
+			fmt.Fprintf(&b, "Review rounds: %d\n", t.ReviewRounds)
 		}
 
 		if t.ReviewSummary != "" {
-			fmt.Fprintf(&b, "**Review summary:** %s\n", t.ReviewSummary)
+			fmt.Fprintf(&b, "Review summary: %s\n", sanitizeForPrompt(t.ReviewSummary))
 		}
 
 		b.WriteString("\n")
