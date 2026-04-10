@@ -158,6 +158,13 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if r.Stage != stage && r.Stage != "global" {
 			continue
 		}
+		// Issue 1 fix: exclude sub-threshold rules from the dedup pool.
+		// Merging a candidate into a rule with confidence < MinConfidenceForInjection
+		// only increments evidence_count but never raises confidence, so the
+		// candidate is silently dropped and never becomes active in production.
+		if r.Confidence < rules.MinConfidenceForInjection {
+			continue
+		}
 		dedupPool = append(dedupPool, r)
 	}
 
@@ -198,6 +205,13 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID, "batchMatch": matchID}).Info("skipping semantically duplicate rule (batch-internal)")
 			continue
 		}
+
+		// Issue 2 fix: pin the candidate's stage to the current synthesis stage.
+		// The model may emit a different or 'global' stage value; using it
+		// verbatim would cause the dedup pool (scoped to 'stage') to mismatch
+		// the write target, silently dropping valid candidates or writing rules
+		// to the wrong stage directory.
+		nr.Stage = stage
 
 		// Dedup check: compare candidate text against the live dedup pool.
 		candidateText := nr.Condition + " " + nr.Body
