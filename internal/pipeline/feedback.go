@@ -79,12 +79,13 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			// terminalAt is empty: we just triggered the close so time.Now()≈close time.
 			if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
 				log.WithError(err).Warn("failed to record stale auto-close outcome")
+			} else if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+				log.WithError(err).Warn("failed to update PR status to closed after stale auto-close")
 			} else {
-				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+				prInfo.State = "CLOSED"
+				p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+				p.updateQValues(pr.IssueID)
 			}
-			prInfo.State = "CLOSED"
-			p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
-			p.updateQValues(pr.IssueID)
 		}
 		return nil
 	}
@@ -149,12 +150,13 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 				// ordering as the stale auto-close path above).
 				if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
 					log.WithError(err).Warn("failed to record CI auto-close outcome")
+				} else if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+					log.WithError(err).Warn("failed to update PR status to closed after CI auto-close")
 				} else {
-					p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+					prInfo.State = "CLOSED"
+					p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+					p.updateQValues(pr.IssueID)
 				}
-				prInfo.State = "CLOSED"
-				p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
-				p.updateQValues(pr.IssueID)
 			}
 			return nil
 		}

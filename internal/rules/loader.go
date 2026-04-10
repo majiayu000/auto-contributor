@@ -196,7 +196,8 @@ func (rl *RuleLoader) FormatForPrompt(stage string) string {
 func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
 	matched := rl.ForStage(stage)
 	injected := make(map[string]bool)
-	total := 0
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
+	total := len(header)
 	for _, r := range matched {
 		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
 		if total+len(entry) > MaxPromptChars {
@@ -206,6 +207,36 @@ func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
 		total += len(entry)
 	}
 	return injected
+}
+
+// PromptSnapshot returns both the rule IDs and formatted text for stage from a
+// single ForStage call, so IDsForPrompt and FormatForPrompt cannot diverge due
+// to a concurrent Reload between two separate calls.
+func (rl *RuleLoader) PromptSnapshot(stage string) (ids []string, formatted string) {
+	matched := rl.ForStage(stage)
+	if len(matched) == 0 {
+		return nil, ""
+	}
+
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
+	var sb strings.Builder
+	sb.WriteString(header)
+	total := len(header)
+
+	for _, r := range matched {
+		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
+		if total+len(entry) > MaxPromptChars {
+			break
+		}
+		ids = append(ids, r.Stage+"/"+r.ID)
+		sb.WriteString(entry)
+		total += len(entry)
+	}
+
+	if len(ids) > 0 {
+		formatted = sb.String()
+	}
+	return ids, formatted
 }
 
 // ByID finds a rule by its ID. When multiple rules share an ID across stages,
