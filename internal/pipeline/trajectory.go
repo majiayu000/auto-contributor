@@ -20,10 +20,14 @@ func sanitizeForPrompt(s string) string {
 	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(s)
 
 	// Remove markdown heading markers (###, ##, #) that could introduce fake sections.
+	// NOTE: trimmed is computed inside the loop so the condition and mutation operate on
+	// the same value; using TrimLeft on the un-trimmed string would skip leading whitespace
+	// and leave s unchanged when the string starts with spaces, causing an infinite loop.
 	for strings.Contains(s, "##") || strings.HasPrefix(strings.TrimSpace(s), "#") {
 		s = strings.ReplaceAll(s, "##", "")
-		if strings.HasPrefix(strings.TrimSpace(s), "#") {
-			s = strings.TrimLeft(s, "#")
+		trimmed := strings.TrimSpace(s)
+		if strings.HasPrefix(trimmed, "#") {
+			s = strings.TrimLeft(trimmed, "#")
 		}
 	}
 
@@ -162,12 +166,14 @@ func (p *Pipeline) getSimilarTrajectories(issue *models.Issue, k int) []*models.
 }
 
 // buildTrajectory constructs a Trajectory record from pipeline stage results.
+// prNumber is the GitHub PR number created for this attempt; pass 0 if no PR was opened.
 func buildTrajectory(
 	issue *models.Issue,
 	scout *ScoutResult,
 	analyst *AnalystResult,
 	reviewRounds int,
 	reviewSummary string,
+	prNumber int,
 ) *models.Trajectory {
 	keywords := extractKeywords(issue.Title, issue.Body)
 
@@ -179,6 +185,7 @@ func buildTrajectory(
 
 	t := &models.Trajectory{
 		IssueID:       issue.ID,
+		PRNumber:      prNumber,
 		Repo:          issue.Repo,
 		IssueNumber:   issue.IssueNumber,
 		IssueTitle:    issue.Title,
@@ -231,7 +238,11 @@ func formatTrajectoriesForPrompt(trajectories []*models.Trajectory) string {
 					fmt.Fprintf(&b, "Fix plan: %s\n", sanitizeForPrompt(plan.Description))
 				}
 				if len(plan.FilesToModify) > 0 {
-					fmt.Fprintf(&b, "Files modified: %s\n", strings.Join(plan.FilesToModify, ", "))
+					sanitizedFiles := make([]string, len(plan.FilesToModify))
+					for i, f := range plan.FilesToModify {
+						sanitizedFiles[i] = sanitizeForPrompt(f)
+					}
+					fmt.Fprintf(&b, "Files modified: %s\n", strings.Join(sanitizedFiles, ", "))
 				}
 			}
 		}

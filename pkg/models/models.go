@@ -305,6 +305,7 @@ type RepoProfile struct {
 type Trajectory struct {
 	ID            int64     `db:"id" json:"id"`
 	IssueID       int64     `db:"issue_id" json:"issue_id"`
+	PRNumber      int       `db:"pr_number" json:"pr_number"` // GitHub PR number; 0 if no PR was created
 	Repo          string    `db:"repo" json:"repo"`
 	IssueNumber   int       `db:"issue_number" json:"issue_number"`
 	IssueTitle    string    `db:"issue_title" json:"issue_title"`
