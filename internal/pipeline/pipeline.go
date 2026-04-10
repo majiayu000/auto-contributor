@@ -79,6 +79,14 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 	}, nil
 }
 
+// saveTrajectory persists an experience-replay trajectory. Non-fatal on error.
+func (p *Pipeline) saveTrajectory(issue *models.Issue, scout *ScoutResult, analyst *AnalystResult, reviewRounds int, reviewSummary string) {
+	t := buildTrajectory(issue, scout, analyst, reviewRounds, reviewSummary)
+	if err := p.db.SaveTrajectory(t); err != nil {
+		log.WithFields(Fields{"error": err, "issue": issue.IssueNumber}).Warn("failed to save trajectory")
+	}
+}
+
 // recordEvent records a pipeline event for learning. Non-fatal on error.
 func (p *Pipeline) recordEvent(issue *models.Issue, prID *int64, stage string, round int, startedAt time.Time, verdict string, success bool, outputSummary string, errMsg string) {
 	now := time.Now()
@@ -162,8 +170,10 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	}
 
 	// Stage 3+4: Engineer ⇄ Reviewer loop
-	if err := p.engineerReviewLoop(ctx, issue, workspace, analyst); err != nil {
-		return err
+	reviewRounds, reviewSummary, loopErr := p.engineerReviewLoopWithStats(ctx, issue, workspace, analyst)
+	if loopErr != nil {
+		p.saveTrajectory(issue, scout, analyst, reviewRounds, "")
+		return loopErr
 	}
 
 	// Stage 5: Submitter
@@ -199,6 +209,9 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusCompleted, ""); err != nil {
 		log.WithError(err).Warn("update status to completed")
 	}
+
+	// Save trajectory for experience replay (outcome will be updated when PR merges/closes)
+	p.saveTrajectory(issue, scout, analyst, reviewRounds, reviewSummary)
 
 	log.WithFields(Fields{
 		"repo":   issue.Repo,

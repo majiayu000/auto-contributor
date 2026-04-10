@@ -233,6 +233,12 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 	if label == OutcomeMerged {
 		p.stampRuleValidation(pr)
 	}
+
+	// Update trajectory outcome so experience replay knows which trajectories succeeded
+	success := label == OutcomeMerged
+	if err := p.db.UpdateTrajectoryOutcome(pr.IssueID, label, success); err != nil {
+		log.WithFields(Fields{"error": err, "pr": pr.PRURL}).Warn("failed to update trajectory outcome")
+	}
 }
 
 // stampRuleValidation sets last_validated_at on all synthesized rules for the pipeline

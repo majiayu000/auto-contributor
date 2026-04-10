@@ -299,6 +299,28 @@ type RepoProfile struct {
 	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
 }
 
+// Trajectory stores a complete pipeline execution path for experience replay.
+// Each record represents one issue processing attempt with its full execution context,
+// enabling future similar issues to benefit from past experience (SWE-Replay / AgentHER pattern).
+type Trajectory struct {
+	ID            int64     `db:"id" json:"id"`
+	IssueID       int64     `db:"issue_id" json:"issue_id"`
+	Repo          string    `db:"repo" json:"repo"`
+	IssueNumber   int       `db:"issue_number" json:"issue_number"`
+	IssueTitle    string    `db:"issue_title" json:"issue_title"`
+	IssueBody     string    `db:"issue_body" json:"issue_body"`
+	Keywords      string    `db:"keywords" json:"keywords"` // space-separated tokens for similarity
+	ScoutVerdict  string    `db:"scout_verdict" json:"scout_verdict"`
+	ScoutApproach string    `db:"scout_approach" json:"scout_approach"`
+	AnalystPlan   string    `db:"analyst_plan" json:"analyst_plan"` // JSON of FixPlan
+	ReviewRounds  int       `db:"review_rounds" json:"review_rounds"`
+	ReviewSummary string    `db:"review_summary" json:"review_summary"`
+	OutcomeLabel  string    `db:"outcome_label" json:"outcome_label"` // merged, rejected_*, etc.
+	Success       bool      `db:"success" json:"success"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
+}
+
 // PipelineEvent records a single agent invocation in the pipeline.
 type PipelineEvent struct {
 	ID              int64      `db:"id" json:"id"`

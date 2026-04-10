@@ -114,6 +114,7 @@ func (db *DB) Migrate() error {
 	if err := db.MigrateRepoProfiles(); err != nil {
 		return err
 	}
+	db.MigrateTrajectories()
 
 	return nil
 }

@@ -100,6 +100,11 @@ func (p *Pipeline) buildEngineerCtx(issue *models.Issue, analyst *AnalystResult,
 		ctx["PastLessons"] = formatLessonsForPrompt(lessons)
 	}
 
+	// Inject similar successful trajectories as few-shot examples
+	if trajs := p.getSimilarTrajectories(issue, 3); len(trajs) > 0 {
+		ctx["SimilarTrajectories"] = formatTrajectoriesForPrompt(trajs)
+	}
+
 	ctx["Rules"] = p.ruleLoader.FormatForPrompt("engineer")
 	return ctx
 }
@@ -169,8 +174,10 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 
 // --- Engineer ⇄ Reviewer loop ---
 
-func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) error {
+// engineerReviewLoopWithStats runs the engineer/reviewer loop and returns (rounds completed, last review summary, error).
+func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) (int, string, error) {
 	var lastReview *CodeReviewResult
+	lastSummary := ""
 
 	for round := 1; round <= p.maxReview; round++ {
 		// Engineer
@@ -184,7 +191,7 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 		if err != nil {
 			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error())
 			p.markFailed(issue, "engineer_failed", err.Error())
-			return err
+			return round, lastSummary, err
 		}
 
 		fixComplete := containsMarker(raw, "FIX_COMPLETE")
@@ -209,8 +216,9 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 			log.WithError(err).Warn("reviewer parse error, treating as approve")
 			review.Verdict = "approve"
 		}
-		reviewSummary, _ := json.Marshal(map[string]any{"verdict": review.Verdict, "confidence": review.Confidence, "issues": len(review.IssuesFound)})
-		p.recordEvent(issue, nil, "reviewer", round, revStart, review.Verdict, review.Verdict == "approve", string(reviewSummary), "")
+		reviewSummaryJSON, _ := json.Marshal(map[string]any{"verdict": review.Verdict, "confidence": review.Confidence, "issues": len(review.IssuesFound)})
+		lastSummary = review.Summary
+		p.recordEvent(issue, nil, "reviewer", round, revStart, review.Verdict, review.Verdict == "approve", string(reviewSummaryJSON), "")
 
 		p.logReview(issue, &review, round)
 
@@ -220,7 +228,7 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 				"issue": issue.IssueNumber,
 				"round": round,
 			}).Info("review approved")
-			return nil
+			return round, lastSummary, nil
 		}
 
 		// Rework needed
@@ -231,7 +239,7 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 
 		if round == p.maxReview {
 			p.markAbandoned(issue, fmt.Sprintf("max review rounds (%d) exceeded", p.maxReview))
-			return fmt.Errorf("max review rounds exceeded for %s#%d", issue.Repo, issue.IssueNumber)
+			return round, lastSummary, fmt.Errorf("max review rounds exceeded for %s#%d", issue.Repo, issue.IssueNumber)
 		}
 
 		log.WithFields(Fields{
@@ -241,5 +249,5 @@ func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, 
 		}).Info("rework required")
 	}
 
-	return nil
+	return p.maxReview, lastSummary, nil
 }
