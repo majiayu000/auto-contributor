@@ -14,6 +14,14 @@ import (
 const MinConfidenceForInjection = 0.3
 const MaxPromptChars = 2000
 
+// maxIDSummaryBytes caps the total byte size of the ExistingRuleIDs payload injected
+// into the synthesizer prompt, which is passed via -p argv. Keeping it well below
+// typical OS ARG_MAX (128 KB per argument on Linux) prevents "argument list too long" failures.
+const maxIDSummaryBytes = 4096
+
+// maxConditionLen caps the per-rule condition snippet included in IDSummaryForStage.
+const maxConditionLen = 80
+
 // RuleLoader reads and caches rules from the rules/ directory tree.
 type RuleLoader struct {
 	rulesDir string
@@ -178,4 +186,175 @@ func (rl *RuleLoader) ByID(id string) *Rule {
 		}
 	}
 	return nil
+}
+
+// HasSemanticMatch returns true if an existing rule for the given stage is semantically
+// similar to the proposed rule based on keyword and tag overlap.
+//
+// Match criteria: shared tokens ≥ 2 AND shared/min(|A|,|B|) ≥ 0.5.
+// The ratio guard prevents high-frequency but low-signal tokens (e.g. "ci", "tests")
+// from triggering false-positive suppression of distinct new rules.
+// The second return value is the ID of the matching rule, or "" if none.
+func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (bool, string) {
+	newKW := ruleKeywords(id, tags)
+	if len(newKW) < 2 {
+		return false, ""
+	}
+
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	for _, r := range rl.rules {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		// Exclude rules below the injection threshold: stale/decayed rules should
+		// not permanently block creation of fresh replacements.
+		if r.Confidence < MinConfidenceForInjection {
+			continue
+		}
+		existKW := ruleKeywords(r.ID, r.Tags)
+		if len(existKW) < 2 {
+			continue
+		}
+		shared := sharedKeywords(newKW, existKW)
+		minLen := len(newKW)
+		if len(existKW) < minLen {
+			minLen = len(existKW)
+		}
+		// Both conditions must hold: enough absolute overlap AND enough relative overlap.
+		if shared >= 2 && float64(shared)/float64(minLen) >= 0.5 {
+			return true, r.ID
+		}
+	}
+	return false, ""
+}
+
+// HasSemanticMatchAmong checks whether any rule in the provided candidates slice is
+// semantically similar to the proposed rule. It applies the same match criteria as
+// HasSemanticMatch (shared tokens ≥ 2 AND ratio ≥ 0.5) but against a caller-supplied
+// list rather than the loader's disk snapshot. Use this to detect duplicates within a
+// synthesis batch before the loader is reloaded.
+func (rl *RuleLoader) HasSemanticMatchAmong(id string, tags []string, stage string, candidates []*Rule) (bool, string) {
+	newKW := ruleKeywords(id, tags)
+	if len(newKW) < 2 {
+		return false, ""
+	}
+	for _, r := range candidates {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		existKW := ruleKeywords(r.ID, r.Tags)
+		if len(existKW) < 2 {
+			continue
+		}
+		shared := sharedKeywords(newKW, existKW)
+		minLen := len(newKW)
+		if len(existKW) < minLen {
+			minLen = len(existKW)
+		}
+		if shared >= 2 && float64(shared)/float64(minLen) >= 0.5 {
+			return true, r.ID
+		}
+	}
+	return false, ""
+}
+
+// IDSummaryForStage returns a compact newline-separated "id: condition" list for all rules
+// matching the given stage (and global). Used to provide deduplication context to the synthesizer.
+//
+// Output is capped at maxIDSummaryBytes to stay well within OS ARG_MAX when the result
+// is embedded in the synthesizer prompt passed via -p argv. Each condition snippet is also
+// truncated to maxConditionLen characters.
+func (rl *RuleLoader) IDSummaryForStage(stage string) string {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	var sb strings.Builder
+	omitted := 0
+	for _, r := range rl.rules {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		// Exclude low-confidence/decayed rules from the dedup hint list.
+		// HasSemanticMatch and ForStage already ignore these rules at runtime, so
+		// including them here would incorrectly tell the LLM "this rule exists —
+		// don't recreate it", permanently blocking fresh replacements for stale rules.
+		if r.Confidence < MinConfidenceForInjection {
+			continue
+		}
+		// Build the entry first so we can measure its exact byte size before
+		// committing to the output buffer. This prevents a single oversized
+		// rule from pushing sb past maxIDSummaryBytes after the pre-check.
+		var entry strings.Builder
+		entry.WriteString(r.ID)
+		if r.Condition != "" {
+			cond := r.Condition
+			// Truncate by rune count, not byte count, to avoid splitting a
+			// multi-byte UTF-8 codepoint mid-sequence (Issue 2).
+			if runes := []rune(cond); len(runes) > maxConditionLen {
+				cond = string(runes[:maxConditionLen]) + "…"
+			}
+			entry.WriteString(": ")
+			entry.WriteString(cond)
+		}
+		entry.WriteByte('\n')
+		entryStr := entry.String()
+		if sb.Len()+len(entryStr) > maxIDSummaryBytes {
+			omitted++
+			continue
+		}
+		sb.WriteString(entryStr)
+	}
+	if omitted > 0 {
+		fmt.Fprintf(&sb, "(%d more rules omitted — see rules/ directory for full list)\n", omitted)
+	}
+	return sb.String()
+}
+
+// ruleKeywords extracts meaningful tokens from a rule ID and its tags, dropping stop words.
+func ruleKeywords(id string, tags []string) []string {
+	stop := map[string]bool{
+		"and": true, "or": true, "the": true, "for": true, "in": true,
+		"to": true, "a": true, "of": true, "with": true, "on": true,
+		"is": true, "not": true, "no": true, "per": true,
+		// domain-specific high-frequency tokens that appear in many rules but
+		// do not distinguish rule semantics; without these, two rules sharing
+		// only "ci"+"tests" would falsely trigger semantic-duplicate suppression.
+		"ci": true, "test": true, "tests": true,
+	}
+	seen := map[string]bool{}
+	var kw []string
+	for _, p := range strings.Split(id, "-") {
+		p = strings.ToLower(p)
+		if p != "" && !stop[p] && !seen[p] {
+			kw = append(kw, p)
+			seen[p] = true
+		}
+	}
+	for _, t := range tags {
+		t = strings.ToLower(t)
+		if t != "" && !stop[t] && !seen[t] {
+			kw = append(kw, t)
+			seen[t] = true
+		}
+	}
+	return kw
+}
+
+// sharedKeywords counts distinct keywords that appear in both slices.
+func sharedKeywords(a, b []string) int {
+	setA := make(map[string]bool, len(a))
+	for _, x := range a {
+		setA[x] = true
+	}
+	count := 0
+	seen := make(map[string]bool)
+	for _, x := range b {
+		if setA[x] && !seen[x] {
+			count++
+			seen[x] = true
+		}
+	}
+	return count
 }

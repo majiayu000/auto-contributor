@@ -20,6 +20,12 @@ var fileMu sync.Mutex
 
 // WriteRule writes a Rule to a YAML file in rules/{stage}/ directory.
 func WriteRule(rulesDir string, rule *Rule) error {
+	// Defense-in-depth: reject IDs that could escape the rules/{stage} directory
+	// via path traversal (e.g. "../../../etc/passwd" or absolute paths).
+	if rule.ID == "" || strings.ContainsAny(rule.ID, "/\\") || strings.Contains(rule.ID, "..") || filepath.Base(rule.ID) != rule.ID {
+		return fmt.Errorf("unsafe rule ID %q", rule.ID)
+	}
+
 	dir := filepath.Join(rulesDir, rule.Stage)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create dir %s: %w", dir, err)

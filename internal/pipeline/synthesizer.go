@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -95,6 +96,7 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 		"Stage":           stage,
 		"EventsText":      eventsText,
 		"ExistingRules":   existingRules,
+		"ExistingRuleIDs": p.ruleLoader.IDSummaryForStage(stage),
 		"TotalEvents":     len(events),
 		"MergedCount":     merged,
 		"RejectedCount":   rejected,
@@ -119,6 +121,9 @@ type applyResult struct {
 func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult) applyResult {
 	var applied applyResult
 	rulesDir := p.ruleLoader.RulesDir()
+	// batchAccepted tracks rules written in this call so intra-batch semantic
+	// duplicates are caught before the loader is reloaded.
+	var batchAccepted []*rules.Rule
 
 	// Write new rules (validate first)
 	for _, nr := range result.NewRules {
@@ -131,16 +136,38 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if nr.ID == "" || nr.Body == "" {
 			continue
 		}
-		// Don't overwrite existing rules
+		// Reject IDs that contain path separators or dot-dot sequences; WriteRule
+		// uses the ID as a filename component and an unsafe value could escape the
+		// rules/{stage} directory via path traversal.
+		if strings.ContainsAny(nr.ID, "/\\") || strings.Contains(nr.ID, "..") {
+			log.WithFields(Fields{"rule": nr.ID}).Warn("skipping rule with unsafe ID")
+			continue
+		}
+		// Don't overwrite existing rules (exact ID match)
 		if p.ruleLoader.ByID(nr.ID) != nil {
+			continue
+		}
+		// Skip semantically duplicate rules to prevent rule explosion.
+		// Use the trusted function-arg `stage` instead of nr.Stage (model output) to
+		// ensure dedup always runs against the correct stage's rule set.
+		if match, matchID := p.ruleLoader.HasSemanticMatch(nr.ID, nr.Tags, stage); match {
+			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Info("skipping semantically duplicate rule")
+			continue
+		}
+		// Also check rules accepted earlier in this batch: the loader snapshot is
+		// not updated until Reload() runs after this function returns, so without
+		// this check two semantically equivalent rules in the same LLM response
+		// would both pass HasSemanticMatch and both be written.
+		if match, matchID := p.ruleLoader.HasSemanticMatchAmong(nr.ID, nr.Tags, stage, batchAccepted); match {
+			log.WithFields(Fields{"rule": nr.ID, "batchMatch": matchID}).Info("skipping semantically duplicate rule (batch-internal)")
 			continue
 		}
 
 		rule := &rules.Rule{
 			ID:              nr.ID,
-			Stage:           nr.Stage,
+			Stage:           stage, // use validated stage arg, not model-emitted nr.Stage
 			Severity:        nr.Severity,
-			Confidence:      nr.Confidence,
+			Confidence:      normalizeNewRuleConfidence(nr.Confidence),
 			Source:          "synthesized",
 			CreatedAt:       time.Now().Format("2006-01-02"),
 			LastValidatedAt: time.Now().Format("2006-01-02"),
@@ -154,6 +181,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID, "error": err}).Warn("failed to write synthesized rule")
 			continue
 		}
+		batchAccepted = append(batchAccepted, rule)
 		applied.newCount++
 	}
 
@@ -216,6 +244,17 @@ func (p *Pipeline) applyDecay() {
 			log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to apply decay")
 		}
 	}
+}
+
+// normalizeNewRuleConfidence rounds confidence to the nearest 0.1 in [0.3, 0.9].
+// This prevents new rules from inheriting degraded floating-point values from existing ones.
+func normalizeNewRuleConfidence(c float64) float64 {
+	if c < 0.3 {
+		c = 0.5
+	} else if c > 0.9 {
+		c = 0.9
+	}
+	return math.Round(c*10) / 10
 }
 
 func formatEventsForSynthesis(events []*models.PipelineEvent) string {
