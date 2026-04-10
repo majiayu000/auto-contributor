@@ -63,6 +63,8 @@ func (db *DB) MigrateTrajectories() {
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+		// Drop the old unique index if it exists (created by earlier schema versions).
+		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
 		// Add pr_number column to existing SQLite tables; error is silently ignored if already present.
 		db.Exec(`ALTER TABLE trajectories ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0`)
 	}

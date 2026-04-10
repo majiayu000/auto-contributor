@@ -3,6 +3,7 @@ package pipeline
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -10,6 +11,9 @@ import (
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
+
+// roleMarkerRE matches prompt-injection role markers case-insensitively.
+var roleMarkerRE = regexp.MustCompile(`(?i)(SYSTEM|ASSISTANT|USER|HUMAN|AI):|<\|im_start\|>|<\|im_end\|>`)
 
 // sanitizeForPrompt strips characters and patterns from user-controlled text that could
 // be used to inject instructions into an LLM prompt. It collapses newlines to spaces
@@ -31,10 +35,8 @@ func sanitizeForPrompt(s string) string {
 		}
 	}
 
-	// Remove common role-marker prefixes used in prompt injection.
-	for _, prefix := range []string{"SYSTEM:", "ASSISTANT:", "USER:", "HUMAN:", "AI:", "<|im_start|>", "<|im_end|>"} {
-		s = strings.ReplaceAll(s, prefix, "")
-	}
+	// Remove common role-marker prefixes used in prompt injection (case-insensitive).
+	s = roleMarkerRE.ReplaceAllString(s, "")
 
 	// Collapse multiple spaces.
 	for strings.Contains(s, "  ") {
@@ -228,18 +230,22 @@ func formatTrajectoriesForPrompt(trajectories []*models.Trajectory) string {
 		fmt.Fprintf(&b, "Issue: %s\n", sanitizeForPrompt(t.IssueTitle))
 
 		if t.ScoutApproach != "" {
-			fmt.Fprintf(&b, "Approach taken: %s\n", sanitizeForPrompt(t.ScoutApproach))
+			fmt.Fprintf(&b, "Approach taken: %s\n", sanitizeForPrompt(truncate(t.ScoutApproach, 300)))
 		}
 
 		if t.AnalystPlan != "" {
 			var plan FixPlan
 			if err := json.Unmarshal([]byte(t.AnalystPlan), &plan); err == nil {
 				if plan.Description != "" {
-					fmt.Fprintf(&b, "Fix plan: %s\n", sanitizeForPrompt(plan.Description))
+					fmt.Fprintf(&b, "Fix plan: %s\n", sanitizeForPrompt(truncate(plan.Description, 300)))
 				}
 				if len(plan.FilesToModify) > 0 {
-					sanitizedFiles := make([]string, len(plan.FilesToModify))
-					for i, f := range plan.FilesToModify {
+					files := plan.FilesToModify
+					if len(files) > 10 {
+						files = files[:10]
+					}
+					sanitizedFiles := make([]string, len(files))
+					for i, f := range files {
 						sanitizedFiles[i] = sanitizeForPrompt(f)
 					}
 					fmt.Fprintf(&b, "Files modified: %s\n", strings.Join(sanitizedFiles, ", "))
