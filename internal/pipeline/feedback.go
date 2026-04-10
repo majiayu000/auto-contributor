@@ -31,12 +31,13 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	}
 
 	// Terminal state transitions from GitHub
+	responseHours := prResponseHours(prInfo.CreatedAt, pr.CreatedAt)
 	switch prInfo.State {
 	case "MERGED":
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
-		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, time.Since(pr.CreatedAt).Hours()); err != nil {
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, responseHours); err != nil {
 			log.WithError(err).Warn("failed to record merged PR outcome")
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
@@ -47,7 +48,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 			return fmt.Errorf("update PR status to closed: %w", err)
 		}
-		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, time.Since(pr.CreatedAt).Hours()); err != nil {
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, responseHours); err != nil {
 			log.WithError(err).Warn("failed to record closed PR outcome")
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
@@ -544,6 +545,19 @@ func (p *Pipeline) shouldAutoClose(pr *models.PullRequest, prInfo *ghclient.PRIn
 	}
 
 	return true
+}
+
+// prResponseHours returns hours from the GitHub PR open time to now.
+// ghCreatedAt is the RFC3339 string from GitHub (authoritative). fallback is the
+// local DB CreatedAt, used only when ghCreatedAt is empty or unparseable (e.g.
+// for PRs synced via EnsurePRWithIssue where CreatedAt was set to time.Now()).
+func prResponseHours(ghCreatedAt string, fallback time.Time) float64 {
+	if ghCreatedAt != "" {
+		if t, err := time.Parse(time.RFC3339, ghCreatedAt); err == nil {
+			return time.Since(t).Hours()
+		}
+	}
+	return time.Since(fallback).Hours()
 }
 
 // repoFromPRURL extracts "owner/repo" from a GitHub PR URL.

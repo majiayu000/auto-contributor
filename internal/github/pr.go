@@ -36,9 +36,10 @@ type PRReviewComment struct {
 
 // PRInfo bundles state + reviews from a single gh call.
 type PRInfo struct {
-	State   string     `json:"state"`
-	IsDraft bool       `json:"isDraft"`
-	Reviews []PRReview `json:"reviews"`
+	State     string     `json:"state"`
+	IsDraft   bool       `json:"isDraft"`
+	Reviews   []PRReview `json:"reviews"`
+	CreatedAt string     `json:"createdAt"` // RFC3339, authoritative GitHub PR open time
 }
 
 // GetPRInfo fetches state and reviews in one gh call to avoid rate limiting.
@@ -46,7 +47,7 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
 		fmt.Sprintf("%d", prNum),
 		"-R", repo,
-		"--json", "state,isDraft,reviews")
+		"--json", "state,isDraft,reviews,createdAt")
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -57,9 +58,10 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 
 	// Parse with nested author object
 	var raw struct {
-		State   string `json:"state"`
-		IsDraft bool   `json:"isDraft"`
-		Reviews []struct {
+		State     string `json:"state"`
+		IsDraft   bool   `json:"isDraft"`
+		CreatedAt string `json:"createdAt"`
+		Reviews   []struct {
 			Author struct {
 				Login string `json:"login"`
 			} `json:"author"`
@@ -72,7 +74,7 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 		return nil, fmt.Errorf("parse PR info: %w", err)
 	}
 
-	info := &PRInfo{State: raw.State, IsDraft: raw.IsDraft}
+	info := &PRInfo{State: raw.State, IsDraft: raw.IsDraft, CreatedAt: raw.CreatedAt}
 	for _, r := range raw.Reviews {
 		info.Reviews = append(info.Reviews, PRReview{
 			Author:      r.Author.Login,
@@ -351,7 +353,7 @@ func (c *Client) MarkPRReady(ctx context.Context, repo string, prNum int) error 
 
 // GitHubPR represents an open PR discovered from GitHub.
 type GitHubPR struct {
-	Repo       string `json:"repo"`       // owner/repo
+	Repo       string `json:"repo"` // owner/repo
 	Number     int    `json:"number"`
 	Title      string `json:"title"`
 	Body       string `json:"body"`
