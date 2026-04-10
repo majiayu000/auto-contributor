@@ -44,12 +44,9 @@ func (rl *RuleLoader) Load() error {
 	return rl.readFromDisk()
 }
 
-// Reload re-reads rules from disk. It holds writeMu so it cannot read a file
-// that is currently being truncated or written by a concurrent WriteRule /
-// UpdateRuleQValue call.
+// Reload re-reads rules from disk. readFromDisk acquires writeMu internally
+// so it cannot read a file being written by a concurrent WriteRule/UpdateRuleQValue call.
 func (rl *RuleLoader) Reload() error {
-	writeMu.Lock()
-	defer writeMu.Unlock()
 	return rl.readFromDisk()
 }
 
