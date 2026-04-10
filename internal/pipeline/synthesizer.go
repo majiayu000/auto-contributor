@@ -129,8 +129,28 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 	// duplicates are caught before the loader is reloaded.
 	var batchAccepted []*rules.Rule
 
-	// Collect existing rules for dedup comparison.
-	existingRules := p.ruleLoader.All()
+	// Issue 1: pre-compute the set of rules being retired this pass so they are
+	// excluded from the dedup pool. Without this, a candidate could be merged
+	// into a rule that is subsequently deleted, causing silent rule loss.
+	retiredIDs := make(map[string]struct{}, len(result.RetiredRules))
+	for _, rr := range result.RetiredRules {
+		existing := p.ruleLoader.ByID(rr.ID)
+		if existing == nil || existing.Source == "manual" {
+			continue
+		}
+		retiredIDs[rr.ID] = struct{}{}
+	}
+
+	// Build initial dedup pool: all current rules minus those being retired.
+	// Issue 2: this slice is extended as new rules are written so that
+	// near-identical candidates within the same batch are also deduped.
+	allRules := p.ruleLoader.All()
+	dedupPool := make([]*rules.Rule, 0, len(allRules))
+	for _, r := range allRules {
+		if _, retiring := retiredIDs[r.ID]; !retiring {
+			dedupPool = append(dedupPool, r)
+		}
+	}
 
 	// Write new rules (validate first)
 	for _, nr := range result.NewRules {
@@ -170,31 +190,37 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			continue
 		}
 
-		// Dedup check: compare candidate text against all existing rules.
+		// Dedup check: compare candidate text against the live dedup pool.
 		candidateText := nr.Condition + " " + nr.Body
-		dedup := rules.CheckDedup(candidateText, existingRules)
+		dedup := rules.CheckDedup(candidateText, dedupPool)
 		switch dedup.Action {
 		case rules.DedupActionMerge:
-			// Nearly identical to an existing rule — increment its evidence count.
 			matched := p.ruleLoader.ByID(dedup.MatchedRuleID)
+			// Issue 4: manual rules are immutable — treat candidate as new.
+			if matched != nil && matched.Source == "manual" {
+				break
+			}
 			matchedStage := ""
 			if matched != nil {
 				matchedStage = matched.Stage
 			}
+			// Issue 3: if IncrementEvidenceCount fails (I/O error, missing file),
+			// fall through and create the candidate as a new rule rather than
+			// silently dropping it.
 			if err := rules.IncrementEvidenceCount(rulesDir, dedup.MatchedRuleID, matchedStage); err != nil {
 				log.WithFields(Fields{
 					"candidate": nr.ID,
 					"matched":   dedup.MatchedRuleID,
 					"error":     err,
-				}).Warn("dedup merge: failed to increment evidence count")
-			} else {
-				log.WithFields(Fields{
-					"candidate": nr.ID,
-					"matched":   dedup.MatchedRuleID,
-					"score":     fmt.Sprintf("%.3f", dedup.Score),
-				}).Info("dedup: candidate merged into existing rule")
-				applied.mergedCount++
+				}).Warn("dedup merge: failed to increment evidence count, creating as new rule")
+				break // fall through to WriteRule below
 			}
+			log.WithFields(Fields{
+				"candidate": nr.ID,
+				"matched":   dedup.MatchedRuleID,
+				"score":     fmt.Sprintf("%.3f", dedup.Score),
+			}).Info("dedup: candidate merged into existing rule")
+			applied.mergedCount++
 			continue
 		case rules.DedupActionPossibleDuplicate:
 			// Similar but not identical — skip and flag for human review.
@@ -226,6 +252,9 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			continue
 		}
 		batchAccepted = append(batchAccepted, rule)
+		// Issue 2: extend the dedup pool with the newly written rule so that
+		// later candidates in the same batch are checked against it.
+		dedupPool = append(dedupPool, rule)
 		applied.newCount++
 	}
 
