@@ -109,8 +109,10 @@ func (db *DB) Migrate() error {
 	// Column-level migrations intentionally ignore errors (column may already exist).
 	db.runMigrations()
 	db.MigrateLessons()
-	db.MigrateEvents()
-	// Table-level migrations: propagate errors so startup fails fast on DDL failure.
+	if err := db.MigrateEvents(); err != nil {
+		return fmt.Errorf("migrate events: %w", err)
+	}
+	// Table-level migration: propagate errors so startup fails fast on DDL failure.
 	if err := db.MigrateRepoProfiles(); err != nil {
 		return err
 	}

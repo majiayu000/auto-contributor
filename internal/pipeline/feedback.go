@@ -82,6 +82,9 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			} else {
 				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
 			}
+			prInfo.State = "CLOSED"
+			p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+			p.updateQValues(pr.IssueID)
 		}
 		return nil
 	}
@@ -149,6 +152,9 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 				} else {
 					p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
 				}
+				prInfo.State = "CLOSED"
+				p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+				p.updateQValues(pr.IssueID)
 			}
 			return nil
 		}

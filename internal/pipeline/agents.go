@@ -179,7 +179,7 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 // --- Critic ---
 
 func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult, round int) (*CriticResult, error) {
-	criticRules := p.ruleLoader.IDsForStage("critic")
+	criticRules := p.ruleLoader.IDsForPrompt("critic")
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -229,8 +229,8 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		return err
 	}
 	for round := 1; round <= p.maxCriticRounds; round++ {
-		engineerRules := p.ruleLoader.IDsForStage("engineer")
-		reviewerRules := p.ruleLoader.IDsForStage("reviewer")
+		engineerRules := p.ruleLoader.IDsForPrompt("engineer")
+		reviewerRules := p.ruleLoader.IDsForPrompt("reviewer")
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
 			log.WithError(err).Warn("update status to reviewing (critic)")
 		}
