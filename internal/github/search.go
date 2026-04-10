@@ -143,11 +143,15 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 	}
 
 	var raw []struct {
-		Number    int    `json:"number"`
-		Title     string `json:"title"`
-		Body      string `json:"body"`
-		Labels    []struct{ Name string `json:"name"` }    `json:"labels"`
-		Assignees []struct{ Login string `json:"login"` } `json:"assignees"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		Assignees []struct {
+			Login string `json:"login"`
+		} `json:"assignees"`
 	}
 	if err := json.Unmarshal(output, &raw); err != nil {
 		return nil, fmt.Errorf("parse issues: %w", err)
@@ -196,4 +200,3 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 
 	return issues, nil
 }
-

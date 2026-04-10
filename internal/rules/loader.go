@@ -42,6 +42,12 @@ func (rl *RuleLoader) Load() error {
 	}
 
 	var loaded []*Rule
+	// Hold fileMu for the entire walk so we cannot read a file that a concurrent
+	// writer (UpdateRuleConfidence, UpdateRuleLastValidatedAt, WriteRule, DeleteRule)
+	// has only partially written.  Without this lock, os.ReadFile can observe a
+	// truncated or zero-byte file mid-os.WriteFile, producing a malformed YAML
+	// unmarshal that silently drops the rule from in-memory state.
+	fileMu.Lock()
 	err = filepath.Walk(rl.rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip unreadable files
@@ -68,6 +74,7 @@ func (rl *RuleLoader) Load() error {
 		loaded = append(loaded, &rule)
 		return nil
 	})
+	fileMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -138,6 +145,26 @@ func (rl *RuleLoader) FormatForPrompt(stage string) string {
 	}
 
 	return sb.String()
+}
+
+// InjectedRuleIDsForStage returns the set of rule IDs that would actually be
+// written into the prompt for stage, respecting the MaxPromptChars budget.
+// Rules that pass MinConfidenceForInjection but are truncated by the char limit
+// are excluded — they were never seen by the LLM and must not be treated as
+// having influenced a merged PR's output.
+func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
+	matched := rl.ForStage(stage)
+	injected := make(map[string]bool)
+	total := 0
+	for _, r := range matched {
+		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
+		if total+len(entry) > MaxPromptChars {
+			break
+		}
+		injected[r.ID] = true
+		total += len(entry)
+	}
+	return injected
 }
 
 // ByID finds a rule by its ID.

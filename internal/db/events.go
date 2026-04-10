@@ -173,7 +173,10 @@ func (db *DB) LabelEventsByPR(prID int64, label string) error {
 	return err
 }
 
-func scanEvents(rows interface{ Next() bool; Scan(...any) error }) ([]*models.PipelineEvent, error) {
+func scanEvents(rows interface {
+	Next() bool
+	Scan(...any) error
+}) ([]*models.PipelineEvent, error) {
 	var events []*models.PipelineEvent
 	for rows.Next() {
 		e := &models.PipelineEvent{}

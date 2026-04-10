@@ -54,8 +54,8 @@ func (r *AgentRunner) RunJSON(ctx context.Context, agentName string, workDir str
 
 	// Log the failed output for debugging
 	log.WithFields(Fields{
-		"agent":      agentName,
-		"output_len": len(raw),
+		"agent":       agentName,
+		"output_len":  len(raw),
 		"output_tail": truncate(raw[max(0, len(raw)-500):], 500),
 	}).Warn("JSON extraction failed, attempting lightweight recovery")
 

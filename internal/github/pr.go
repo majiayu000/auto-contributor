@@ -351,7 +351,7 @@ func (c *Client) MarkPRReady(ctx context.Context, repo string, prNum int) error 
 
 // GitHubPR represents an open PR discovered from GitHub.
 type GitHubPR struct {
-	Repo       string `json:"repo"`       // owner/repo
+	Repo       string `json:"repo"` // owner/repo
 	Number     int    `json:"number"`
 	Title      string `json:"title"`
 	Body       string `json:"body"`

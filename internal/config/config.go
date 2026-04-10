@@ -25,17 +25,17 @@ type Config struct {
 	DatabaseURL  string `mapstructure:"database_url"` // PostgreSQL connection string (optional)
 
 	// Filters
-	Languages      []string `mapstructure:"languages"`
-	IncludeLabels  []string `mapstructure:"include_labels"`
-	ExcludeLabels  []string `mapstructure:"exclude_labels"`
-	ExcludeRepos   []string `mapstructure:"exclude_repos"`
-	PriorityRepos  []string `mapstructure:"priority_repos"` // repos to check first before searching
-	MinRepoStars   int      `mapstructure:"min_repo_stars"`
-	MaxIssueAgeDays int     `mapstructure:"max_issue_age_days"`
+	Languages       []string `mapstructure:"languages"`
+	IncludeLabels   []string `mapstructure:"include_labels"`
+	ExcludeLabels   []string `mapstructure:"exclude_labels"`
+	ExcludeRepos    []string `mapstructure:"exclude_repos"`
+	PriorityRepos   []string `mapstructure:"priority_repos"` // repos to check first before searching
+	MinRepoStars    int      `mapstructure:"min_repo_stars"`
+	MaxIssueAgeDays int      `mapstructure:"max_issue_age_days"`
 
 	// Pipeline V2 settings
 	MaxReviewRounds        int    `mapstructure:"max_review_rounds"`
-	MaxPRsPerRepo          int    `mapstructure:"max_prs_per_repo"`          // max open PRs per repo before throttling
+	MaxPRsPerRepo          int    `mapstructure:"max_prs_per_repo"`         // max open PRs per repo before throttling
 	MaxConcurrentPipelines int    `mapstructure:"max_concurrent_pipelines"` // number of parallel issue workers
 	PromptsDir             string `mapstructure:"prompts_dir"`
 
@@ -65,31 +65,31 @@ func Default() *Config {
 	dataDir := filepath.Join(homeDir, ".auto-contributor")
 
 	return &Config{
-		GitHubEmail:      "1835304752@qq.com",
-		ClaudeTimeout:    24 * time.Hour,
-		ClaudeMaxRetries: 3,
-		WorkspaceDir:     filepath.Join(homeDir, "Desktop", "code", "opensourece", "auto-workspace"),
-		DatabasePath:     filepath.Join(dataDir, "data.db"),
-		Languages:        []string{"go", "python", "typescript", "javascript", "rust"},
-		IncludeLabels:    []string{"good first issue", "help wanted", "bug"},
-		ExcludeLabels:    []string{"wontfix", "duplicate", "invalid"},
-		ExcludeRepos:     []string{},
-		PriorityRepos:    []string{},
-		MinRepoStars:     1000,
-		MaxIssueAgeDays:  30,
+		GitHubEmail:            "1835304752@qq.com",
+		ClaudeTimeout:          24 * time.Hour,
+		ClaudeMaxRetries:       3,
+		WorkspaceDir:           filepath.Join(homeDir, "Desktop", "code", "opensourece", "auto-workspace"),
+		DatabasePath:           filepath.Join(dataDir, "data.db"),
+		Languages:              []string{"go", "python", "typescript", "javascript", "rust"},
+		IncludeLabels:          []string{"good first issue", "help wanted", "bug"},
+		ExcludeLabels:          []string{"wontfix", "duplicate", "invalid"},
+		ExcludeRepos:           []string{},
+		PriorityRepos:          []string{},
+		MinRepoStars:           1000,
+		MaxIssueAgeDays:        30,
 		MaxReviewRounds:        3,
 		MaxPRsPerRepo:          1,
 		MaxConcurrentPipelines: 5,
-		PromptsDir:        filepath.Join(dataDir, "prompts"),
-		Mode:              "full",
-		DiscoveryInterval: 30,
-		FeedbackInterval:  30,
-		Topic:             "ai",
-		AnalysisDepth:     "deep",
-		RulesDir:          "",
-		SynthesisInterval: 24,
-		LogLevel:         "info",
-		LogFile:          filepath.Join(dataDir, "auto-contributor.log"),
+		PromptsDir:             filepath.Join(dataDir, "prompts"),
+		Mode:                   "full",
+		DiscoveryInterval:      30,
+		FeedbackInterval:       30,
+		Topic:                  "ai",
+		AnalysisDepth:          "deep",
+		RulesDir:               "",
+		SynthesisInterval:      24,
+		LogLevel:               "info",
+		LogFile:                filepath.Join(dataDir, "auto-contributor.log"),
 	}
 }
 

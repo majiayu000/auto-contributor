@@ -47,12 +47,17 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 		}).Info("synthesis complete for stage")
 	}
 
-	// Decay confidence on rules without recent evidence
-	p.applyDecay()
-
-	// Reload rules
+	// Reload rules so applyDecay sees the fresh last_validated_at stamps written above
 	if err := p.ruleLoader.Reload(); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to reload rules after synthesis")
+	}
+
+	// Decay confidence on rules without recent evidence (runs on fresh in-memory state)
+	p.applyDecay()
+
+	// Reload again so runtime uses post-decay confidence values rather than stale pre-decay ones
+	if err := p.ruleLoader.Reload(); err != nil {
+		log.WithFields(Fields{"error": err}).Warn("failed to reload rules after decay")
 	}
 
 	log.WithFields(Fields{
@@ -87,14 +92,14 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 	}
 
 	tmplCtx := map[string]any{
-		"Stage":          stage,
-		"EventsText":     eventsText,
-		"ExistingRules":  existingRules,
-		"TotalEvents":    len(events),
-		"MergedCount":    merged,
-		"RejectedCount":  rejected,
+		"Stage":           stage,
+		"EventsText":      eventsText,
+		"ExistingRules":   existingRules,
+		"TotalEvents":     len(events),
+		"MergedCount":     merged,
+		"RejectedCount":   rejected,
 		"AutoClosedCount": autoClosed,
-		"SuccessRate":    fmt.Sprintf("%.1f", successRate),
+		"SuccessRate":     fmt.Sprintf("%.1f", successRate),
 	}
 
 	var result SynthesizerResult
@@ -132,16 +137,17 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		}
 
 		rule := &rules.Rule{
-			ID:            nr.ID,
-			Stage:         nr.Stage,
-			Severity:      nr.Severity,
-			Confidence:    nr.Confidence,
-			Source:        "synthesized",
-			CreatedAt:     time.Now().Format("2006-01-02"),
-			EvidenceCount: nr.EvidenceCount,
-			Tags:          nr.Tags,
-			Condition:     nr.Condition,
-			Body:          nr.Body,
+			ID:              nr.ID,
+			Stage:           nr.Stage,
+			Severity:        nr.Severity,
+			Confidence:      nr.Confidence,
+			Source:          "synthesized",
+			CreatedAt:       time.Now().Format("2006-01-02"),
+			LastValidatedAt: time.Now().Format("2006-01-02"),
+			EvidenceCount:   nr.EvidenceCount,
+			Tags:            nr.Tags,
+			Condition:       nr.Condition,
+			Body:            nr.Body,
 		}
 
 		if err := rules.WriteRule(rulesDir, rule); err != nil {
@@ -163,6 +169,11 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		}
 		if err := rules.UpdateRuleConfidence(rulesDir, ur.ID, existing.Stage, ur.NewConfidence); err != nil {
 			log.WithFields(Fields{"rule": ur.ID, "error": err}).Warn("failed to update rule confidence")
+			continue
+		}
+		today := time.Now().Format("2006-01-02")
+		if err := rules.UpdateRuleLastValidatedAt(rulesDir, ur.ID, existing.Stage, today); err != nil {
+			log.WithFields(Fields{"rule": ur.ID, "error": err}).Warn("failed to update rule last_validated_at")
 			continue
 		}
 		applied.updatedCount++
@@ -189,6 +200,9 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 }
 
 // applyDecay reduces confidence on synthesized rules without recent evidence.
+// Each rule's last_validated_at is read from disk inside DecayRuleIfStale under
+// fileMu, so a concurrent stampRuleValidation write is never missed by a stale
+// in-memory snapshot.
 func (p *Pipeline) applyDecay() {
 	rulesDir := p.ruleLoader.RulesDir()
 	for _, r := range p.ruleLoader.All() {
@@ -196,22 +210,11 @@ func (p *Pipeline) applyDecay() {
 			continue
 		}
 		if r.Confidence <= 0.1 {
-			continue // already at floor
+			continue // already at floor, skip disk round-trip
 		}
-
-		// Check if rule was validated recently
-		if r.LastValidatedAt != "" {
-			validated, err := time.Parse("2006-01-02", r.LastValidatedAt)
-			if err == nil && time.Since(validated) < 30*24*time.Hour {
-				continue // validated within 30 days
-			}
+		if err := rules.DecayRuleIfStale(rulesDir, r.ID, r.Stage, 0.9, 0.1, 30); err != nil {
+			log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to apply decay")
 		}
-
-		newConf := r.Confidence * 0.9
-		if newConf < 0.1 {
-			newConf = 0.1 // floor
-		}
-		rules.UpdateRuleConfidence(rulesDir, r.ID, r.Stage, newConf)
 	}
 }
 
