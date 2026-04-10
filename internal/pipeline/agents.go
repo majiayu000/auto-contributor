@@ -213,7 +213,11 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 	// Fail closed if critic prompt is absent but critic gate is configured: a
 	// missing template means the safety check cannot run, so we must not proceed.
 	if p.maxCriticRounds > 0 && !p.prompts.Has("critic") {
-		return fmt.Errorf("critic gate is enabled (max_critic_rounds=%d) but critic prompt template is missing; refusing to bypass safety gate", p.maxCriticRounds)
+		err := fmt.Errorf("critic gate is enabled (max_critic_rounds=%d) but critic prompt template is missing; refusing to bypass safety gate", p.maxCriticRounds)
+		if issue != nil {
+			p.markFailed(issue, "critic_template_missing", err.Error())
+		}
+		return err
 	}
 	for round := 1; round <= p.maxCriticRounds; round++ {
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {

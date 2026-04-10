@@ -168,6 +168,14 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 		return nil
 	}
 
+	// Fail fast: if critic gate is enabled but template is absent, reject before
+	// spending tokens on engineer/reviewer work (stale prompt-bundle detection).
+	if p.maxCriticRounds > 0 && !p.prompts.Has("critic") {
+		err := fmt.Errorf("critic gate is enabled (max_critic_rounds=%d) but critic prompt template is missing; refusing to bypass safety gate", p.maxCriticRounds)
+		p.markFailed(issue, "critic_template_missing", err.Error())
+		return err
+	}
+
 	// Stage 3+4: Engineer ⇄ Reviewer loop
 	if err := p.engineerReviewLoop(ctx, issue, workspace, analyst); err != nil {
 		return err
