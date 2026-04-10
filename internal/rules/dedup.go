@@ -35,6 +35,13 @@ type DedupResult struct {
 	Score float64
 	// MatchedRuleID is the ID of the most-similar existing rule (empty when Action == DedupActionNew).
 	MatchedRuleID string
+	// MatchedRuleStage is the stage of the matched rule. Use this instead of a
+	// global ByID() lookup to avoid resolving the wrong rule when two stages
+	// share the same ID.
+	MatchedRuleStage string
+	// MatchedRuleSource is the source field of the matched rule (e.g. "manual",
+	// "synthesized"). Use this to check immutability without a second ByID() call.
+	MatchedRuleSource string
 }
 
 // CheckDedup computes cosine similarity between a candidate rule text and all
@@ -51,6 +58,8 @@ func CheckDedup(candidateText string, existingRules []*Rule) DedupResult {
 
 	bestScore := 0.0
 	bestID := ""
+	bestStage := ""
+	bestSource := ""
 	for _, r := range existingRules {
 		existingText := r.Condition + " " + r.Body
 		existVec := termFreq(tokenize(existingText))
@@ -58,6 +67,8 @@ func CheckDedup(candidateText string, existingRules []*Rule) DedupResult {
 		if score > bestScore {
 			bestScore = score
 			bestID = r.ID
+			bestStage = r.Stage
+			bestSource = r.Source
 		}
 	}
 
@@ -70,9 +81,11 @@ func CheckDedup(candidateText string, existingRules []*Rule) DedupResult {
 	}
 
 	return DedupResult{
-		Action:        action,
-		Score:         bestScore,
-		MatchedRuleID: bestID,
+		Action:            action,
+		Score:             bestScore,
+		MatchedRuleID:     bestID,
+		MatchedRuleStage:  bestStage,
+		MatchedRuleSource: bestSource,
 	}
 }
 
@@ -85,8 +98,10 @@ type DedupIndex struct {
 }
 
 type dedupEntry struct {
-	ruleID string
-	vec    map[string]float64
+	ruleID    string
+	ruleStage  string
+	ruleSource string
+	vec        map[string]float64
 }
 
 // NewDedupIndex pre-computes TF vectors for each rule in existing.
@@ -97,7 +112,7 @@ func NewDedupIndex(existing []*Rule) *DedupIndex {
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		entries = append(entries, dedupEntry{ruleID: r.ID, vec: termFreq(tokenize(text))})
+		entries = append(entries, dedupEntry{ruleID: r.ID, ruleStage: r.Stage, ruleSource: r.Source, vec: termFreq(tokenize(text))})
 	}
 	return &DedupIndex{entries: entries}
 }
@@ -110,7 +125,7 @@ func (idx *DedupIndex) Add(r *Rule) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	idx.entries = append(idx.entries, dedupEntry{ruleID: r.ID, vec: termFreq(tokenize(text))})
+	idx.entries = append(idx.entries, dedupEntry{ruleID: r.ID, ruleStage: r.Stage, ruleSource: r.Source, vec: termFreq(tokenize(text))})
 }
 
 // Check returns the dedup action for candidateText using pre-computed vectors.
@@ -122,11 +137,15 @@ func (idx *DedupIndex) Check(candidateText string) DedupResult {
 	candVec := termFreq(tokenize(candidateText))
 	bestScore := 0.0
 	bestID := ""
+	bestStage := ""
+	bestSource := ""
 	for _, e := range idx.entries {
 		score := cosineSimilarity(candVec, e.vec)
 		if score > bestScore {
 			bestScore = score
 			bestID = e.ruleID
+			bestStage = e.ruleStage
+			bestSource = e.ruleSource
 		}
 	}
 
@@ -138,7 +157,7 @@ func (idx *DedupIndex) Check(candidateText string) DedupResult {
 		action = DedupActionPossibleDuplicate
 	}
 
-	return DedupResult{Action: action, Score: bestScore, MatchedRuleID: bestID}
+	return DedupResult{Action: action, Score: bestScore, MatchedRuleID: bestID, MatchedRuleStage: bestStage, MatchedRuleSource: bestSource}
 }
 
 // tokenize splits text into lowercase alphanumeric tokens.
