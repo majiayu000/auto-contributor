@@ -220,8 +220,17 @@ func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 			continue
 		}
 
-		// Double-check for existing PR
-		hasPR, _ := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
+		// Double-check for existing PR; skip on error to avoid duplicate PRs.
+		hasPR, prErr := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
+		if prErr != nil {
+			log.Warn("failed to check existing PR, skipping issue to avoid duplicate",
+				"repo", issue.Repo,
+				"issue", issue.IssueNumber,
+				"error", prErr,
+			)
+			skipped++
+			continue
+		}
 		if hasPR {
 			skipped++
 			continue

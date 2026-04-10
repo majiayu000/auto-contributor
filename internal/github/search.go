@@ -169,9 +169,9 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 			continue
 		}
 
-		// Skip if already has a competing PR
-		hasPR, _ := c.HasExistingPR(ctx, repoFullName, r.Number)
-		if hasPR {
+		// Skip if already has a competing PR; also skip on error to avoid duplicates.
+		hasPR, prErr := c.HasExistingPR(ctx, repoFullName, r.Number)
+		if hasPR || prErr != nil {
 			continue
 		}
 
