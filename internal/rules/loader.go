@@ -276,6 +276,13 @@ func (rl *RuleLoader) IDSummaryForStage(stage string) string {
 		if r.Stage != stage && r.Stage != "global" {
 			continue
 		}
+		// Exclude low-confidence/decayed rules from the dedup hint list.
+		// HasSemanticMatch and ForStage already ignore these rules at runtime, so
+		// including them here would incorrectly tell the LLM "this rule exists —
+		// don't recreate it", permanently blocking fresh replacements for stale rules.
+		if r.Confidence < MinConfidenceForInjection {
+			continue
+		}
 		if sb.Len() >= maxIDSummaryBytes {
 			omitted++
 			continue

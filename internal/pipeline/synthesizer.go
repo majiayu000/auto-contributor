@@ -136,6 +136,13 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if nr.ID == "" || nr.Body == "" {
 			continue
 		}
+		// Reject IDs that contain path separators or dot-dot sequences; WriteRule
+		// uses the ID as a filename component and an unsafe value could escape the
+		// rules/{stage} directory via path traversal.
+		if strings.ContainsAny(nr.ID, "/\\") || strings.Contains(nr.ID, "..") {
+			log.WithFields(Fields{"rule": nr.ID}).Warn("skipping rule with unsafe ID")
+			continue
+		}
 		// Don't overwrite existing rules (exact ID match)
 		if p.ruleLoader.ByID(nr.ID) != nil {
 			continue
