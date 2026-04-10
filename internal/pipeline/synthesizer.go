@@ -35,6 +35,16 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 		}
 
 		applied := p.applySynthesisResult(stage, result)
+
+		// Reload after each stage so the next stage's dedup pool reflects
+		// retirements and new rules written by this stage.  Without this,
+		// a rule retired by stage N is still present in p.ruleLoader.All()
+		// when stage N+1 builds its dedup pool, causing a new candidate to
+		// be flagged as possible_duplicate of a file that no longer exists.
+		if err := p.ruleLoader.Reload(); err != nil {
+			log.WithFields(Fields{"stage": stage, "error": err}).Warn("failed to reload rules after stage synthesis")
+		}
+
 		totalNew += applied.newCount
 		totalUpdated += applied.updatedCount
 		totalRetired += applied.retiredCount
@@ -141,6 +151,16 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		retiredIDs[rr.ID] = struct{}{}
 	}
 
+	// Pre-compute effective confidence after pending updates so the dedup pool
+	// excludes rules that will be downgraded below MinConfidenceForInjection in
+	// this same pass.  Without this a candidate can be merged into a rule that
+	// is subsequently downgraded, causing the candidate's evidence to be
+	// discarded and no active rule to be created.
+	pendingConf := make(map[string]float64, len(result.UpdatedRules))
+	for _, ur := range result.UpdatedRules {
+		pendingConf[ur.ID] = ur.NewConfidence
+	}
+
 	// Build initial dedup pool: rules belonging to this stage (or global),
 	// minus those being retired.
 	// Only stage-scoped rules are candidates for dedup because prompt
@@ -148,7 +168,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 	// Merging a candidate into a rule from a different stage would silently
 	// drop the candidate from the originating stage in production.
 	// This slice is extended as new rules are written so that near-identical
-	// candidates within the same batch are also deduped (Issue 2 fix).
+	// candidates within the same batch are also deduped.
 	allRules := p.ruleLoader.All()
 	dedupPool := make([]*rules.Rule, 0, len(allRules))
 	for _, r := range allRules {
@@ -158,11 +178,13 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if r.Stage != stage && r.Stage != "global" {
 			continue
 		}
-		// Issue 1 fix: exclude sub-threshold rules from the dedup pool.
-		// Merging a candidate into a rule with confidence < MinConfidenceForInjection
-		// only increments evidence_count but never raises confidence, so the
-		// candidate is silently dropped and never becomes active in production.
-		if r.Confidence < rules.MinConfidenceForInjection {
+		// Use post-update confidence when available so rules being downgraded
+		// below the threshold are not included in the dedup pool.
+		effectiveConf := r.Confidence
+		if newConf, ok := pendingConf[r.ID]; ok {
+			effectiveConf = newConf
+		}
+		if effectiveConf < rules.MinConfidenceForInjection {
 			continue
 		}
 		dedupPool = append(dedupPool, r)
