@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
@@ -49,8 +50,10 @@ func (db *DB) MigrateTrajectories() error {
 		if _, err := db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`); err != nil {
 			return fmt.Errorf("drop idx_trajectories_issue_unique: %w", err)
 		}
-		// Add pr_number column to existing tables (idempotent: error is ignored if already present).
-		db.Exec(`ALTER TABLE trajectories ADD COLUMN IF NOT EXISTS pr_number INTEGER NOT NULL DEFAULT 0`)
+		// Add pr_number column to existing tables; IF NOT EXISTS makes this idempotent.
+		if _, err := db.Exec(`ALTER TABLE trajectories ADD COLUMN IF NOT EXISTS pr_number INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add pr_number column: %w", err)
+		}
 	} else {
 		if _, err := db.Exec(`
 			CREATE TABLE IF NOT EXISTS trajectories (
@@ -85,8 +88,12 @@ func (db *DB) MigrateTrajectories() error {
 		}
 		// Drop the old named unique index if it exists (created by earlier schema versions).
 		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
-		// Add pr_number column to existing SQLite tables; error is silently ignored if already present.
-		db.Exec(`ALTER TABLE trajectories ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0`)
+		// Add pr_number column to existing SQLite tables; "duplicate column name" means already present.
+		if _, err := db.Exec(`ALTER TABLE trajectories ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0`); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("add pr_number column: %w", err)
+			}
+		}
 		// Fix inline `issue_id UNIQUE` constraint from older schema versions.
 		// SQLite cannot remove a column-level constraint via ALTER TABLE; the table must be recreated.
 		// We first ensure pr_number exists (above), then check the stored DDL and recreate if needed.
@@ -226,8 +233,18 @@ func (db *DB) UpdateTrajectoryOutcome(issueID int64, prNumber int, outcomeLabel 
 			query = `UPDATE trajectories SET outcome_label = ?, success = ?, updated_at = ?
 				WHERE issue_id = ? AND pr_number = ?`
 		}
-		_, err := db.Exec(query, outcomeLabel, successInt, now, issueID, prNumber)
-		return err
+		result, err := db.Exec(query, outcomeLabel, successInt, now, issueID, prNumber)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("rows affected: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("no trajectory row found for issue_id=%d pr_number=%d", issueID, prNumber)
+		}
+		return nil
 	}
 	// Fallback: no PR number available — update the most-recent row for this issue.
 	if db.IsPostgres() {
@@ -237,8 +254,18 @@ func (db *DB) UpdateTrajectoryOutcome(issueID int64, prNumber int, outcomeLabel 
 		query = `UPDATE trajectories SET outcome_label = ?, success = ?, updated_at = ?
 			WHERE id = (SELECT id FROM trajectories WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1)`
 	}
-	_, err := db.Exec(query, outcomeLabel, successInt, now, issueID)
-	return err
+	result, err := db.Exec(query, outcomeLabel, successInt, now, issueID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no trajectory row found for issue_id=%d", issueID)
+	}
+	return nil
 }
 
 // GetSuccessfulTrajectories returns recent successful trajectories for experience replay.
