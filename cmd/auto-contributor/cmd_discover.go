@@ -33,6 +33,12 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// Check repo profile: skip low-probability repos
+		if skip, reason, _ := database.ShouldSkipRepo(issue.Repo, 0.1, 3); skip {
+			fmt.Printf("Skipping repo %s: %s\n", issue.Repo, reason)
+			continue
+		}
+
 		// Save to database
 		if err := database.CreateIssue(issue); err != nil {
 			fmt.Printf("Warning: failed to save issue %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
