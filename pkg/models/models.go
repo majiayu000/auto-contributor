@@ -17,20 +17,20 @@ const (
 
 	// V2 pipeline statuses
 	IssueStatusAnalyzing   IssueStatus = "analyzing"   // Analyst agent running
-	IssueStatusEngineering IssueStatus = "engineering"  // Engineer agent running
-	IssueStatusReviewing   IssueStatus = "reviewing"    // Reviewer agent running
-	IssueStatusRework      IssueStatus = "rework"       // Engineer reworking after review
-	IssueStatusSubmitting  IssueStatus = "submitting"   // Submitter agent running
+	IssueStatusEngineering IssueStatus = "engineering" // Engineer agent running
+	IssueStatusReviewing   IssueStatus = "reviewing"   // Reviewer agent running
+	IssueStatusRework      IssueStatus = "rework"      // Engineer reworking after review
+	IssueStatusSubmitting  IssueStatus = "submitting"  // Submitter agent running
 )
 
 // PRStatus represents the status of a pull request
 type PRStatus string
 
 const (
-	PRStatusDraft      PRStatus = "draft" // Draft PR, waiting for CI
-	PRStatusOpen       PRStatus = "open"  // Ready for review, checking feedback
-	PRStatusMerged     PRStatus = "merged"
-	PRStatusClosed     PRStatus = "closed"
+	PRStatusDraft          PRStatus = "draft" // Draft PR, waiting for CI
+	PRStatusOpen           PRStatus = "open"  // Ready for review, checking feedback
+	PRStatusMerged         PRStatus = "merged"
+	PRStatusClosed         PRStatus = "closed"
 	PRStatusResponding     PRStatus = "responding"
 	PRStatusNeedsAttention PRStatus = "needs_attention" // Requires manual action (e.g. CLA signing)
 )
@@ -39,16 +39,16 @@ const (
 type FailureReason string
 
 const (
-	FailureReasonTimeout          FailureReason = "timeout"
-	FailureReasonNoChanges        FailureReason = "no_changes"
-	FailureReasonTestsFailed      FailureReason = "tests_failed"
-	FailureReasonCIFailed         FailureReason = "ci_failed"
-	FailureReasonCloneFailed      FailureReason = "clone_failed"
-	FailureReasonPRFailed         FailureReason = "pr_failed"
-	FailureReasonComplexityHigh   FailureReason = "complexity_too_high"
-	FailureReasonAlreadyHasPR     FailureReason = "already_has_pr"
-	FailureReasonAlreadyFixed     FailureReason = "already_fixed"
-	FailureReasonUnknown          FailureReason = "unknown"
+	FailureReasonTimeout        FailureReason = "timeout"
+	FailureReasonNoChanges      FailureReason = "no_changes"
+	FailureReasonTestsFailed    FailureReason = "tests_failed"
+	FailureReasonCIFailed       FailureReason = "ci_failed"
+	FailureReasonCloneFailed    FailureReason = "clone_failed"
+	FailureReasonPRFailed       FailureReason = "pr_failed"
+	FailureReasonComplexityHigh FailureReason = "complexity_too_high"
+	FailureReasonAlreadyHasPR   FailureReason = "already_has_pr"
+	FailureReasonAlreadyFixed   FailureReason = "already_fixed"
+	FailureReasonUnknown        FailureReason = "unknown"
 )
 
 // Issue represents a discovered GitHub issue
@@ -85,22 +85,22 @@ func (r FailureReason) IsRetryable() bool {
 
 // PullRequest represents a created pull request
 type PullRequest struct {
-	ID                 int64      `db:"id" json:"id"`
-	IssueID            int64      `db:"issue_id" json:"issue_id"`
-	PRURL              string     `db:"pr_url" json:"pr_url"`
-	PRNumber           int        `db:"pr_number" json:"pr_number"`
-	BranchName         string     `db:"branch_name" json:"branch_name"`
-	Status             PRStatus   `db:"status" json:"status"`
-	CIStatus           string     `db:"ci_status" json:"ci_status"`
-	RetryCount         int        `db:"retry_count" json:"retry_count"`
-	MergedAt           *time.Time `db:"merged_at" json:"merged_at,omitempty"`
-	ClosedAt           *time.Time `db:"closed_at" json:"closed_at,omitempty"`
-	ReviewCommentCount int        `db:"review_comment_count" json:"review_comment_count"`
-	FirstReviewAt      *time.Time `db:"first_review_at" json:"first_review_at,omitempty"`
-	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
-	LastFeedbackCheckAt  *time.Time `db:"last_feedback_check_at" json:"last_feedback_check_at,omitempty"`
-	FeedbackRound        int        `db:"feedback_round" json:"feedback_round"`
+	ID                  int64      `db:"id" json:"id"`
+	IssueID             int64      `db:"issue_id" json:"issue_id"`
+	PRURL               string     `db:"pr_url" json:"pr_url"`
+	PRNumber            int        `db:"pr_number" json:"pr_number"`
+	BranchName          string     `db:"branch_name" json:"branch_name"`
+	Status              PRStatus   `db:"status" json:"status"`
+	CIStatus            string     `db:"ci_status" json:"ci_status"`
+	RetryCount          int        `db:"retry_count" json:"retry_count"`
+	MergedAt            *time.Time `db:"merged_at" json:"merged_at,omitempty"`
+	ClosedAt            *time.Time `db:"closed_at" json:"closed_at,omitempty"`
+	ReviewCommentCount  int        `db:"review_comment_count" json:"review_comment_count"`
+	FirstReviewAt       *time.Time `db:"first_review_at" json:"first_review_at,omitempty"`
+	CreatedAt           time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time  `db:"updated_at" json:"updated_at"`
+	LastFeedbackCheckAt *time.Time `db:"last_feedback_check_at" json:"last_feedback_check_at,omitempty"`
+	FeedbackRound       int        `db:"feedback_round" json:"feedback_round"`
 }
 
 // TimeToMerge returns the duration from PR creation to merge
@@ -179,22 +179,22 @@ type IssueMetrics struct {
 
 // DailyStats holds daily aggregated statistics
 type DailyStats struct {
-	ID                     int64     `db:"id"`
-	Date                   string    `db:"date"` // YYYY-MM-DD
-	IssuesDiscovered       int       `db:"issues_discovered"`
-	IssuesAttempted        int       `db:"issues_attempted"`
-	IssuesSolved           int       `db:"issues_solved"`
-	PRsCreated             int       `db:"prs_created"`
-	PRsMerged              int       `db:"prs_merged"`
-	PRsClosed              int       `db:"prs_closed"`
-	AvgSolveTimeSeconds    *float64  `db:"avg_solve_time_seconds"`
-	AvgAttemptsPerIssue    *float64  `db:"avg_attempts_per_issue"`
-	FirstAttemptSuccessRate *float64 `db:"first_attempt_success_rate"`
-	OverallSuccessRate     *float64  `db:"overall_success_rate"`
-	StatsByLanguage        string    `db:"stats_by_language"`     // JSON
-	StatsByRepo            string    `db:"stats_by_repo"`         // JSON
-	FailureReasonsCount    string    `db:"failure_reasons_count"` // JSON
-	CreatedAt              time.Time `db:"created_at"`
+	ID                      int64     `db:"id"`
+	Date                    string    `db:"date"` // YYYY-MM-DD
+	IssuesDiscovered        int       `db:"issues_discovered"`
+	IssuesAttempted         int       `db:"issues_attempted"`
+	IssuesSolved            int       `db:"issues_solved"`
+	PRsCreated              int       `db:"prs_created"`
+	PRsMerged               int       `db:"prs_merged"`
+	PRsClosed               int       `db:"prs_closed"`
+	AvgSolveTimeSeconds     *float64  `db:"avg_solve_time_seconds"`
+	AvgAttemptsPerIssue     *float64  `db:"avg_attempts_per_issue"`
+	FirstAttemptSuccessRate *float64  `db:"first_attempt_success_rate"`
+	OverallSuccessRate      *float64  `db:"overall_success_rate"`
+	StatsByLanguage         string    `db:"stats_by_language"`     // JSON
+	StatsByRepo             string    `db:"stats_by_repo"`         // JSON
+	FailureReasonsCount     string    `db:"failure_reasons_count"` // JSON
+	CreatedAt               time.Time `db:"created_at"`
 }
 
 // RepoMetrics holds aggregated metrics per repository
@@ -249,14 +249,14 @@ type LanguageMetrics struct {
 
 // PRMetrics holds PR-related aggregate statistics
 type PRMetrics struct {
-	TotalPRs           int     `json:"total_prs"`
-	OpenPRs            int     `json:"open_prs"`
-	MergedPRs          int     `json:"merged_prs"`
-	ClosedPRs          int     `json:"closed_prs"`
-	MergeRate          float64 `json:"merge_rate"`
-	AvgTimeToMerge     float64 `json:"avg_time_to_merge_hours"`
+	TotalPRs             int     `json:"total_prs"`
+	OpenPRs              int     `json:"open_prs"`
+	MergedPRs            int     `json:"merged_prs"`
+	ClosedPRs            int     `json:"closed_prs"`
+	MergeRate            float64 `json:"merge_rate"`
+	AvgTimeToMerge       float64 `json:"avg_time_to_merge_hours"`
 	AvgTimeToFirstReview float64 `json:"avg_time_to_first_review_hours"`
-	AvgReviewComments  float64 `json:"avg_review_comments"`
+	AvgReviewComments    float64 `json:"avg_review_comments"`
 }
 
 // BlacklistEntry represents a blacklisted repository
@@ -267,14 +267,44 @@ type BlacklistEntry struct {
 	AddedAt time.Time `db:"added_at" json:"added_at"`
 }
 
+// RepoProfile stores repo-level learning data to improve scout decisions.
+// Stats fields (TotalPRsSubmitted, TotalMerged, TotalRejected, MergeRate,
+// AvgResponseTimeHours, LastInteraction) are auto-computed by SyncRepoProfileStats.
+// All other fields are manually maintained via UpsertRepoProfile.
+type RepoProfile struct {
+	Repo                 string     `db:"repo" json:"repo"`
+	TotalPRsSubmitted    int        `db:"total_prs_submitted" json:"total_prs_submitted"`
+	TotalMerged          int        `db:"total_merged" json:"total_merged"`
+	TotalRejected        int        `db:"total_rejected" json:"total_rejected"`
+	MergeRate            float64    `db:"merge_rate" json:"merge_rate"`
+	AvgResponseTimeHours *float64   `db:"avg_response_time_hours" json:"avg_response_time_hours,omitempty"`
+	RequiresCLA          bool       `db:"requires_cla" json:"requires_cla"`
+	RequiresAssignment   bool       `db:"requires_assignment" json:"requires_assignment"`
+	PreferredPRSize      string     `db:"preferred_pr_size" json:"preferred_pr_size,omitempty"`
+	Blacklisted          bool       `db:"blacklisted" json:"blacklisted"`
+	BlacklistReason      string     `db:"blacklist_reason" json:"blacklist_reason,omitempty"`
+	CooldownUntil        *time.Time `db:"cooldown_until" json:"cooldown_until,omitempty"`
+	StrategyNotes        string     `db:"strategy_notes" json:"strategy_notes,omitempty"`
+	LastInteraction      *time.Time `db:"last_interaction" json:"last_interaction,omitempty"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// IsOnCooldown returns true if this repo's cooldown period has not yet expired.
+func (p *RepoProfile) IsOnCooldown() bool {
+	if p.CooldownUntil == nil {
+		return false
+	}
+	return time.Now().Before(*p.CooldownUntil)
+}
+
 // ReviewLesson represents a lesson learned from upstream reviewer feedback.
 // These are extracted from PR reviews and used to improve future contributions.
 type ReviewLesson struct {
 	ID            int64     `db:"id" json:"id"`
 	PRID          int64     `db:"pr_id" json:"pr_id"`
 	Repo          string    `db:"repo" json:"repo"`
-	Category      string    `db:"category" json:"category"`           // testing, style, scope, docs, ci, logic
-	Lesson        string    `db:"lesson" json:"lesson"`               // extracted actionable lesson
+	Category      string    `db:"category" json:"category"`             // testing, style, scope, docs, ci, logic
+	Lesson        string    `db:"lesson" json:"lesson"`                 // extracted actionable lesson
 	SourceComment string    `db:"source_comment" json:"source_comment"` // original reviewer text
 	Reviewer      string    `db:"reviewer" json:"reviewer"`
 	CreatedAt     time.Time `db:"created_at" json:"created_at"`
@@ -282,20 +312,20 @@ type ReviewLesson struct {
 
 // PipelineEvent records a single agent invocation in the pipeline.
 type PipelineEvent struct {
-	ID               int64      `db:"id" json:"id"`
-	IssueID          int64      `db:"issue_id" json:"issue_id"`
-	PRID             *int64     `db:"pr_id" json:"pr_id,omitempty"`
-	Repo             string     `db:"repo" json:"repo"`
-	IssueNumber      int        `db:"issue_number" json:"issue_number"`
-	Stage            string     `db:"stage" json:"stage"`
-	Round            int        `db:"round" json:"round"`
-	StartedAt        time.Time  `db:"started_at" json:"started_at"`
-	CompletedAt      *time.Time `db:"completed_at" json:"completed_at,omitempty"`
-	DurationSeconds  float64    `db:"duration_seconds" json:"duration_seconds"`
-	OutputSummary    string     `db:"output_summary" json:"output_summary"`
-	Verdict          string     `db:"verdict" json:"verdict"`
-	Success          bool       `db:"success" json:"success"`
-	ErrorMessage     string     `db:"error_message" json:"error_message,omitempty"`
-	OutcomeLabel     string     `db:"outcome_label" json:"outcome_label,omitempty"`
-	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
+	ID              int64      `db:"id" json:"id"`
+	IssueID         int64      `db:"issue_id" json:"issue_id"`
+	PRID            *int64     `db:"pr_id" json:"pr_id,omitempty"`
+	Repo            string     `db:"repo" json:"repo"`
+	IssueNumber     int        `db:"issue_number" json:"issue_number"`
+	Stage           string     `db:"stage" json:"stage"`
+	Round           int        `db:"round" json:"round"`
+	StartedAt       time.Time  `db:"started_at" json:"started_at"`
+	CompletedAt     *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	DurationSeconds float64    `db:"duration_seconds" json:"duration_seconds"`
+	OutputSummary   string     `db:"output_summary" json:"output_summary"`
+	Verdict         string     `db:"verdict" json:"verdict"`
+	Success         bool       `db:"success" json:"success"`
+	ErrorMessage    string     `db:"error_message" json:"error_message,omitempty"`
+	OutcomeLabel    string     `db:"outcome_label" json:"outcome_label,omitempty"`
+	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 }

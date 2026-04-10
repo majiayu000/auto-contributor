@@ -269,6 +269,24 @@ func (db *DB) sqliteSchema() string {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_blacklist_repo ON blacklist(repo);
+
+	CREATE TABLE IF NOT EXISTS repo_profiles (
+		repo TEXT PRIMARY KEY,
+		total_prs_submitted INTEGER DEFAULT 0,
+		total_merged INTEGER DEFAULT 0,
+		total_rejected INTEGER DEFAULT 0,
+		merge_rate REAL DEFAULT 0,
+		avg_response_time_hours REAL,
+		requires_cla INTEGER DEFAULT 0,
+		requires_assignment INTEGER DEFAULT 0,
+		preferred_pr_size TEXT,
+		blacklisted INTEGER DEFAULT 0,
+		blacklist_reason TEXT,
+		cooldown_until DATETIME,
+		strategy_notes TEXT,
+		last_interaction DATETIME,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
 	`
 }
 
@@ -424,6 +442,24 @@ func (db *DB) postgresSchema() string {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_blacklist_repo ON blacklist(repo);
+
+	CREATE TABLE IF NOT EXISTS repo_profiles (
+		repo TEXT PRIMARY KEY,
+		total_prs_submitted INT DEFAULT 0,
+		total_merged INT DEFAULT 0,
+		total_rejected INT DEFAULT 0,
+		merge_rate FLOAT DEFAULT 0,
+		avg_response_time_hours FLOAT,
+		requires_cla BOOLEAN DEFAULT FALSE,
+		requires_assignment BOOLEAN DEFAULT FALSE,
+		preferred_pr_size TEXT,
+		blacklisted BOOLEAN DEFAULT FALSE,
+		blacklist_reason TEXT,
+		cooldown_until TIMESTAMP,
+		strategy_notes TEXT,
+		last_interaction TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT NOW()
+	);
 	`
 }
 
