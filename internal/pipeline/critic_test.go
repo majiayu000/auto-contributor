@@ -108,9 +108,9 @@ func TestCriticLoop_SkippedWhenMaxRoundsZero(t *testing.T) {
 func TestCriticResult_NormalisedFields(t *testing.T) {
 	// LLMs may return uppercase or padded values; verify normalisation logic.
 	cases := []struct {
-		raw      string
-		wantV    string
-		wantSev  string
+		raw     string
+		wantV   string
+		wantSev string
 	}{
 		{`{"verdict":"APPROVE","severity":""}`, "approve", ""},
 		{`{"verdict":"Reject","severity":"SEVERE"}`, "reject", "severe"},
@@ -132,14 +132,16 @@ func TestCriticResult_NormalisedFields(t *testing.T) {
 	}
 }
 
-// --- Fix 2: graceful skip when critic template is absent ---
+// --- Fix 2: fail closed when critic template is absent but gate is configured ---
 
-func TestCriticLoop_SkippedWhenTemplateAbsent(t *testing.T) {
+func TestCriticLoop_FailsClosedWhenTemplateAbsent(t *testing.T) {
+	// A configured critic gate (maxCriticRounds>0) with a missing template must
+	// return an error rather than silently bypassing the safety gate.
 	ps := prompt.NewStore(t.TempDir()) // empty dir → no templates loaded
 	p := &Pipeline{maxCriticRounds: 2, prompts: ps}
 	err := p.criticLoop(context.Background(), nil, "", nil)
-	if err != nil {
-		t.Errorf("expected nil when critic template absent, got: %v", err)
+	if err == nil {
+		t.Error("expected error when critic template absent and gate configured, got nil")
 	}
 }
 

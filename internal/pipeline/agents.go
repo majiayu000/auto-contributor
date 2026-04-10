@@ -210,10 +210,10 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 // It simulates an external maintainer perspective. A maxCriticRounds of 0 skips
 // the critic entirely.
 func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) error {
-	// Gracefully skip if critic prompt is absent (e.g. stale bundle without critic.md).
+	// Fail closed if critic prompt is absent but critic gate is configured: a
+	// missing template means the safety check cannot run, so we must not proceed.
 	if p.maxCriticRounds > 0 && !p.prompts.Has("critic") {
-		log.Warn("critic prompt template not found; skipping critic gate")
-		return nil
+		return fmt.Errorf("critic gate is enabled (max_critic_rounds=%d) but critic prompt template is missing; refusing to bypass safety gate", p.maxCriticRounds)
 	}
 	for round := 1; round <= p.maxCriticRounds; round++ {
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
@@ -239,9 +239,23 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 			return nil
 		}
 
+		// Normalise verdict: any value other than "approve" or "reject" is treated
+		// as "reject" with severity "severe" so that malformed LLM output cannot
+		// silently pass the critic gate.
+		if criticResult.Verdict != "reject" {
+			log.WithFields(Fields{
+				"repo":    issue.Repo,
+				"issue":   issue.IssueNumber,
+				"round":   round,
+				"verdict": criticResult.Verdict,
+			}).Warn("critic returned unrecognised verdict; treating as reject/severe to prevent silent bypass")
+			criticResult.Verdict = "reject"
+			criticResult.Severity = "severe"
+		}
+
 		// Safety: if the LLM returned "reject" with an unrecognised severity
 		// (e.g. a typo like "sevree" or an omitted field), treat it as "severe"
-		// so that malformed output cannot silently bypass the critic gate.
+		// so that malformed severity cannot silently bypass the critic gate.
 		if criticResult.Verdict == "reject" {
 			switch criticResult.Severity {
 			case "minor", "moderate", "severe":
@@ -322,8 +336,9 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		revCtx := p.buildReviewerCtx(issue, analyst, round, nil)
 		revStart := time.Now()
 		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &postCriticReview); err != nil {
-			log.WithError(err).Warn("reviewer parse error after critic rework, treating as approve")
-			postCriticReview.Verdict = "approve"
+			p.recordEvent(issue, nil, "reviewer", round, revStart, "", false, "", err.Error())
+			p.markFailed(issue, "reviewer_parse_error_after_critic_rework", err.Error())
+			return fmt.Errorf("reviewer parse error after critic rework at round %d for %s#%d: %w", round, issue.Repo, issue.IssueNumber, err)
 		}
 		p.recordEvent(issue, nil, "reviewer", round, revStart, postCriticReview.Verdict, postCriticReview.Verdict == "approve", "", "")
 		if postCriticReview.Verdict != "approve" {
