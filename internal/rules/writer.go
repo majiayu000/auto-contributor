@@ -100,6 +100,37 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 	return os.WriteFile(path, updated, 0644)
 }
 
+// UpdateRuleQValue updates the q_value, retrieval_count, and success_count fields of an existing rule file.
+func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float64, retrievalCount int, successCount int) error {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
+	path := findRuleFile(rulesDir, ruleID, stage)
+	if path == "" {
+		return fmt.Errorf("rule file not found: %s", ruleID)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var rule Rule
+	if err := yaml.Unmarshal(data, &rule); err != nil {
+		return err
+	}
+
+	rule.QValue = qValue
+	rule.RetrievalCount = retrievalCount
+	rule.SuccessCount = successCount
+	updated, err := yaml.Marshal(&rule)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, updated, 0644)
+}
+
 // DeleteRule removes a rule file from disk.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
 	fileMu.Lock()

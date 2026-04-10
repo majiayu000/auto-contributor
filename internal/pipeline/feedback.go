@@ -42,6 +42,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
@@ -54,6 +55,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			return fmt.Errorf("update PR status to closed: %w", err)
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
 		return nil

@@ -131,6 +131,17 @@ func (rl *RuleLoader) ForStage(stage string) []*Rule {
 	return matched
 }
 
+// IDsForStage returns the IDs of rules that would be injected for a given stage.
+// This is used to record which rules were active when an agent ran (for Q-value tracking).
+func (rl *RuleLoader) IDsForStage(stage string) []string {
+	matched := rl.ForStage(stage)
+	ids := make([]string, 0, len(matched))
+	for _, r := range matched {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
 // FormatForPrompt returns concatenated rule bodies as Markdown for prompt injection.
 func (rl *RuleLoader) FormatForPrompt(stage string) string {
 	matched := rl.ForStage(stage)

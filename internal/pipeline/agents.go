@@ -13,6 +13,7 @@ import (
 // --- Scout ---
 
 func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutResult, error) {
+	stageRules := p.ruleLoader.IDsForStage("scout")
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
@@ -30,17 +31,18 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 	start := time.Now()
 	var result ScoutResult
 	if _, err := p.runner.RunJSON(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result); err != nil {
-		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error())
+		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
 	summary, _ := json.Marshal(map[string]any{"verdict": result.Verdict, "difficulty": result.Difficulty, "competing_pr": result.HasCompetingPR})
-	p.recordEvent(issue, nil, "scout", 1, start, result.Verdict, result.Verdict == "PROCEED", string(summary), "")
+	p.recordEvent(issue, nil, "scout", 1, start, result.Verdict, result.Verdict == "PROCEED", string(summary), "", stageRules)
 	return &result, nil
 }
 
 // --- Analyst ---
 
 func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspace string, scout *ScoutResult) (*AnalystResult, error) {
+	stageRules := p.ruleLoader.IDsForStage("analyst")
 	scoutJSON, _ := json.MarshalIndent(scout, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -55,7 +57,7 @@ func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspac
 	start := time.Now()
 	var result AnalystResult
 	if _, err := p.runner.RunJSON(ctx, "analyst", workspace, tmplCtx, &result); err != nil {
-		p.recordEvent(issue, nil, "analyst", 1, start, "", false, "", err.Error())
+		p.recordEvent(issue, nil, "analyst", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
 
@@ -67,7 +69,7 @@ func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspac
 	if !result.CanFix {
 		verdict = "cannot_fix"
 	}
-	p.recordEvent(issue, nil, "analyst", 1, start, verdict, result.CanFix, fmt.Sprintf("base_branch=%s files=%d", result.BaseBranch, len(result.FixPlan.FilesToModify)), "")
+	p.recordEvent(issue, nil, "analyst", 1, start, verdict, result.CanFix, fmt.Sprintf("base_branch=%s files=%d", result.BaseBranch, len(result.FixPlan.FilesToModify)), "", stageRules)
 	return &result, nil
 }
 
@@ -139,6 +141,7 @@ func (p *Pipeline) buildReviewerCtx(issue *models.Issue, analyst *AnalystResult,
 // --- Submitter ---
 
 func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) (*SubmitResult, error) {
+	stageRules := p.ruleLoader.IDsForStage("submitter")
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -166,16 +169,17 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 			"output_len":  len(raw),
 			"output_tail": truncate(raw, 500),
 		}).Warn("submitter failed to produce valid JSON")
-		p.recordEvent(issue, nil, "submitter", 1, start, "", false, "", err.Error())
+		p.recordEvent(issue, nil, "submitter", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
-	p.recordEvent(issue, nil, "submitter", 1, start, result.Status, result.Status == "submitted", fmt.Sprintf("pr=%s", result.PRURL), "")
+	p.recordEvent(issue, nil, "submitter", 1, start, result.Status, result.Status == "submitted", fmt.Sprintf("pr=%s", result.PRURL), "", stageRules)
 	return &result, nil
 }
 
 // --- Critic ---
 
 func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult, round int) (*CriticResult, error) {
+	criticRules := p.ruleLoader.IDsForStage("critic")
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -194,7 +198,7 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 	start := time.Now()
 	var result CriticResult
 	if _, err := p.runner.RunJSON(ctx, "critic", workspace, tmplCtx, &result); err != nil {
-		p.recordEvent(issue, nil, "critic", round, start, "", false, "", err.Error())
+		p.recordEvent(issue, nil, "critic", round, start, "", false, "", err.Error(), criticRules)
 		return nil, err
 	}
 
@@ -207,7 +211,7 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 		"severity": result.Severity,
 		"findings": len(result.Findings),
 	})
-	p.recordEvent(issue, nil, "critic", round, start, result.Verdict, result.Verdict == "approve", string(summary), "")
+	p.recordEvent(issue, nil, "critic", round, start, result.Verdict, result.Verdict == "approve", string(summary), "", criticRules)
 	return &result, nil
 }
 
@@ -225,6 +229,8 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		return err
 	}
 	for round := 1; round <= p.maxCriticRounds; round++ {
+		engineerRules := p.ruleLoader.IDsForStage("engineer")
+		reviewerRules := p.ruleLoader.IDsForStage("reviewer")
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
 			log.WithError(err).Warn("update status to reviewing (critic)")
 		}
@@ -318,13 +324,13 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		engStart := time.Now()
 		raw, err := p.runner.Run(ctx, "engineer", workspace, engCtx)
 		if err != nil {
-			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error())
+			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error(), engineerRules)
 			p.markFailed(issue, "engineer_failed_critic_rework", err.Error())
 			return err
 		}
 
 		fixComplete := containsMarker(raw, "FIX_COMPLETE")
-		p.recordEvent(issue, nil, "engineer", round, engStart, fmt.Sprintf("fix_complete=%v critic_rework=true", fixComplete), fixComplete, "", "")
+		p.recordEvent(issue, nil, "engineer", round, engStart, fmt.Sprintf("fix_complete=%v critic_rework=true", fixComplete), fixComplete, "", "", engineerRules)
 		if !fixComplete {
 			log.WithFields(Fields{
 				"repo":  issue.Repo,
@@ -345,11 +351,11 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		revCtx := p.buildReviewerCtx(issue, analyst, round, nil)
 		revStart := time.Now()
 		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &postCriticReview); err != nil {
-			p.recordEvent(issue, nil, "reviewer", round, revStart, "", false, "", err.Error())
+			p.recordEvent(issue, nil, "reviewer", round, revStart, "", false, "", err.Error(), reviewerRules)
 			p.markFailed(issue, "reviewer_parse_error_after_critic_rework", err.Error())
 			return fmt.Errorf("reviewer parse error after critic rework at round %d for %s#%d: %w", round, issue.Repo, issue.IssueNumber, err)
 		}
-		p.recordEvent(issue, nil, "reviewer", round, revStart, postCriticReview.Verdict, postCriticReview.Verdict == "approve", "", "")
+		p.recordEvent(issue, nil, "reviewer", round, revStart, postCriticReview.Verdict, postCriticReview.Verdict == "approve", "", "", reviewerRules)
 		if postCriticReview.Verdict != "approve" {
 			p.markAbandoned(issue, fmt.Sprintf("reviewer rejected code after critic rework at round %d", round))
 			return fmt.Errorf("reviewer rejected critic-driven rework at round %d for %s#%d: %s",
@@ -371,6 +377,9 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 	var lastReview *CodeReviewResult
 	lastSummary := ""
 
+	engineerRules := p.ruleLoader.IDsForStage("engineer")
+	reviewerRules := p.ruleLoader.IDsForStage("reviewer")
+
 	for round := 1; round <= p.maxReview; round++ {
 		// Engineer
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusEngineering, ""); err != nil {
@@ -381,7 +390,7 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 		engStart := time.Now()
 		raw, err := p.runner.Run(ctx, "engineer", workspace, engCtx)
 		if err != nil {
-			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error())
+			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error(), engineerRules)
 			p.markFailed(issue, "engineer_failed", err.Error())
 			return round, lastSummary, err
 		}
@@ -394,7 +403,7 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 				"round": round,
 			}).Warn("engineer did not produce FIX_COMPLETE marker, proceeding to review anyway")
 		}
-		p.recordEvent(issue, nil, "engineer", round, engStart, fmt.Sprintf("fix_complete=%v", fixComplete), fixComplete, "", "")
+		p.recordEvent(issue, nil, "engineer", round, engStart, fmt.Sprintf("fix_complete=%v", fixComplete), fixComplete, "", "", engineerRules)
 
 		// Reviewer
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
@@ -410,7 +419,7 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 		}
 		reviewSummaryJSON, _ := json.Marshal(map[string]any{"verdict": review.Verdict, "confidence": review.Confidence, "issues": len(review.IssuesFound)})
 		lastSummary = review.Summary
-		p.recordEvent(issue, nil, "reviewer", round, revStart, review.Verdict, review.Verdict == "approve", string(reviewSummaryJSON), "")
+		p.recordEvent(issue, nil, "reviewer", round, revStart, review.Verdict, review.Verdict == "approve", string(reviewSummaryJSON), "", reviewerRules)
 
 		p.logReview(issue, &review, round)
 
