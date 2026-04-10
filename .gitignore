@@ -42,3 +42,4 @@ Thumbs.db
 
 # Workspace (repos cloned for processing)
 workspace/
+.omx/
