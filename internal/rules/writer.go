@@ -161,6 +161,36 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 	return os.WriteFile(path, updated, 0644)
 }
 
+// IncrementEvidenceCount increments the evidence_count field of an existing rule file.
+// It is called when a candidate rule is merged into an existing rule during dedup.
+func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
+	path := findRuleFile(rulesDir, ruleID, stage)
+	if path == "" {
+		return fmt.Errorf("rule file not found: %s", ruleID)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var rule Rule
+	if err := yaml.Unmarshal(data, &rule); err != nil {
+		return err
+	}
+
+	rule.EvidenceCount++
+	updated, err := yaml.Marshal(&rule)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, updated, 0644)
+}
+
 // findRuleFile locates a rule file by ID, checking stage dir first then walking all dirs.
 func findRuleFile(rulesDir, ruleID, stage string) string {
 	// Check stage-specific dir first

@@ -40,11 +40,13 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 		totalRetired += applied.retiredCount
 
 		log.WithFields(Fields{
-			"stage":   stage,
-			"new":     applied.newCount,
-			"updated": applied.updatedCount,
-			"retired": applied.retiredCount,
-			"summary": result.Summary,
+			"stage":        stage,
+			"new":          applied.newCount,
+			"updated":      applied.updatedCount,
+			"retired":      applied.retiredCount,
+			"merged":       applied.mergedCount,
+			"possible_dup": applied.possibleDupCount,
+			"summary":      result.Summary,
 		}).Info("synthesis complete for stage")
 	}
 
@@ -113,9 +115,11 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 }
 
 type applyResult struct {
-	newCount     int
-	updatedCount int
-	retiredCount int
+	newCount         int
+	updatedCount     int
+	retiredCount     int
+	mergedCount      int
+	possibleDupCount int
 }
 
 func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult) applyResult {
@@ -124,6 +128,9 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 	// batchAccepted tracks rules written in this call so intra-batch semantic
 	// duplicates are caught before the loader is reloaded.
 	var batchAccepted []*rules.Rule
+
+	// Collect existing rules for dedup comparison.
+	existingRules := p.ruleLoader.All()
 
 	// Write new rules (validate first)
 	for _, nr := range result.NewRules {
@@ -143,7 +150,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID}).Warn("skipping rule with unsafe ID")
 			continue
 		}
-		// Don't overwrite existing rules (exact ID match)
+		// Don't overwrite existing rules by ID.
 		if p.ruleLoader.ByID(nr.ID) != nil {
 			continue
 		}
@@ -160,6 +167,43 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		// would both pass HasSemanticMatch and both be written.
 		if match, matchID := p.ruleLoader.HasSemanticMatchAmong(nr.ID, nr.Tags, stage, batchAccepted); match {
 			log.WithFields(Fields{"rule": nr.ID, "batchMatch": matchID}).Info("skipping semantically duplicate rule (batch-internal)")
+			continue
+		}
+
+		// Dedup check: compare candidate text against all existing rules.
+		candidateText := nr.Condition + " " + nr.Body
+		dedup := rules.CheckDedup(candidateText, existingRules)
+		switch dedup.Action {
+		case rules.DedupActionMerge:
+			// Nearly identical to an existing rule — increment its evidence count.
+			matched := p.ruleLoader.ByID(dedup.MatchedRuleID)
+			matchedStage := ""
+			if matched != nil {
+				matchedStage = matched.Stage
+			}
+			if err := rules.IncrementEvidenceCount(rulesDir, dedup.MatchedRuleID, matchedStage); err != nil {
+				log.WithFields(Fields{
+					"candidate": nr.ID,
+					"matched":   dedup.MatchedRuleID,
+					"error":     err,
+				}).Warn("dedup merge: failed to increment evidence count")
+			} else {
+				log.WithFields(Fields{
+					"candidate": nr.ID,
+					"matched":   dedup.MatchedRuleID,
+					"score":     fmt.Sprintf("%.3f", dedup.Score),
+				}).Info("dedup: candidate merged into existing rule")
+				applied.mergedCount++
+			}
+			continue
+		case rules.DedupActionPossibleDuplicate:
+			// Similar but not identical — skip and flag for human review.
+			log.WithFields(Fields{
+				"candidate": nr.ID,
+				"matched":   dedup.MatchedRuleID,
+				"score":     fmt.Sprintf("%.3f", dedup.Score),
+			}).Warn("dedup: candidate is a possible duplicate, skipping (human review recommended)")
+			applied.possibleDupCount++
 			continue
 		}
 
