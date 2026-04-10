@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
+	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -223,6 +225,47 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 	} else {
 		log.WithFields(Fields{"pr": pr.PRURL, "outcome": label}).Info("labeled pipeline events")
 	}
+
+	// Stamp last_validated_at on synthesized rules when a PR merges.
+	// Merged PRs confirm that the rules guiding those stages produced good output.
+	if label == OutcomeMerged {
+		p.stampRuleValidation(pr)
+	}
+}
+
+// stampRuleValidation sets last_validated_at on all synthesized rules for the pipeline
+// stages that were active during this PR's lifecycle. Called only on merged outcomes.
+func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
+	events, err := p.db.GetEventsByIssue(pr.IssueID)
+	if err != nil {
+		log.WithError(err).Warn("failed to fetch events for rule validation stamp")
+		return
+	}
+
+	today := time.Now().Format("2006-01-02")
+	rulesDir := p.ruleLoader.RulesDir()
+	seenStages := make(map[string]bool)
+
+	for _, e := range events {
+		if seenStages[e.Stage] {
+			continue
+		}
+		seenStages[e.Stage] = true
+
+		for _, r := range p.ruleLoader.All() {
+			if r.Stage != e.Stage || r.Source != "synthesized" {
+				continue
+			}
+			if err := rules.UpdateRuleLastValidatedAt(rulesDir, r.ID, r.Stage, today); err != nil {
+				log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to stamp rule last_validated_at")
+			}
+		}
+	}
+
+	log.WithFields(Fields{
+		"pr":     pr.PRURL,
+		"stages": len(seenStages),
+	}).Info("stamped last_validated_at on synthesized rules for merged PR")
 }
 
 // isNonActionable returns true for reviews that are just approvals/LGTM with no actionable content.

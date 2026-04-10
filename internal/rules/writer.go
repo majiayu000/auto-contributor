@@ -51,6 +51,32 @@ func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfi
 	return os.WriteFile(path, updated, 0644)
 }
 
+// UpdateRuleLastValidatedAt updates the last_validated_at field of an existing rule file.
+func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, validatedAt string) error {
+	path := findRuleFile(rulesDir, ruleID, stage)
+	if path == "" {
+		return fmt.Errorf("rule file not found: %s", ruleID)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var rule Rule
+	if err := yaml.Unmarshal(data, &rule); err != nil {
+		return err
+	}
+
+	rule.LastValidatedAt = validatedAt
+	updated, err := yaml.Marshal(&rule)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, updated, 0644)
+}
+
 // DeleteRule removes a rule file from disk.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
 	path := findRuleFile(rulesDir, ruleID, stage)

@@ -87,14 +87,14 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 	}
 
 	tmplCtx := map[string]any{
-		"Stage":          stage,
-		"EventsText":     eventsText,
-		"ExistingRules":  existingRules,
-		"TotalEvents":    len(events),
-		"MergedCount":    merged,
-		"RejectedCount":  rejected,
+		"Stage":           stage,
+		"EventsText":      eventsText,
+		"ExistingRules":   existingRules,
+		"TotalEvents":     len(events),
+		"MergedCount":     merged,
+		"RejectedCount":   rejected,
 		"AutoClosedCount": autoClosed,
-		"SuccessRate":    fmt.Sprintf("%.1f", successRate),
+		"SuccessRate":     fmt.Sprintf("%.1f", successRate),
 	}
 
 	var result SynthesizerResult
@@ -132,16 +132,17 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		}
 
 		rule := &rules.Rule{
-			ID:            nr.ID,
-			Stage:         nr.Stage,
-			Severity:      nr.Severity,
-			Confidence:    nr.Confidence,
-			Source:        "synthesized",
-			CreatedAt:     time.Now().Format("2006-01-02"),
-			EvidenceCount: nr.EvidenceCount,
-			Tags:          nr.Tags,
-			Condition:     nr.Condition,
-			Body:          nr.Body,
+			ID:              nr.ID,
+			Stage:           nr.Stage,
+			Severity:        nr.Severity,
+			Confidence:      nr.Confidence,
+			Source:          "synthesized",
+			CreatedAt:       time.Now().Format("2006-01-02"),
+			LastValidatedAt: time.Now().Format("2006-01-02"),
+			EvidenceCount:   nr.EvidenceCount,
+			Tags:            nr.Tags,
+			Condition:       nr.Condition,
+			Body:            nr.Body,
 		}
 
 		if err := rules.WriteRule(rulesDir, rule); err != nil {
@@ -164,6 +165,10 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if err := rules.UpdateRuleConfidence(rulesDir, ur.ID, existing.Stage, ur.NewConfidence); err != nil {
 			log.WithFields(Fields{"rule": ur.ID, "error": err}).Warn("failed to update rule confidence")
 			continue
+		}
+		today := time.Now().Format("2006-01-02")
+		if err := rules.UpdateRuleLastValidatedAt(rulesDir, ur.ID, existing.Stage, today); err != nil {
+			log.WithFields(Fields{"rule": ur.ID, "error": err}).Warn("failed to update rule last_validated_at")
 		}
 		applied.updatedCount++
 	}
