@@ -35,6 +35,7 @@ type Config struct {
 
 	// Pipeline V2 settings
 	MaxReviewRounds        int    `mapstructure:"max_review_rounds"`
+	MaxCriticRounds        int    `mapstructure:"max_critic_rounds"`        // 0 = skip critic gate
 	MaxPRsPerRepo          int    `mapstructure:"max_prs_per_repo"`         // max open PRs per repo before throttling
 	MaxConcurrentPipelines int    `mapstructure:"max_concurrent_pipelines"` // number of parallel issue workers
 	PromptsDir             string `mapstructure:"prompts_dir"`
@@ -78,6 +79,7 @@ func Default() *Config {
 		MinRepoStars:           1000,
 		MaxIssueAgeDays:        30,
 		MaxReviewRounds:        3,
+		MaxCriticRounds:        2,
 		MaxPRsPerRepo:          1,
 		MaxConcurrentPipelines: 5,
 		PromptsDir:             filepath.Join(dataDir, "prompts"),

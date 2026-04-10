@@ -75,6 +75,14 @@ func (s *Store) Render(name string, ctx map[string]any) (string, error) {
 	return buf.String(), nil
 }
 
+// Has reports whether the named template has been loaded.
+func (s *Store) Has(name string) bool {
+	s.mu.RLock()
+	_, ok := s.templates[name]
+	s.mu.RUnlock()
+	return ok
+}
+
 // Names returns a sorted list of loaded template names.
 func (s *Store) Names() []string {
 	s.mu.RLock()

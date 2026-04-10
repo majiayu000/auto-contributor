@@ -23,13 +23,14 @@ import (
 // the prompt templates (prompts/*.md). This design follows the Symphony
 // pattern: orchestrator schedules, agents handle business logic.
 type Pipeline struct {
-	cfg        *config.Config
-	db         *db.DB
-	gh         *ghclient.Client
-	prompts    *prompt.Store
-	runner     *AgentRunner
-	ruleLoader *rules.RuleLoader
-	maxReview  int
+	cfg             *config.Config
+	db              *db.DB
+	gh              *ghclient.Client
+	prompts         *prompt.Store
+	runner          *AgentRunner
+	ruleLoader      *rules.RuleLoader
+	maxReview       int
+	maxCriticRounds int
 }
 
 // New creates a Pipeline. promptsDir is the path to the prompts/ directory.
@@ -56,6 +57,11 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		maxReview = 3
 	}
 
+	maxCriticRounds := cfg.MaxCriticRounds
+	if maxCriticRounds < 0 {
+		maxCriticRounds = 2
+	}
+
 	// Load self-learning rules
 	rulesDir := cfg.RulesDir
 	if rulesDir == "" {
@@ -69,13 +75,14 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 	}
 
 	return &Pipeline{
-		cfg:        cfg,
-		db:         database,
-		gh:         gh,
-		prompts:    ps,
-		runner:     NewAgentRunner(ps, rt, timeout),
-		ruleLoader: rl,
-		maxReview:  maxReview,
+		cfg:             cfg,
+		db:              database,
+		gh:              gh,
+		prompts:         ps,
+		runner:          NewAgentRunner(ps, rt, timeout),
+		ruleLoader:      rl,
+		maxReview:       maxReview,
+		maxCriticRounds: maxCriticRounds,
 	}, nil
 }
 
@@ -170,11 +177,24 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 		return nil
 	}
 
+	// Fail fast: if critic gate is enabled but template is absent, reject before
+	// spending tokens on engineer/reviewer work (stale prompt-bundle detection).
+	if p.maxCriticRounds > 0 && !p.prompts.Has("critic") {
+		err := fmt.Errorf("critic gate is enabled (max_critic_rounds=%d) but critic prompt template is missing; refusing to bypass safety gate", p.maxCriticRounds)
+		p.markFailed(issue, "critic_template_missing", err.Error())
+		return err
+	}
+
 	// Stage 3+4: Engineer ⇄ Reviewer loop
 	reviewRounds, reviewSummary, loopErr := p.engineerReviewLoopWithStats(ctx, issue, workspace, analyst)
 	if loopErr != nil {
 		p.saveTrajectory(issue, scout, analyst, reviewRounds, reviewSummary, 0)
 		return loopErr
+	}
+
+	// Stage 4.5: Critic gate (external maintainer perspective)
+	if err := p.criticLoop(ctx, issue, workspace, analyst); err != nil {
+		return err
 	}
 
 	// Stage 5: Submitter
