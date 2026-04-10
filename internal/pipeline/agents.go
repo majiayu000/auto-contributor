@@ -167,6 +167,109 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 	return &result, nil
 }
 
+// --- Critic ---
+
+func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult, round int) (*CriticResult, error) {
+	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
+
+	tmplCtx := map[string]any{
+		"Repo":        issue.Repo,
+		"IssueNumber": issue.IssueNumber,
+		"IssueTitle":  issue.Title,
+		"IssueBody":   issue.Body,
+		"AnalystPlan": string(planJSON),
+		"BaseBranch":  analyst.BaseBranch,
+		"CICommands":  analyst.CICommands,
+		"CriticRound": round,
+		"MaxRounds":   p.maxCriticRounds,
+		"Rules":       p.ruleLoader.FormatForPrompt("critic"),
+	}
+
+	start := time.Now()
+	var result CriticResult
+	if _, err := p.runner.RunJSON(ctx, "critic", workspace, tmplCtx, &result); err != nil {
+		p.recordEvent(issue, nil, "critic", round, start, "", false, "", err.Error())
+		return nil, err
+	}
+
+	summary, _ := json.Marshal(map[string]any{
+		"verdict":  result.Verdict,
+		"severity": result.Severity,
+		"findings": len(result.Findings),
+	})
+	p.recordEvent(issue, nil, "critic", round, start, result.Verdict, result.Verdict == "approve", string(summary), "")
+	return &result, nil
+}
+
+// criticLoop runs the critic gate between engineerReviewLoop and runSubmitter.
+// It simulates an external maintainer perspective. A maxCriticRounds of 0 skips
+// the critic entirely.
+func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) error {
+	for round := 1; round <= p.maxCriticRounds; round++ {
+		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
+			log.WithError(err).Warn("update status to reviewing (critic)")
+		}
+
+		criticResult, err := p.runCritic(ctx, issue, workspace, analyst, round)
+		if err != nil {
+			p.markFailed(issue, "critic_failed", err.Error())
+			return err
+		}
+
+		log.WithFields(Fields{
+			"repo":     issue.Repo,
+			"issue":    issue.IssueNumber,
+			"round":    round,
+			"verdict":  criticResult.Verdict,
+			"severity": criticResult.Severity,
+			"summary":  criticResult.Summary,
+		}).Info("critic evaluation completed")
+
+		if criticResult.Verdict == "approve" {
+			return nil
+		}
+
+		// Non-severe rejection: abandon immediately, no rework
+		if criticResult.Severity != "severe" {
+			p.markAbandoned(issue, fmt.Sprintf("critic rejected (%s): %s", criticResult.Severity, criticResult.Summary))
+			return fmt.Errorf("critic rejected %s#%d: severity=%s", issue.Repo, issue.IssueNumber, criticResult.Severity)
+		}
+
+		// Severe rejection: single Engineer rework pass (no Reviewer re-run)
+		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusEngineering, ""); err != nil {
+			log.WithError(err).Warn("update status to engineering (critic rework)")
+		}
+
+		criticRework := &CodeReviewResult{
+			ReworkInstructions: criticResult.ReworkInstructions,
+		}
+		engCtx := p.buildEngineerCtx(issue, analyst, criticRework, round)
+		engStart := time.Now()
+		raw, err := p.runner.Run(ctx, "engineer", workspace, engCtx)
+		if err != nil {
+			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error())
+			p.markFailed(issue, "engineer_failed_critic_rework", err.Error())
+			return err
+		}
+
+		fixComplete := containsMarker(raw, "FIX_COMPLETE")
+		p.recordEvent(issue, nil, "engineer", round, engStart, fmt.Sprintf("fix_complete=%v critic_rework=true", fixComplete), fixComplete, "", "")
+		if !fixComplete {
+			log.WithFields(Fields{
+				"repo":  issue.Repo,
+				"issue": issue.IssueNumber,
+				"round": round,
+			}).Warn("engineer rework (critic loop) did not produce FIX_COMPLETE, proceeding to next critic round")
+		}
+	}
+
+	if p.maxCriticRounds > 0 {
+		p.markAbandoned(issue, fmt.Sprintf("max critic rounds (%d) exceeded", p.maxCriticRounds))
+		return fmt.Errorf("max critic rounds exceeded for %s#%d", issue.Repo, issue.IssueNumber)
+	}
+	return nil
+}
+
 // --- Engineer ⇄ Reviewer loop ---
 
 func (p *Pipeline) engineerReviewLoop(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) error {

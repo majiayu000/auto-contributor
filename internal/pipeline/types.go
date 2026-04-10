@@ -61,6 +61,23 @@ type ReviewIssue struct {
 	Suggestion  string `json:"suggestion"`
 }
 
+// CriticResult is the structured output from the critic agent.
+// The critic acts as an external maintainer gate before PR submission.
+type CriticResult struct {
+	Verdict            string          `json:"verdict"`  // approve or reject
+	Severity           string          `json:"severity"` // minor, moderate, severe (only on reject)
+	Findings           []CriticFinding `json:"findings"`
+	ReworkInstructions string          `json:"rework_instructions"` // actionable for Engineer on severe rejection
+	Summary            string          `json:"summary"`
+}
+
+// CriticFinding is a single concern raised by the critic agent.
+type CriticFinding struct {
+	Category    string `json:"category"`
+	Description string `json:"description"`
+	Suggestion  string `json:"suggestion"`
+}
+
 // SubmitResult is the structured output from the submitter agent.
 type SubmitResult struct {
 	Status   string `json:"status"` // submitted or aborted

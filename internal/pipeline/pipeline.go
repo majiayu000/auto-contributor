@@ -23,13 +23,14 @@ import (
 // the prompt templates (prompts/*.md). This design follows the Symphony
 // pattern: orchestrator schedules, agents handle business logic.
 type Pipeline struct {
-	cfg        *config.Config
-	db         *db.DB
-	gh         *ghclient.Client
-	prompts    *prompt.Store
-	runner     *AgentRunner
-	ruleLoader *rules.RuleLoader
-	maxReview  int
+	cfg             *config.Config
+	db              *db.DB
+	gh              *ghclient.Client
+	prompts         *prompt.Store
+	runner          *AgentRunner
+	ruleLoader      *rules.RuleLoader
+	maxReview       int
+	maxCriticRounds int
 }
 
 // New creates a Pipeline. promptsDir is the path to the prompts/ directory.
@@ -56,6 +57,11 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		maxReview = 3
 	}
 
+	maxCriticRounds := cfg.MaxCriticRounds
+	if maxCriticRounds < 0 {
+		maxCriticRounds = 2
+	}
+
 	// Load self-learning rules
 	rulesDir := cfg.RulesDir
 	if rulesDir == "" {
@@ -69,13 +75,14 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 	}
 
 	return &Pipeline{
-		cfg:        cfg,
-		db:         database,
-		gh:         gh,
-		prompts:    ps,
-		runner:     NewAgentRunner(ps, rt, timeout),
-		ruleLoader: rl,
-		maxReview:  maxReview,
+		cfg:             cfg,
+		db:              database,
+		gh:              gh,
+		prompts:         ps,
+		runner:          NewAgentRunner(ps, rt, timeout),
+		ruleLoader:      rl,
+		maxReview:       maxReview,
+		maxCriticRounds: maxCriticRounds,
 	}, nil
 }
 
@@ -163,6 +170,11 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 
 	// Stage 3+4: Engineer ⇄ Reviewer loop
 	if err := p.engineerReviewLoop(ctx, issue, workspace, analyst); err != nil {
+		return err
+	}
+
+	// Stage 4.5: Critic gate (external maintainer perspective)
+	if err := p.criticLoop(ctx, issue, workspace, analyst); err != nil {
 		return err
 	}
 
