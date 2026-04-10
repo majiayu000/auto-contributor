@@ -13,6 +13,10 @@ type Rule struct {
 	Tags            []string `yaml:"tags"`
 	Condition       string   `yaml:"condition"`
 	Body            string   `yaml:"body"`
+	// MemRL Q-value fields (see GitHub issue #15)
+	QValue         float64 `yaml:"q_value"`
+	RetrievalCount int     `yaml:"retrieval_count"`
+	SuccessCount   int     `yaml:"success_count"`
 }
 
 // SeverityRank returns a numeric rank for sorting (lower = more severe).

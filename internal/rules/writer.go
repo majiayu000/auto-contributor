@@ -11,12 +11,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// fileMu serializes all read-modify-write operations on rule YAML files.
-// Both the feedback goroutine (stampRuleValidation) and the synthesis goroutine
-// (applySynthesisResult / applyDecay) write rule files concurrently; without this
-// lock a read→modify→write in one goroutine can overwrite a concurrent write from
-// the other, silently dropping either the confidence or last_validated_at update.
-var fileMu sync.Mutex
+// writeMu serializes all rule YAML read-modify-write operations so that
+// concurrent goroutines (feedback scanner + synthesis) never race on the same file.
+var writeMu sync.Mutex
 
 // WriteRule writes a Rule to a YAML file in rules/{stage}/ directory.
 func WriteRule(rulesDir string, rule *Rule) error {
@@ -25,6 +22,8 @@ func WriteRule(rulesDir string, rule *Rule) error {
 	if rule.ID == "" || strings.ContainsAny(rule.ID, "/\\") || strings.Contains(rule.ID, "..") || filepath.Base(rule.ID) != rule.ID {
 		return fmt.Errorf("unsafe rule ID %q", rule.ID)
 	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	dir := filepath.Join(rulesDir, rule.Stage)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -37,15 +36,13 @@ func WriteRule(rulesDir string, rule *Rule) error {
 	}
 
 	path := filepath.Join(dir, rule.ID+".yaml")
-	fileMu.Lock()
-	defer fileMu.Unlock()
 	return os.WriteFile(path, data, 0644)
 }
 
 // UpdateRuleConfidence updates only the confidence field of an existing rule file.
 func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfidence float64) error {
-	fileMu.Lock()
-	defer fileMu.Unlock()
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	path := findRuleFile(rulesDir, ruleID, stage)
 	if path == "" {
@@ -73,8 +70,8 @@ func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfi
 
 // UpdateRuleLastValidatedAt updates the last_validated_at field of an existing rule file.
 func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, validatedAt string) error {
-	fileMu.Lock()
-	defer fileMu.Unlock()
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	path := findRuleFile(rulesDir, ruleID, stage)
 	if path == "" {
@@ -100,10 +97,42 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 	return os.WriteFile(path, updated, 0644)
 }
 
+// UpdateRuleQValue updates the q_value, retrieval_count, and success_count fields of an existing rule file.
+func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float64, retrievalCount int, successCount int) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	path := findRuleFile(rulesDir, ruleID, stage)
+	if path == "" {
+		return fmt.Errorf("rule file not found: %s", ruleID)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	var rule Rule
+	if err := yaml.Unmarshal(data, &rule); err != nil {
+		return err
+	}
+
+	rule.QValue = qValue
+	rule.RetrievalCount = retrievalCount
+	rule.SuccessCount = successCount
+	updated, err := yaml.Marshal(&rule)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, updated, 0644)
+}
+
 // DeleteRule removes a rule file from disk.
+// Holds writeMu to prevent races with UpdateRuleQValue and Reload.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
-	fileMu.Lock()
-	defer fileMu.Unlock()
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	path := findRuleFile(rulesDir, ruleID, stage)
 	if path == "" {
@@ -114,11 +143,11 @@ func DeleteRule(rulesDir string, ruleID string, stage string) error {
 
 // DecayRuleIfStale atomically reads last_validated_at from disk and, only if the
 // rule has not been validated within staleDays, multiplies confidence by decayFactor
-// (floored at minConf). The entire read-check-write runs under fileMu, which prevents
+// (floored at minConf). The entire read-check-write runs under writeMu, which prevents
 // a concurrent stampRuleValidation write from racing with the applyDecay decision.
 func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float64, staleDays int) error {
-	fileMu.Lock()
-	defer fileMu.Unlock()
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	path := findRuleFile(rulesDir, ruleID, stage)
 	if path == "" {
@@ -136,7 +165,7 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 	}
 
 	// Skip if validated within staleDays — reading from disk guarantees we see
-	// any last_validated_at that stampRuleValidation wrote before we acquired fileMu.
+	// any last_validated_at that stampRuleValidation wrote before we acquired writeMu.
 	if rule.LastValidatedAt != "" {
 		validated, err := time.Parse("2006-01-02", rule.LastValidatedAt)
 		if err == nil && time.Since(validated) < time.Duration(staleDays)*24*time.Hour {

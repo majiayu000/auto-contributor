@@ -339,5 +339,6 @@ type PipelineEvent struct {
 	Success         bool       `db:"success" json:"success"`
 	ErrorMessage    string     `db:"error_message" json:"error_message,omitempty"`
 	OutcomeLabel    string     `db:"outcome_label" json:"outcome_label,omitempty"`
+	ExperiencesUsed string     `db:"experiences_used" json:"experiences_used,omitempty"` // JSON array of rule IDs used in this stage
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 }

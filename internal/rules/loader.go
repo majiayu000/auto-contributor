@@ -39,7 +39,20 @@ func (rl *RuleLoader) RulesDir() string {
 }
 
 // Load reads all YAML files from the rules directory.
+// Call this at startup before any write goroutines are running.
 func (rl *RuleLoader) Load() error {
+	return rl.readFromDisk()
+}
+
+// Reload re-reads rules from disk. readFromDisk acquires writeMu internally
+// so it cannot read a file being written by a concurrent WriteRule/UpdateRuleQValue call.
+func (rl *RuleLoader) Reload() error {
+	return rl.readFromDisk()
+}
+
+// readFromDisk walks the rules directory and reloads the in-memory cache.
+// Callers are responsible for holding writeMu when concurrent writes may occur.
+func (rl *RuleLoader) readFromDisk() error {
 	if rl.rulesDir == "" {
 		return nil
 	}
@@ -50,12 +63,12 @@ func (rl *RuleLoader) Load() error {
 	}
 
 	var loaded []*Rule
-	// Hold fileMu for the entire walk so we cannot read a file that a concurrent
+	// Hold writeMu for the entire walk so we cannot read a file that a concurrent
 	// writer (UpdateRuleConfidence, UpdateRuleLastValidatedAt, WriteRule, DeleteRule)
 	// has only partially written.  Without this lock, os.ReadFile can observe a
 	// truncated or zero-byte file mid-os.WriteFile, producing a malformed YAML
 	// unmarshal that silently drops the rule from in-memory state.
-	fileMu.Lock()
+	writeMu.Lock()
 	err = filepath.Walk(rl.rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip unreadable files
@@ -82,7 +95,7 @@ func (rl *RuleLoader) Load() error {
 		loaded = append(loaded, &rule)
 		return nil
 	})
-	fileMu.Unlock()
+	writeMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -100,11 +113,6 @@ func (rl *RuleLoader) Load() error {
 	rl.mu.Unlock()
 
 	return nil
-}
-
-// Reload re-reads rules from disk.
-func (rl *RuleLoader) Reload() error {
-	return rl.Load()
 }
 
 // All returns all loaded rules.
@@ -131,6 +139,28 @@ func (rl *RuleLoader) ForStage(stage string) []*Rule {
 	return matched
 }
 
+// IDsForPrompt returns the participation keys of rules actually included in the
+// prompt for a given stage, honouring the same MaxPromptChars budget as
+// FormatForPrompt. Keys are returned as "stage/ruleID" so that Q-value updates
+// can resolve rules unambiguously even when IDs are not unique across stages.
+func (rl *RuleLoader) IDsForPrompt(stage string) []string {
+	matched := rl.ForStage(stage)
+
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
+	total := len(header)
+
+	ids := make([]string, 0, len(matched))
+	for _, r := range matched {
+		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
+		if total+len(entry) > MaxPromptChars {
+			break
+		}
+		ids = append(ids, r.Stage+"/"+r.ID)
+		total += len(entry)
+	}
+	return ids
+}
+
 // FormatForPrompt returns concatenated rule bodies as Markdown for prompt injection.
 func (rl *RuleLoader) FormatForPrompt(stage string) string {
 	matched := rl.ForStage(stage)
@@ -138,11 +168,14 @@ func (rl *RuleLoader) FormatForPrompt(stage string) string {
 		return ""
 	}
 
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
 	var sb strings.Builder
-	sb.WriteString("## Self-Learning Rules\n\n")
-	sb.WriteString("Follow these rules based on past experience:\n\n")
+	sb.WriteString(header)
 
-	total := 0
+	// Start total at len(header) so the budget matches IDsForPrompt exactly;
+	// without this, FormatForPrompt could include more entries than IDsForPrompt
+	// reports, causing rules to be injected but not credited in experiences_used.
+	total := len(header)
 	for _, r := range matched {
 		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
 		if total+len(entry) > MaxPromptChars {
@@ -163,7 +196,8 @@ func (rl *RuleLoader) FormatForPrompt(stage string) string {
 func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
 	matched := rl.ForStage(stage)
 	injected := make(map[string]bool)
-	total := 0
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
+	total := len(header)
 	for _, r := range matched {
 		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
 		if total+len(entry) > MaxPromptChars {
@@ -175,7 +209,38 @@ func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
 	return injected
 }
 
-// ByID finds a rule by its ID.
+// PromptSnapshot returns both the rule IDs and formatted text for stage from a
+// single ForStage call, so IDsForPrompt and FormatForPrompt cannot diverge due
+// to a concurrent Reload between two separate calls.
+func (rl *RuleLoader) PromptSnapshot(stage string) (ids []string, formatted string) {
+	matched := rl.ForStage(stage)
+	if len(matched) == 0 {
+		return nil, ""
+	}
+
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
+	var sb strings.Builder
+	sb.WriteString(header)
+	total := len(header)
+
+	for _, r := range matched {
+		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
+		if total+len(entry) > MaxPromptChars {
+			break
+		}
+		ids = append(ids, r.Stage+"/"+r.ID)
+		sb.WriteString(entry)
+		total += len(entry)
+	}
+
+	if len(ids) > 0 {
+		formatted = sb.String()
+	}
+	return ids, formatted
+}
+
+// ByID finds a rule by its ID. When multiple rules share an ID across stages,
+// the first match is returned. Prefer ByStageAndID for unambiguous lookup.
 func (rl *RuleLoader) ByID(id string) *Rule {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
@@ -228,6 +293,20 @@ func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (
 		}
 	}
 	return false, ""
+}
+
+// ByStageAndID finds a rule by its stage and ID, avoiding false matches when
+// IDs are not unique across stages.
+func (rl *RuleLoader) ByStageAndID(stage, id string) *Rule {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	for _, r := range rl.rules {
+		if r.ID == id && r.Stage == stage {
+			return r
+		}
+	}
+	return nil
 }
 
 // HasSemanticMatchAmong checks whether any rule in the provided candidates slice is

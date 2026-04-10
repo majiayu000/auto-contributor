@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,8 +97,15 @@ func (p *Pipeline) saveTrajectory(issue *models.Issue, scout *ScoutResult, analy
 }
 
 // recordEvent records a pipeline event for learning. Non-fatal on error.
-func (p *Pipeline) recordEvent(issue *models.Issue, prID *int64, stage string, round int, startedAt time.Time, verdict string, success bool, outputSummary string, errMsg string) {
+// ruleIDs is the list of rule IDs that were injected into the agent prompt for this stage.
+func (p *Pipeline) recordEvent(issue *models.Issue, prID *int64, stage string, round int, startedAt time.Time, verdict string, success bool, outputSummary string, errMsg string, ruleIDs []string) {
 	now := time.Now()
+	var experiencesUsed string
+	if len(ruleIDs) > 0 {
+		if b, err := marshalRuleIDs(ruleIDs); err == nil {
+			experiencesUsed = b
+		}
+	}
 	event := &models.PipelineEvent{
 		IssueID:         issue.ID,
 		PRID:            prID,
@@ -112,10 +120,20 @@ func (p *Pipeline) recordEvent(issue *models.Issue, prID *int64, stage string, r
 		Verdict:         verdict,
 		Success:         success,
 		ErrorMessage:    truncate(errMsg, 500),
+		ExperiencesUsed: experiencesUsed,
 	}
 	if err := p.db.RecordEvent(event); err != nil {
 		log.WithFields(Fields{"error": err, "stage": stage}).Warn("failed to record pipeline event")
 	}
+}
+
+// marshalRuleIDs encodes a slice of rule IDs to a JSON string.
+func marshalRuleIDs(ids []string) (string, error) {
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // ProcessIssue runs the full pipeline for a single issue.
