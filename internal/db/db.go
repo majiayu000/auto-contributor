@@ -106,11 +106,14 @@ func (db *DB) Migrate() error {
 		return fmt.Errorf("failed to execute schema: %w", err)
 	}
 
-	// Run migrations (ignore errors for columns that already exist)
+	// Column-level migrations intentionally ignore errors (column may already exist).
 	db.runMigrations()
 	db.MigrateLessons()
 	db.MigrateEvents()
-	db.MigrateRepoProfiles()
+	// Table-level migration: propagate errors so startup fails fast on DDL failure.
+	if err := db.MigrateRepoProfiles(); err != nil {
+		return err
+	}
 
 	return nil
 }

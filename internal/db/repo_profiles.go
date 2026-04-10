@@ -9,10 +9,13 @@ import (
 )
 
 // MigrateRepoProfiles ensures the repo_profiles table exists for existing DBs.
-func (db *DB) MigrateRepoProfiles() {
+// Returns an error if the DDL fails (e.g. permissions or locked DB), so the
+// caller can abort startup rather than silently continuing without the table.
+func (db *DB) MigrateRepoProfiles() error {
 	// Table is created in the main schema; this handles pre-existing databases.
+	var err error
 	if db.IsPostgres() {
-		db.Exec(`CREATE TABLE IF NOT EXISTS repo_profiles (
+		_, err = db.Exec(`CREATE TABLE IF NOT EXISTS repo_profiles (
 			repo TEXT PRIMARY KEY,
 			total_prs_submitted INTEGER DEFAULT 0,
 			total_merged INTEGER DEFAULT 0,
@@ -30,7 +33,7 @@ func (db *DB) MigrateRepoProfiles() {
 			updated_at TIMESTAMP DEFAULT NOW()
 		)`)
 	} else {
-		db.Exec(`CREATE TABLE IF NOT EXISTS repo_profiles (
+		_, err = db.Exec(`CREATE TABLE IF NOT EXISTS repo_profiles (
 			repo TEXT PRIMARY KEY,
 			total_prs_submitted INTEGER DEFAULT 0,
 			total_merged INTEGER DEFAULT 0,
@@ -48,6 +51,10 @@ func (db *DB) MigrateRepoProfiles() {
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`)
 	}
+	if err != nil {
+		return fmt.Errorf("migrate repo_profiles: %w", err)
+	}
+	return nil
 }
 
 // GetRepoProfile returns the profile for a repo, or nil if not found.
