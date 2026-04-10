@@ -270,6 +270,19 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 			return nil
 		}
 
+		// Severe rejection: skip rework on the final allowed round — no subsequent
+		// critic pass will evaluate it and the loop immediately marks abandoned,
+		// so running the engineer here only wastes time and risks a misleading
+		// "engineer_failed_critic_rework" failure state.
+		if round >= p.maxCriticRounds {
+			log.WithFields(Fields{
+				"repo":  issue.Repo,
+				"issue": issue.IssueNumber,
+				"round": round,
+			}).Info("severe critic rejection on final round; skipping rework (max rounds reached)")
+			break
+		}
+
 		// Severe rejection: single Engineer rework pass (no Reviewer re-run)
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusEngineering, ""); err != nil {
 			log.WithError(err).Warn("update status to engineering (critic rework)")
