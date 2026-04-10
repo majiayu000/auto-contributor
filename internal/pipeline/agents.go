@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
@@ -192,6 +193,10 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 		return nil, err
 	}
 
+	// Normalise so comparisons are case- and whitespace-insensitive.
+	result.Verdict = strings.TrimSpace(strings.ToLower(result.Verdict))
+	result.Severity = strings.TrimSpace(strings.ToLower(result.Severity))
+
 	summary, _ := json.Marshal(map[string]any{
 		"verdict":  result.Verdict,
 		"severity": result.Severity,
@@ -205,6 +210,11 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 // It simulates an external maintainer perspective. A maxCriticRounds of 0 skips
 // the critic entirely.
 func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) error {
+	// Gracefully skip if critic prompt is absent (e.g. stale bundle without critic.md).
+	if p.maxCriticRounds > 0 && !p.prompts.Has("critic") {
+		log.Warn("critic prompt template not found; skipping critic gate")
+		return nil
+	}
 	for round := 1; round <= p.maxCriticRounds; round++ {
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
 			log.WithError(err).Warn("update status to reviewing (critic)")
@@ -229,10 +239,17 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 			return nil
 		}
 
-		// Non-severe rejection: abandon immediately, no rework
+		// Non-severe (minor/moderate) rejection: non-blocking per critic.md definition.
+		// These findings are informational; proceed to the submitter.
 		if criticResult.Severity != "severe" {
-			p.markAbandoned(issue, fmt.Sprintf("critic rejected (%s): %s", criticResult.Severity, criticResult.Summary))
-			return fmt.Errorf("critic rejected %s#%d: severity=%s", issue.Repo, issue.IssueNumber, criticResult.Severity)
+			log.WithFields(Fields{
+				"repo":     issue.Repo,
+				"issue":    issue.IssueNumber,
+				"round":    round,
+				"severity": criticResult.Severity,
+				"summary":  criticResult.Summary,
+			}).Info("critic raised non-blocking findings, proceeding to submit")
+			return nil
 		}
 
 		// Severe rejection: single Engineer rework pass (no Reviewer re-run)
