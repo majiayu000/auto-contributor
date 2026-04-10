@@ -15,12 +15,30 @@ import (
 // concurrent goroutines (feedback scanner + synthesis) never race on the same file.
 var writeMu sync.Mutex
 
+// allowedStages is the set of valid stage directory names for rule files.
+// WriteRule rejects any Stage value not in this set to prevent path traversal
+// via LLM-generated Stage fields (SEC-07).
+var allowedStages = map[string]bool{
+	"scout":     true,
+	"analyst":   true,
+	"engineer":  true,
+	"reviewer":  true,
+	"submitter": true,
+	"responder": true,
+	"global":    true,
+}
+
 // WriteRule writes a Rule to a YAML file in rules/{stage}/ directory.
 func WriteRule(rulesDir string, rule *Rule) error {
 	// Defense-in-depth: reject IDs that could escape the rules/{stage} directory
 	// via path traversal (e.g. "../../../etc/passwd" or absolute paths).
 	if rule.ID == "" || strings.ContainsAny(rule.ID, "/\\") || strings.Contains(rule.ID, "..") || filepath.Base(rule.ID) != rule.ID {
 		return fmt.Errorf("unsafe rule ID %q", rule.ID)
+	}
+	// Validate Stage against the known-good allowlist to prevent LLM-generated
+	// values like "../../../etc/cron.d" from escaping the rules directory (SEC-07).
+	if !allowedStages[rule.Stage] {
+		return fmt.Errorf("unsafe rule stage %q", rule.Stage)
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -202,8 +220,8 @@ func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error 
 		return fmt.Errorf("unsafe rule ID %q", ruleID)
 	}
 
-	fileMu.Lock()
-	defer fileMu.Unlock()
+	writeMu.Lock()
+	defer writeMu.Unlock()
 
 	path := findRuleFile(rulesDir, ruleID, stage)
 	if path == "" {
