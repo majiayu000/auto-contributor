@@ -158,7 +158,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 
 		rule := &rules.Rule{
 			ID:              nr.ID,
-			Stage:           nr.Stage,
+			Stage:           stage, // use validated stage arg, not model-emitted nr.Stage
 			Severity:        nr.Severity,
 			Confidence:      normalizeNewRuleConfidence(nr.Confidence),
 			Source:          "synthesized",
