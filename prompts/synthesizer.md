@@ -44,6 +44,21 @@ For each existing rule with `source: synthesized`:
 
 Do NOT modify rules with `source: manual`.
 
+### 4. Deduplication Guard
+
+BEFORE generating any new rule, check the existing rules list above:
+
+- If the same concept is already expressed by an existing rule (even with different
+  wording), do NOT create a new rule. Update its confidence instead.
+- If multiple existing rules express the same concept, retire all but the one with
+  the highest evidence count, then update the survivor's confidence.
+- A concept is "the same" if the core behavioural instruction is equivalent —
+  different phrasing, ID, or tags do not make it a distinct rule.
+
+**Confidence for new rules**: always use a clean round value such as 0.5, 0.6,
+or 0.7. Do NOT copy or derive confidence from existing rules; stale decay
+artefacts like `0.5019165` must not appear in new rules.
+
 ## Output Format
 
 Respond with JSON only:
@@ -54,7 +69,7 @@ Respond with JSON only:
       "id": "kebab-case-id",
       "stage": "{{ .Stage }}",
       "severity": "high|medium|low",
-      "confidence": 0.0,
+      "confidence": 0.5,
       "evidence_count": 0,
       "tags": [],
       "condition": "when this rule applies",

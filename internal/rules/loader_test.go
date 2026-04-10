@@ -115,3 +115,95 @@ func TestConfidenceFilter(t *testing.T) {
 		}
 	}
 }
+
+func TestHasSimilarInStage_DetectsDuplicate(t *testing.T) {
+	dir := t.TempDir()
+
+	existing := &Rule{
+		ID:         "reviewer-approval-not-predictive",
+		Stage:      "reviewer",
+		Severity:   "medium",
+		Confidence: 0.7,
+		Source:     "synthesized",
+		CreatedAt:  "2026-01-01",
+		// Keywords: reviewer, approval, predict, whether, merged, treat, merge, signal
+		Body: "Reviewer approval does not predict whether the PR will be merged. Do not treat approval as a merge signal.",
+	}
+	if err := WriteRule(dir, existing); err != nil {
+		t.Fatalf("WriteRule: %v", err)
+	}
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Near-duplicate: shares reviewer, approval, predict, whether, merged, merge
+	// Jaccard ≈ 6/10 = 0.6 — above the 0.4 detection threshold.
+	dupBody := "Reviewer approval does not predict whether a PR gets merged. Approval is not a merge predictor."
+	got, ok := rl.HasSimilarInStage("reviewer", dupBody)
+	if !ok {
+		t.Fatal("expected HasSimilarInStage to return true for a semantic duplicate")
+	}
+	if got.ID != existing.ID {
+		t.Errorf("expected similar rule ID %q, got %q", existing.ID, got.ID)
+	}
+}
+
+func TestHasSimilarInStage_AllowsDistinctRule(t *testing.T) {
+	dir := t.TempDir()
+
+	existing := &Rule{
+		ID:         "blacklist-unresponsive-repos",
+		Stage:      "scout",
+		Severity:   "high",
+		Confidence: 0.8,
+		Source:     "synthesized",
+		CreatedAt:  "2026-01-01",
+		Body:       "Skip repositories that have historically ignored contributor PRs for 14+ days.",
+	}
+	if err := WriteRule(dir, existing); err != nil {
+		t.Fatalf("WriteRule: %v", err)
+	}
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Completely different concept — should NOT be flagged as duplicate.
+	distinctBody := "Prefer issues labelled good-first-issue when the repository has many open pull requests."
+	_, ok := rl.HasSimilarInStage("scout", distinctBody)
+	if ok {
+		t.Error("expected HasSimilarInStage to return false for a distinct rule")
+	}
+}
+
+func TestHasSimilarInStage_IgnoresDifferentStage(t *testing.T) {
+	dir := t.TempDir()
+
+	// Rule in engineer stage
+	existing := &Rule{
+		ID:         "minimal-diff-only",
+		Stage:      "engineer",
+		Severity:   "medium",
+		Confidence: 0.7,
+		Source:     "synthesized",
+		CreatedAt:  "2026-01-01",
+		Body:       "Keep diffs minimal. Only change files directly required to fix the issue.",
+	}
+	if err := WriteRule(dir, existing); err != nil {
+		t.Fatalf("WriteRule: %v", err)
+	}
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Same body but queried for "reviewer" stage — should not match engineer rule.
+	_, ok := rl.HasSimilarInStage("reviewer", existing.Body)
+	if ok {
+		t.Error("HasSimilarInStage should not match rules from a different stage")
+	}
+}

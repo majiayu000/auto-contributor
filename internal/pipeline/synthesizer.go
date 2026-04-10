@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -87,14 +88,14 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 	}
 
 	tmplCtx := map[string]any{
-		"Stage":          stage,
-		"EventsText":     eventsText,
-		"ExistingRules":  existingRules,
-		"TotalEvents":    len(events),
-		"MergedCount":    merged,
-		"RejectedCount":  rejected,
+		"Stage":           stage,
+		"EventsText":      eventsText,
+		"ExistingRules":   existingRules,
+		"TotalEvents":     len(events),
+		"MergedCount":     merged,
+		"RejectedCount":   rejected,
 		"AutoClosedCount": autoClosed,
-		"SuccessRate":    fmt.Sprintf("%.1f", successRate),
+		"SuccessRate":     fmt.Sprintf("%.1f", successRate),
 	}
 
 	var result SynthesizerResult
@@ -126,16 +127,31 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if nr.ID == "" || nr.Body == "" {
 			continue
 		}
-		// Don't overwrite existing rules
+		// Don't overwrite existing rules with the same ID.
 		if p.ruleLoader.ByID(nr.ID) != nil {
 			continue
+		}
+		// Skip semantically duplicate rules — same concept already covered.
+		if similar, ok := p.ruleLoader.HasSimilarInStage(nr.Stage, nr.Body); ok {
+			log.WithFields(Fields{"new": nr.ID, "existing": similar.ID}).Debug("skipping semantically duplicate rule")
+			continue
+		}
+
+		// Normalize confidence to one decimal place so new rules never inherit
+		// decayed fractional values (e.g. 0.5019165) from existing rules.
+		conf := math.Round(nr.Confidence*10) / 10
+		if conf < 0.3 {
+			conf = 0.5
+		}
+		if conf > 0.9 {
+			conf = 0.9
 		}
 
 		rule := &rules.Rule{
 			ID:            nr.ID,
 			Stage:         nr.Stage,
 			Severity:      nr.Severity,
-			Confidence:    nr.Confidence,
+			Confidence:    conf,
 			Source:        "synthesized",
 			CreatedAt:     time.Now().Format("2006-01-02"),
 			EvidenceCount: nr.EvidenceCount,

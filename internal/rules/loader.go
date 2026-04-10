@@ -152,3 +152,77 @@ func (rl *RuleLoader) ByID(id string) *Rule {
 	}
 	return nil
 }
+
+// HasSimilarInStage reports whether any existing rule for the given stage has a
+// body semantically similar to the candidate body (Jaccard similarity ≥ 0.4).
+// Returns the most-similar rule and true when a duplicate is detected.
+func (rl *RuleLoader) HasSimilarInStage(stage, body string) (*Rule, bool) {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	newKW := extractKeywords(body)
+	if len(newKW) == 0 {
+		return nil, false
+	}
+
+	var best *Rule
+	bestScore := 0.0
+	for _, r := range rl.rules {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		score := jaccardSimilarity(newKW, extractKeywords(r.Body))
+		if score > bestScore {
+			bestScore = score
+			best = r
+		}
+	}
+	if bestScore >= 0.4 {
+		return best, true
+	}
+	return nil, false
+}
+
+// extractKeywords tokenizes text into lowercase significant words,
+// filtering out short words and common English stopwords.
+func extractKeywords(text string) map[string]struct{} {
+	stopwords := map[string]bool{
+		"the": true, "a": true, "an": true, "is": true, "are": true,
+		"was": true, "were": true, "be": true, "been": true, "this": true,
+		"that": true, "with": true, "for": true, "not": true, "and": true,
+		"or": true, "if": true, "in": true, "of": true, "to": true,
+		"it": true, "its": true, "from": true, "by": true, "on": true,
+		"at": true, "as": true, "do": true, "does": true, "has": true,
+		"have": true, "had": true, "will": true, "would": true, "should": true,
+		"can": true, "when": true, "than": true, "no": true, "any": true,
+		"all": true, "per": true, "via": true, "use": true, "set": true,
+	}
+
+	keywords := make(map[string]struct{})
+	for _, word := range strings.Fields(strings.ToLower(text)) {
+		word = strings.Trim(word, ".,;:!?\"'()[]{}*#-_/\\")
+		if len(word) <= 3 || stopwords[word] {
+			continue
+		}
+		keywords[word] = struct{}{}
+	}
+	return keywords
+}
+
+// jaccardSimilarity returns |A ∩ B| / |A ∪ B| for two keyword sets.
+func jaccardSimilarity(a, b map[string]struct{}) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	intersection := 0
+	for k := range a {
+		if _, ok := b[k]; ok {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
