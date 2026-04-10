@@ -30,6 +30,8 @@ func WriteRule(rulesDir string, rule *Rule) error {
 	}
 
 	path := filepath.Join(dir, rule.ID+".yaml")
+	fileMu.Lock()
+	defer fileMu.Unlock()
 	return os.WriteFile(path, data, 0644)
 }
 

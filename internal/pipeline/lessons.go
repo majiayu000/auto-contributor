@@ -256,6 +256,13 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 			if r.Stage != e.Stage || r.Source != "synthesized" {
 				continue
 			}
+			// Only stamp rules that were actually eligible for injection during this PR.
+			// Rules below the injection threshold were never used, so a merged PR is not
+			// evidence that they produced good output; stamping them would prevent decay
+			// of low-quality rules and let them persist indefinitely.
+			if r.Confidence < rules.MinConfidenceForInjection {
+				continue
+			}
 			if err := rules.UpdateRuleLastValidatedAt(rulesDir, r.ID, r.Stage, today); err != nil {
 				log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to stamp rule last_validated_at")
 			}

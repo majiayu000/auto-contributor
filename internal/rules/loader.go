@@ -42,6 +42,12 @@ func (rl *RuleLoader) Load() error {
 	}
 
 	var loaded []*Rule
+	// Hold fileMu for the entire walk so we cannot read a file that a concurrent
+	// writer (UpdateRuleConfidence, UpdateRuleLastValidatedAt, WriteRule, DeleteRule)
+	// has only partially written.  Without this lock, os.ReadFile can observe a
+	// truncated or zero-byte file mid-os.WriteFile, producing a malformed YAML
+	// unmarshal that silently drops the rule from in-memory state.
+	fileMu.Lock()
 	err = filepath.Walk(rl.rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip unreadable files
@@ -68,6 +74,7 @@ func (rl *RuleLoader) Load() error {
 		loaded = append(loaded, &rule)
 		return nil
 	})
+	fileMu.Unlock()
 	if err != nil {
 		return err
 	}
