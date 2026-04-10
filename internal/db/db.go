@@ -152,6 +152,7 @@ func (db *DB) sqliteSchema() string {
 		first_review_at DATETIME,
 		last_feedback_check_at DATETIME,
 		feedback_round INTEGER DEFAULT 0,
+		outcome_recorded INTEGER DEFAULT 0,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (issue_id) REFERENCES issues(id)
@@ -328,6 +329,7 @@ func (db *DB) postgresSchema() string {
 		first_review_at TIMESTAMP,
 		last_feedback_check_at TIMESTAMP,
 		feedback_round INTEGER DEFAULT 0,
+		outcome_recorded INTEGER DEFAULT 0,
 		created_at TIMESTAMP DEFAULT NOW(),
 		updated_at TIMESTAMP DEFAULT NOW()
 	);
@@ -474,6 +476,7 @@ func (db *DB) runMigrations() {
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS first_review_at TIMESTAMP")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS last_feedback_check_at TIMESTAMP")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS feedback_round INTEGER DEFAULT 0")
+		db.Exec("ALTER TABLE pull_requests ADD COLUMN IF NOT EXISTS outcome_recorded INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN IF NOT EXISTS completion_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN IF NOT EXISTS total_tokens INTEGER DEFAULT 0")
@@ -488,6 +491,7 @@ func (db *DB) runMigrations() {
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN first_review_at DATETIME")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN last_feedback_check_at DATETIME")
 		db.Exec("ALTER TABLE pull_requests ADD COLUMN feedback_round INTEGER DEFAULT 0")
+		db.Exec("ALTER TABLE pull_requests ADD COLUMN outcome_recorded INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN prompt_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN completion_tokens INTEGER DEFAULT 0")
 		db.Exec("ALTER TABLE solve_attempts ADD COLUMN total_tokens INTEGER DEFAULT 0")

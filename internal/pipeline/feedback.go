@@ -36,7 +36,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
-		if err := p.db.RecordPROutcome(prRepo, true, time.Since(pr.CreatedAt).Hours()); err != nil {
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, time.Since(pr.CreatedAt).Hours()); err != nil {
 			log.WithError(err).Warn("failed to record merged PR outcome")
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
@@ -47,7 +47,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 			return fmt.Errorf("update PR status to closed: %w", err)
 		}
-		if err := p.db.RecordPROutcome(prRepo, false, time.Since(pr.CreatedAt).Hours()); err != nil {
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, time.Since(pr.CreatedAt).Hours()); err != nil {
 			log.WithError(err).Warn("failed to record closed PR outcome")
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)

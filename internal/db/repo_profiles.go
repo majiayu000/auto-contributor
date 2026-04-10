@@ -143,11 +143,31 @@ func (db *DB) UpsertRepoProfile(p *models.RepoProfile) error {
 // merged=true means the PR was merged; merged=false means it was closed/rejected.
 // responseHours is the time from PR creation to the terminal event (may be 0 if unknown).
 //
-// Counters are incremented atomically in a single SQL statement to prevent lost
-// updates when multiple workers process PRs concurrently.
-func (db *DB) RecordPROutcome(repo string, merged bool, responseHours float64) error {
-	now := time.Now()
+// Idempotency: the outcome_recorded flag on the pull_requests row is set atomically
+// before touching repo_profiles. If called twice for the same PR (parallel runners,
+// overlapping loop executions), the second call is a no-op. If the profile update
+// fails after the flag is set, the flag is reset so the next cycle can retry.
+func (db *DB) RecordPROutcome(prID int64, repo string, merged bool, responseHours float64) error {
+	// Atomically claim the right to record this outcome. If outcome_recorded is
+	// already 1 (set by a prior call), affected rows will be 0 → skip.
+	claimQ := fmt.Sprintf(
+		`UPDATE pull_requests SET outcome_recorded = 1 WHERE id = %s AND outcome_recorded = 0`,
+		db.placeholder(1),
+	)
+	res, err := db.Exec(claimQ, prID)
+	if err != nil {
+		return fmt.Errorf("claim outcome_recorded for pr %d: %w", prID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected for pr %d: %w", prID, err)
+	}
+	if affected == 0 {
+		// Already recorded by a previous run — idempotent skip.
+		return nil
+	}
 
+	now := time.Now()
 	var mergedInc, rejectedInc int
 	if merged {
 		mergedInc = 1
@@ -158,7 +178,7 @@ func (db *DB) RecordPROutcome(repo string, merged bool, responseHours float64) e
 
 	// Single atomic upsert: increment counters and recompute merge_rate in-database.
 	// Using excluded.* to reference the INSERT values inside ON CONFLICT DO UPDATE.
-	query := fmt.Sprintf(`
+	profileQ := fmt.Sprintf(`
 		INSERT INTO repo_profiles (
 			repo, total_prs_submitted, total_merged, total_rejected,
 			merge_rate, last_interaction, updated_at
@@ -178,7 +198,13 @@ func (db *DB) RecordPROutcome(repo string, merged bool, responseHours float64) e
 		db.placeholder(5), // now (last_interaction)
 		db.placeholder(6), // now (updated_at)
 	)
-	if _, err := db.Exec(query, repo, mergedInc, rejectedInc, mergeRate, now, now); err != nil {
+	if _, err := db.Exec(profileQ, repo, mergedInc, rejectedInc, mergeRate, now, now); err != nil {
+		// Reset the flag so the next feedback cycle can retry.
+		resetQ := fmt.Sprintf(
+			`UPDATE pull_requests SET outcome_recorded = 0 WHERE id = %s`,
+			db.placeholder(1),
+		)
+		db.Exec(resetQ, prID) //nolint:errcheck — best-effort reset; original error takes priority
 		return fmt.Errorf("record PR outcome: %w", err)
 	}
 
