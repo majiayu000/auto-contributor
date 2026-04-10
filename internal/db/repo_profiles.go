@@ -172,8 +172,8 @@ func (db *DB) SyncRepoProfileStats(repo string) error {
 	countQ := fmt.Sprintf(`
 		SELECT
 			COUNT(DISTINCT pr.id),
-			SUM(CASE WHEN pr.status = 'merged' THEN 1 ELSE 0 END),
-			SUM(CASE WHEN pr.status = 'closed' THEN 1 ELSE 0 END)
+			COALESCE(SUM(CASE WHEN pr.status = 'merged' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN pr.status = 'closed' THEN 1 ELSE 0 END), 0)
 		FROM pull_requests pr
 		JOIN issues i ON pr.issue_id = i.id
 		WHERE i.repo = %s

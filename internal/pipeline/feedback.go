@@ -65,6 +65,9 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			log.WithError(err).Warn("failed to auto-close stale PR")
 		} else {
 			p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			if err := p.db.SyncRepoProfileStats(prRepo); err != nil {
+				log.WithFields(Fields{"repo": prRepo, "error": err}).Warn("sync repo profile stats after stale auto-close")
+			}
 		}
 		return nil
 	}
@@ -126,6 +129,9 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 				log.WithError(err).Warn("failed to auto-close CI-failed PR")
 			} else {
 				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+				if err := p.db.SyncRepoProfileStats(prRepo); err != nil {
+					log.WithFields(Fields{"repo": prRepo, "error": err}).Warn("sync repo profile stats after CI auto-close")
+				}
 			}
 			return nil
 		}

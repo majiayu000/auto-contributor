@@ -34,7 +34,10 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check repo profile: skip blacklisted or cooling-down repos
-		if profile, err := database.GetRepoProfile(issue.Repo); err == nil && profile != nil {
+		if profile, err := database.GetRepoProfile(issue.Repo); err != nil {
+			fmt.Printf("Warning: failed to check repo profile for %s, skipping to be safe: %v\n", issue.Repo, err)
+			continue
+		} else if profile != nil {
 			if profile.Blacklisted {
 				fmt.Printf("Skipping profile-blacklisted repo: %s (%s)\n", issue.Repo, profile.BlacklistReason)
 				continue
@@ -154,7 +157,10 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 				}
 
 				// Check repo profile: skip blacklisted or cooling-down repos
-				if profile, err := database.GetRepoProfile(issue.Repo); err == nil && profile != nil {
+				if profile, err := database.GetRepoProfile(issue.Repo); err != nil {
+					fmt.Printf("   Warning: failed to check repo profile for %s, skipping to be safe: %v\n", issue.Repo, err)
+					continue
+				} else if profile != nil {
 					if profile.Blacklisted {
 						fmt.Printf("   Skipping profile-blacklisted repo: %s (%s)\n", issue.Repo, profile.BlacklistReason)
 						continue
