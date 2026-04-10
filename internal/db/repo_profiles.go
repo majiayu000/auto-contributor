@@ -142,36 +142,76 @@ func (db *DB) UpsertRepoProfile(p *models.RepoProfile) error {
 // RecordPROutcome updates the repo profile after a PR reaches a terminal state.
 // merged=true means the PR was merged; merged=false means it was closed/rejected.
 // responseHours is the time from PR creation to the terminal event (may be 0 if unknown).
+//
+// Counters are incremented atomically in a single SQL statement to prevent lost
+// updates when multiple workers process PRs concurrently.
 func (db *DB) RecordPROutcome(repo string, merged bool, responseHours float64) error {
-	profile, err := db.GetRepoProfile(repo)
-	if err != nil {
-		return fmt.Errorf("get repo profile: %w", err)
-	}
 	now := time.Now()
-	if profile == nil {
-		profile = &models.RepoProfile{Repo: repo}
+
+	var mergedInc, rejectedInc int
+	if merged {
+		mergedInc = 1
+	} else {
+		rejectedInc = 1
+	}
+	mergeRate := float64(mergedInc) // merge_rate for a brand-new row (1 PR total)
+
+	// Single atomic upsert: increment counters and recompute merge_rate in-database.
+	// Using excluded.* to reference the INSERT values inside ON CONFLICT DO UPDATE.
+	query := fmt.Sprintf(`
+		INSERT INTO repo_profiles (
+			repo, total_prs_submitted, total_merged, total_rejected,
+			merge_rate, last_interaction, updated_at
+		) VALUES (%s, 1, %s, %s, %s, %s, %s)
+		ON CONFLICT(repo) DO UPDATE SET
+			total_prs_submitted = repo_profiles.total_prs_submitted + 1,
+			total_merged        = repo_profiles.total_merged + excluded.total_merged,
+			total_rejected      = repo_profiles.total_rejected + excluded.total_rejected,
+			merge_rate          = CAST(repo_profiles.total_merged + excluded.total_merged AS REAL)
+			                      / (repo_profiles.total_prs_submitted + 1),
+			last_interaction    = excluded.last_interaction,
+			updated_at          = excluded.updated_at`,
+		db.placeholder(1), // repo
+		db.placeholder(2), // mergedInc
+		db.placeholder(3), // rejectedInc
+		db.placeholder(4), // mergeRate (initial row only)
+		db.placeholder(5), // now (last_interaction)
+		db.placeholder(6), // now (updated_at)
+	)
+	if _, err := db.Exec(query, repo, mergedInc, rejectedInc, mergeRate, now, now); err != nil {
+		return fmt.Errorf("record PR outcome: %w", err)
 	}
 
-	profile.TotalPRsSubmitted++
-	if merged {
-		profile.TotalMerged++
-	} else {
-		profile.TotalRejected++
-	}
-	if profile.TotalPRsSubmitted > 0 {
-		profile.MergeRate = float64(profile.TotalMerged) / float64(profile.TotalPRsSubmitted)
-	}
+	// Update running average response time separately (best-effort; not used in
+	// skip-repo decisions, so a non-atomic update here is acceptable).
 	if responseHours > 0 {
-		if profile.AvgResponseTimeHours == nil {
-			profile.AvgResponseTimeHours = &responseHours
-		} else {
-			avg := (*profile.AvgResponseTimeHours*float64(profile.TotalPRsSubmitted-1) + responseHours) / float64(profile.TotalPRsSubmitted)
-			profile.AvgResponseTimeHours = &avg
+		if err := db.updateAvgResponseTime(repo, responseHours); err != nil {
+			// Non-fatal: avg_response_time_hours is informational only.
+			fmt.Printf("warn: updateAvgResponseTime for %s: %v\n", repo, err)
 		}
 	}
-	profile.LastInteraction = &now
 
-	return db.UpsertRepoProfile(profile)
+	return nil
+}
+
+// updateAvgResponseTime updates the running average response time for a repo.
+// Called after the counter upsert, so total_prs_submitted already reflects the new PR.
+func (db *DB) updateAvgResponseTime(repo string, responseHours float64) error {
+	query := fmt.Sprintf(`
+		UPDATE repo_profiles
+		SET avg_response_time_hours = CASE
+			WHEN avg_response_time_hours IS NULL THEN %s
+			ELSE (avg_response_time_hours * (total_prs_submitted - 1) + %s) / total_prs_submitted
+		END,
+		updated_at = %s
+		WHERE repo = %s`,
+		db.placeholder(1),
+		db.placeholder(2),
+		db.placeholder(3),
+		db.placeholder(4),
+	)
+	_, err := db.Exec(query, responseHours, responseHours, time.Now(), repo)
+	return err
 }
 
 // ShouldSkipRepo returns true when a repo's profile indicates it is not worth

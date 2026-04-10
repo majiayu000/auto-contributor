@@ -34,7 +34,12 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check repo profile: skip low-probability repos
-		if skip, reason, _ := database.ShouldSkipRepo(issue.Repo, 0.1, 3); skip {
+		skip, reason, err := database.ShouldSkipRepo(issue.Repo, 0.1, 3)
+		if err != nil {
+			fmt.Printf("Warning: repo safety check failed for %s: %v — skipping\n", issue.Repo, err)
+			continue
+		}
+		if skip {
 			fmt.Printf("Skipping repo %s: %s\n", issue.Repo, reason)
 			continue
 		}

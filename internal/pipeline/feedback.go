@@ -33,15 +33,23 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	// Terminal state transitions from GitHub
 	switch prInfo.State {
 	case "MERGED":
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
-		p.db.RecordPROutcome(prRepo, true, time.Since(pr.CreatedAt).Hours())
+		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
+			return fmt.Errorf("update PR status to merged: %w", err)
+		}
+		if err := p.db.RecordPROutcome(prRepo, true, time.Since(pr.CreatedAt).Hours()); err != nil {
+			log.WithError(err).Warn("failed to record merged PR outcome")
+		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
-		p.db.RecordPROutcome(prRepo, false, time.Since(pr.CreatedAt).Hours())
+		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+			return fmt.Errorf("update PR status to closed: %w", err)
+		}
+		if err := p.db.RecordPROutcome(prRepo, false, time.Since(pr.CreatedAt).Hours()); err != nil {
+			log.WithError(err).Warn("failed to record closed PR outcome")
+		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
