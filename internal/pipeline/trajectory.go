@@ -12,8 +12,17 @@ import (
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
-// roleMarkerRE matches prompt-injection role markers case-insensitively.
-var roleMarkerRE = regexp.MustCompile(`(?i)(SYSTEM|ASSISTANT|USER|HUMAN|AI):|<\|im_start\|>|<\|im_end\|>`)
+// roleMarkerRE matches prompt-injection role markers case-insensitively, including:
+//   - role prefixes with optional surrounding whitespace before the colon (e.g. "SYSTEM :", "user:")
+//   - ChatML token-style delimiters (<|im_start|>, <|im_end|>)
+//   - XML-style role tags (e.g. <system>, </assistant>, <user role="...">)
+//   - common imperative jailbreak phrases ("ignore [all] previous instructions")
+var roleMarkerRE = regexp.MustCompile(
+	`(?i)(?:SYSTEM|ASSISTANT|USER|HUMAN|AI)\s*:` +
+		`|<\|im_start\|>|<\|im_end\|>` +
+		`|</?(?:system|assistant|user|human|ai)(?:\s[^>]*)?>` +
+		`|ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?`,
+)
 
 // sanitizeForPrompt strips characters and patterns from user-controlled text that could
 // be used to inject instructions into an LLM prompt. It collapses newlines to spaces

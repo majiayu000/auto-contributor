@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
@@ -63,10 +64,50 @@ func (db *DB) MigrateTrajectories() {
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
 		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
-		// Drop the old unique index if it exists (created by earlier schema versions).
+		// Drop the old named unique index if it exists (created by earlier schema versions).
 		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
 		// Add pr_number column to existing SQLite tables; error is silently ignored if already present.
 		db.Exec(`ALTER TABLE trajectories ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0`)
+		// Fix inline `issue_id UNIQUE` constraint from older schema versions.
+		// SQLite cannot remove a column-level constraint via ALTER TABLE; the table must be recreated.
+		// We first ensure pr_number exists (above), then check the stored DDL and recreate if needed.
+		var oldSQL string
+		if err := db.QueryRow(
+			`SELECT sql FROM sqlite_master WHERE type='table' AND name='trajectories'`,
+		).Scan(&oldSQL); err == nil {
+			if regexp.MustCompile(`(?i)\bissue_id\b[^,\n)]*\bUNIQUE\b`).MatchString(oldSQL) {
+				db.Exec(`CREATE TABLE IF NOT EXISTS trajectories_new (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					issue_id INTEGER NOT NULL,
+					pr_number INTEGER NOT NULL DEFAULT 0,
+					repo TEXT NOT NULL,
+					issue_number INTEGER NOT NULL,
+					issue_title TEXT NOT NULL,
+					issue_body TEXT,
+					keywords TEXT,
+					scout_verdict TEXT,
+					scout_approach TEXT,
+					analyst_plan TEXT,
+					review_rounds INTEGER DEFAULT 0,
+					review_summary TEXT,
+					outcome_label TEXT,
+					success INTEGER DEFAULT 0,
+					created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+					updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+				)`)
+				db.Exec(`INSERT INTO trajectories_new
+					SELECT id, issue_id, pr_number, repo, issue_number, issue_title, issue_body,
+						keywords, scout_verdict, scout_approach, analyst_plan, review_rounds,
+						review_summary, outcome_label, success, created_at, updated_at
+					FROM trajectories`)
+				db.Exec(`DROP TABLE trajectories`)
+				db.Exec(`ALTER TABLE trajectories_new RENAME TO trajectories`)
+				// Rebuild indexes after table recreation.
+				db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
+				db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
+				db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+			}
+		}
 	}
 }
 
