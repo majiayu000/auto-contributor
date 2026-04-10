@@ -283,20 +283,28 @@ func (rl *RuleLoader) IDSummaryForStage(stage string) string {
 		if r.Confidence < MinConfidenceForInjection {
 			continue
 		}
-		if sb.Len() >= maxIDSummaryBytes {
+		// Build the entry first so we can measure its exact byte size before
+		// committing to the output buffer. This prevents a single oversized
+		// rule from pushing sb past maxIDSummaryBytes after the pre-check.
+		var entry strings.Builder
+		entry.WriteString(r.ID)
+		if r.Condition != "" {
+			cond := r.Condition
+			// Truncate by rune count, not byte count, to avoid splitting a
+			// multi-byte UTF-8 codepoint mid-sequence (Issue 2).
+			if runes := []rune(cond); len(runes) > maxConditionLen {
+				cond = string(runes[:maxConditionLen]) + "…"
+			}
+			entry.WriteString(": ")
+			entry.WriteString(cond)
+		}
+		entry.WriteByte('\n')
+		entryStr := entry.String()
+		if sb.Len()+len(entryStr) > maxIDSummaryBytes {
 			omitted++
 			continue
 		}
-		sb.WriteString(r.ID)
-		if r.Condition != "" {
-			cond := r.Condition
-			if len(cond) > maxConditionLen {
-				cond = cond[:maxConditionLen] + "…"
-			}
-			sb.WriteString(": ")
-			sb.WriteString(cond)
-		}
-		sb.WriteByte('\n')
+		sb.WriteString(entryStr)
 	}
 	if omitted > 0 {
 		fmt.Fprintf(&sb, "(%d more rules omitted — see rules/ directory for full list)\n", omitted)
