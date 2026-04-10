@@ -167,6 +167,47 @@ func TestUpdateRuleConfidence_PreservesLastValidatedAt(t *testing.T) {
 	}
 }
 
+// TestIncrementEvidenceCount_StampsLastValidatedAt verifies that IncrementEvidenceCount
+// updates both evidence_count and last_validated_at atomically so that applyDecay
+// cannot decay a rule that just received fresh evidence in the same cycle.
+func TestIncrementEvidenceCount_StampsLastValidatedAt(t *testing.T) {
+	dir := t.TempDir()
+	staleDate := "2024-01-01"
+
+	rule := &Rule{
+		ID:              "test-inc-evidence-001",
+		Stage:           "engineer",
+		Severity:        "medium",
+		Confidence:      0.7,
+		Source:          "synthesized",
+		CreatedAt:       staleDate,
+		LastValidatedAt: staleDate,
+		EvidenceCount:   3,
+		Body:            "Always run tests before submitting.",
+	}
+	writeTestRule(t, dir, rule)
+
+	if err := IncrementEvidenceCount(dir, rule.ID, rule.Stage); err != nil {
+		t.Fatalf("IncrementEvidenceCount: %v", err)
+	}
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	loaded := rl.ByID(rule.ID)
+	if loaded == nil {
+		t.Fatal("rule not found after IncrementEvidenceCount")
+	}
+	if loaded.EvidenceCount != 4 {
+		t.Errorf("EvidenceCount = %d, want 4", loaded.EvidenceCount)
+	}
+	today := time.Now().Format("2006-01-02")
+	if loaded.LastValidatedAt != today {
+		t.Errorf("LastValidatedAt = %q, want %q (today); stale date not updated after merge", loaded.LastValidatedAt, today)
+	}
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {

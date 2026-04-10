@@ -260,3 +260,62 @@ func TestApplySynthesisResult_UpdatedRuleSetsLastValidatedAt(t *testing.T) {
 		t.Errorf("confidence = %.2f, want 0.65", got.Confidence)
 	}
 }
+
+// TestMergedRuleIsNotDecayedInSameCycle verifies that when a candidate is merged
+// into an existing stale rule, last_validated_at is stamped so that applyDecay
+// running in the same synthesis cycle does not decay the just-reinforced rule.
+func TestMergedRuleIsNotDecayedInSameCycle(t *testing.T) {
+	dir := t.TempDir()
+	staleDate := time.Now().AddDate(0, 0, -31).Format("2006-01-02")
+
+	// Existing synthesized rule with a stale last_validated_at.
+	existing := &rules.Rule{
+		ID:              "dedup-stale-merge-001",
+		Stage:           "engineer",
+		Severity:        "medium",
+		Confidence:      0.7,
+		Source:          "synthesized",
+		CreatedAt:       staleDate,
+		LastValidatedAt: staleDate,
+		EvidenceCount:   5,
+		Condition:       "go code submitted without formatting",
+		Body:            "run gofmt before submitting go code changes to keep diffs clean",
+	}
+	writeRule(t, dir, existing)
+
+	p := newTestPipeline(t, dir)
+
+	// Candidate is near-identical to existing — should trigger a dedup merge.
+	result := &SynthesizerResult{
+		NewRules: []SynthesizedRule{
+			{
+				ID:            "dedup-candidate-001",
+				Stage:         "engineer",
+				Severity:      "medium",
+				Confidence:    0.65,
+				EvidenceCount: 4,
+				Condition:     "go code submitted without formatting",
+				Body:          "run gofmt before submitting go code changes to keep diffs clean",
+			},
+		},
+	}
+
+	applied := p.applySynthesisResult("engineer", result)
+	if applied.mergedCount != 1 {
+		t.Fatalf("expected 1 merged rule, got mergedCount=%d newCount=%d", applied.mergedCount, applied.newCount)
+	}
+
+	// Reload and verify last_validated_at was stamped.
+	merged := loadRule(t, p.ruleLoader, existing.ID)
+	today := time.Now().Format("2006-01-02")
+	if merged.LastValidatedAt != today {
+		t.Errorf("after merge, last_validated_at = %q, want %q; rule will be falsely decayed", merged.LastValidatedAt, today)
+	}
+
+	// applyDecay must NOT decay the rule because last_validated_at is now today.
+	p.applyDecay()
+	afterDecay := loadRule(t, p.ruleLoader, existing.ID)
+	if afterDecay.Confidence != merged.Confidence {
+		t.Errorf("rule was decayed after merge in same cycle: confidence %.4f → %.4f", merged.Confidence, afterDecay.Confidence)
+	}
+}

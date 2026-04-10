@@ -35,16 +35,28 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 		}
 
 		applied := p.applySynthesisResult(stage, result)
+
+		// Reload after each stage so the next stage's dedup pool reflects
+		// retirements and new rules written by this stage.  Without this,
+		// a rule retired by stage N is still present in p.ruleLoader.All()
+		// when stage N+1 builds its dedup pool, causing a new candidate to
+		// be flagged as possible_duplicate of a file that no longer exists.
+		if err := p.ruleLoader.Reload(); err != nil {
+			log.WithFields(Fields{"stage": stage, "error": err}).Warn("failed to reload rules after stage synthesis")
+		}
+
 		totalNew += applied.newCount
 		totalUpdated += applied.updatedCount
 		totalRetired += applied.retiredCount
 
 		log.WithFields(Fields{
-			"stage":   stage,
-			"new":     applied.newCount,
-			"updated": applied.updatedCount,
-			"retired": applied.retiredCount,
-			"summary": result.Summary,
+			"stage":        stage,
+			"new":          applied.newCount,
+			"updated":      applied.updatedCount,
+			"retired":      applied.retiredCount,
+			"merged":       applied.mergedCount,
+			"possible_dup": applied.possibleDupCount,
+			"summary":      result.Summary,
 		}).Info("synthesis complete for stage")
 	}
 
@@ -113,17 +125,89 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 }
 
 type applyResult struct {
-	newCount     int
-	updatedCount int
-	retiredCount int
+	newCount         int
+	updatedCount     int
+	retiredCount     int
+	mergedCount      int
+	possibleDupCount int
 }
 
 func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult) applyResult {
 	var applied applyResult
 	rulesDir := p.ruleLoader.RulesDir()
-	// batchAccepted tracks rules written in this call so intra-batch semantic
-	// duplicates are caught before the loader is reloaded.
-	var batchAccepted []*rules.Rule
+
+	// Issue 1: pre-compute the set of rules being retired this pass so they are
+	// excluded from the dedup pool. Without this, a candidate could be merged
+	// into a rule that is subsequently deleted, causing silent rule loss.
+	retiredIDs := make(map[string]struct{}, len(result.RetiredRules))
+	for _, rr := range result.RetiredRules {
+		existing := p.ruleLoader.ByID(rr.ID)
+		if existing == nil || existing.Source == "manual" {
+			continue
+		}
+		retiredIDs[rr.ID] = struct{}{}
+	}
+
+	// Pre-compute effective confidence after pending updates so the dedup pool
+	// excludes rules that will be downgraded below MinConfidenceForInjection in
+	// this same pass.  Without this a candidate can be merged into a rule that
+	// is subsequently downgraded, causing the candidate's evidence to be
+	// discarded and no active rule to be created.
+	pendingConf := make(map[string]float64, len(result.UpdatedRules))
+	for _, ur := range result.UpdatedRules {
+		// Only pre-apply confidence downgrades for rules that actually exist,
+		// are non-manual (manual rules are immutable), and belong to this stage
+		// or are global. An attacker-controlled or hallucinated low confidence
+		// for a manual/cross-stage rule ID must not evict that rule from the
+		// dedup pool, which would cause semantically duplicate new_rules to be
+		// written instead of being merged/suppressed.
+		existing := p.ruleLoader.ByID(ur.ID)
+		if existing == nil {
+			continue
+		}
+		if existing.Source == "manual" {
+			continue
+		}
+		if existing.Stage != stage && existing.Stage != "global" {
+			continue
+		}
+		pendingConf[ur.ID] = ur.NewConfidence
+	}
+
+	// Build dedup index: rules belonging to this stage (or global), minus those
+	// being retired. Only stage-scoped rules are candidates for dedup because
+	// prompt injection is stage-filtered (ForStage uses stage=="<stage>" || "global").
+	// Merging a candidate into a rule from a different stage would silently drop
+	// the candidate from the originating stage in production.
+	// TF vectors are pre-computed once here; new rules are added via idx.Add so
+	// that later candidates in the same batch are also checked against them.
+	allRules := p.ruleLoader.All()
+	initialPool := make([]*rules.Rule, 0, len(allRules))
+	for _, r := range allRules {
+		if _, retiring := retiredIDs[r.ID]; retiring {
+			continue
+		}
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		// Use post-update confidence when available so rules being downgraded
+		// below the threshold are not included in the dedup index.
+		effectiveConf := r.Confidence
+		if newConf, ok := pendingConf[r.ID]; ok {
+			effectiveConf = newConf
+		}
+		if effectiveConf < rules.MinConfidenceForInjection {
+			continue
+		}
+		initialPool = append(initialPool, r)
+	}
+	dedupIdx := rules.NewDedupIndex(initialPool)
+
+	// writtenIDs tracks IDs written during this batch so that a second entry
+	// with the same ID cannot overwrite the first WriteRule output while
+	// inflating newCount. p.ruleLoader.ByID() only reflects the loader snapshot
+	// from before this batch began and cannot catch within-batch duplicates.
+	writtenIDs := make(map[string]struct{})
 
 	// Write new rules (validate first)
 	for _, nr := range result.NewRules {
@@ -143,23 +227,71 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID}).Warn("skipping rule with unsafe ID")
 			continue
 		}
-		// Don't overwrite existing rules (exact ID match)
+		// Don't overwrite existing rules by ID (loader snapshot).
 		if p.ruleLoader.ByID(nr.ID) != nil {
 			continue
 		}
-		// Skip semantically duplicate rules to prevent rule explosion.
-		// Use the trusted function-arg `stage` instead of nr.Stage (model output) to
-		// ensure dedup always runs against the correct stage's rule set.
-		if match, matchID := p.ruleLoader.HasSemanticMatch(nr.ID, nr.Tags, stage); match {
-			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Info("skipping semantically duplicate rule")
+		// Don't write the same ID twice in this batch — a second WriteRule would
+		// silently overwrite the first file while still incrementing newCount.
+		if _, seen := writtenIDs[nr.ID]; seen {
+			log.WithFields(Fields{"rule": nr.ID}).Warn("synthesis batch: skipping duplicate rule ID")
 			continue
 		}
-		// Also check rules accepted earlier in this batch: the loader snapshot is
-		// not updated until Reload() runs after this function returns, so without
-		// this check two semantically equivalent rules in the same LLM response
-		// would both pass HasSemanticMatch and both be written.
-		if match, matchID := p.ruleLoader.HasSemanticMatchAmong(nr.ID, nr.Tags, stage, batchAccepted); match {
-			log.WithFields(Fields{"rule": nr.ID, "batchMatch": matchID}).Info("skipping semantically duplicate rule (batch-internal)")
+
+		// Pin the candidate's stage to the current synthesis stage.
+		// The model may emit a different or 'global' stage value; using it
+		// verbatim would cause the dedup index (scoped to 'stage') to mismatch
+		// the write target, silently dropping valid candidates or writing rules
+		// to the wrong stage directory.
+		nr.Stage = stage
+
+		// Dedup check: compare candidate text against the pre-computed index.
+		candidateText := nr.Condition + " " + nr.Body
+		dedup := dedupIdx.Check(candidateText)
+		switch dedup.Action {
+		case rules.DedupActionMerge:
+			// Use the stage and source captured in the dedup index rather than a
+			// global ByID() lookup, which could resolve to the wrong rule file
+			// when two stages share the same ID.
+			// Manual rules are immutable; suppress the synthesized candidate so it
+			// cannot bloat the rule set across repeated synthesis runs.
+			if dedup.MatchedRuleSource == "manual" {
+				log.WithFields(Fields{
+					"candidate": nr.ID,
+					"matched":   dedup.MatchedRuleID,
+					"score":     fmt.Sprintf("%.3f", dedup.Score),
+				}).Info("dedup: candidate matches manual rule, suppressing synthesized duplicate")
+				applied.mergedCount++
+				continue
+			}
+			// If IncrementEvidenceCount fails (I/O error, missing file),
+			// fall through and create the candidate as a new rule rather than
+			// silently dropping it. IncrementEvidenceCount also stamps
+			// last_validated_at atomically, preventing applyDecay from treating
+			// the just-reinforced rule as stale in the same cycle.
+			if err := rules.IncrementEvidenceCount(rulesDir, dedup.MatchedRuleID, dedup.MatchedRuleStage); err != nil {
+				log.WithFields(Fields{
+					"candidate": nr.ID,
+					"matched":   dedup.MatchedRuleID,
+					"error":     err,
+				}).Warn("dedup merge: failed to increment evidence count, creating as new rule")
+				break // fall through to WriteRule below
+			}
+			log.WithFields(Fields{
+				"candidate": nr.ID,
+				"matched":   dedup.MatchedRuleID,
+				"score":     fmt.Sprintf("%.3f", dedup.Score),
+			}).Info("dedup: candidate merged into existing rule")
+			applied.mergedCount++
+			continue
+		case rules.DedupActionPossibleDuplicate:
+			// Similar but not identical — skip and flag for human review.
+			log.WithFields(Fields{
+				"candidate": nr.ID,
+				"matched":   dedup.MatchedRuleID,
+				"score":     fmt.Sprintf("%.3f", dedup.Score),
+			}).Warn("dedup: candidate is a possible duplicate, skipping (human review recommended)")
+			applied.possibleDupCount++
 			continue
 		}
 
@@ -181,7 +313,10 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID, "error": err}).Warn("failed to write synthesized rule")
 			continue
 		}
-		batchAccepted = append(batchAccepted, rule)
+		// Extend the dedup index with the newly written rule so that
+		// later candidates in the same batch are checked against it.
+		dedupIdx.Add(rule)
+		writtenIDs[nr.ID] = struct{}{}
 		applied.newCount++
 	}
 
