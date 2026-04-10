@@ -47,13 +47,13 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 		}).Info("synthesis complete for stage")
 	}
 
-	// Decay confidence on rules without recent evidence
-	p.applyDecay()
-
-	// Reload rules
+	// Reload rules so applyDecay sees the fresh last_validated_at stamps written above
 	if err := p.ruleLoader.Reload(); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to reload rules after synthesis")
 	}
+
+	// Decay confidence on rules without recent evidence (runs on fresh in-memory state)
+	p.applyDecay()
 
 	log.WithFields(Fields{
 		"new":     totalNew,
