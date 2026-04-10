@@ -110,11 +110,13 @@ func (db *DB) Migrate() error {
 	db.runMigrations()
 	db.MigrateLessons()
 	db.MigrateEvents()
-	// Table-level migration: propagate errors so startup fails fast on DDL failure.
+	// Table-level migrations: propagate errors so startup fails fast on DDL failure.
 	if err := db.MigrateRepoProfiles(); err != nil {
 		return err
 	}
-	db.MigrateTrajectories()
+	if err := db.MigrateTrajectories(); err != nil {
+		return err
+	}
 
 	return nil
 }

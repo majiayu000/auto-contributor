@@ -11,9 +11,10 @@ import (
 // MigrateTrajectories creates the trajectories table for experience replay.
 // issue_id is intentionally NOT unique: multiple attempts (retries, separate PRs)
 // for the same issue are stored as separate rows so no history is overwritten.
-func (db *DB) MigrateTrajectories() {
+// Returns an error if any DDL step fails so the caller can abort startup.
+func (db *DB) MigrateTrajectories() error {
 	if db.IsPostgres() {
-		db.Exec(`
+		if _, err := db.Exec(`
 			CREATE TABLE IF NOT EXISTS trajectories (
 				id SERIAL PRIMARY KEY,
 				issue_id INTEGER NOT NULL,
@@ -32,16 +33,26 @@ func (db *DB) MigrateTrajectories() {
 				success INTEGER DEFAULT 0,
 				created_at TIMESTAMP DEFAULT NOW(),
 				updated_at TIMESTAMP DEFAULT NOW()
-			)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+			)`); err != nil {
+			return fmt.Errorf("create trajectories table: %w", err)
+		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`); err != nil {
+			return fmt.Errorf("create idx_trajectories_issue: %w", err)
+		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`); err != nil {
+			return fmt.Errorf("create idx_trajectories_outcome: %w", err)
+		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`); err != nil {
+			return fmt.Errorf("create idx_trajectories_success: %w", err)
+		}
 		// Drop the old unique index if it exists (created by earlier schema versions).
-		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
+		if _, err := db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`); err != nil {
+			return fmt.Errorf("drop idx_trajectories_issue_unique: %w", err)
+		}
 		// Add pr_number column to existing tables (idempotent: error is ignored if already present).
 		db.Exec(`ALTER TABLE trajectories ADD COLUMN IF NOT EXISTS pr_number INTEGER NOT NULL DEFAULT 0`)
 	} else {
-		db.Exec(`
+		if _, err := db.Exec(`
 			CREATE TABLE IF NOT EXISTS trajectories (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				issue_id INTEGER NOT NULL,
@@ -60,10 +71,18 @@ func (db *DB) MigrateTrajectories() {
 				success INTEGER DEFAULT 0,
 				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 				updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-			)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+			)`); err != nil {
+			return fmt.Errorf("create trajectories table: %w", err)
+		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`); err != nil {
+			return fmt.Errorf("create idx_trajectories_issue: %w", err)
+		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`); err != nil {
+			return fmt.Errorf("create idx_trajectories_outcome: %w", err)
+		}
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`); err != nil {
+			return fmt.Errorf("create idx_trajectories_success: %w", err)
+		}
 		// Drop the old named unique index if it exists (created by earlier schema versions).
 		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
 		// Add pr_number column to existing SQLite tables; error is silently ignored if already present.
@@ -76,39 +95,77 @@ func (db *DB) MigrateTrajectories() {
 			`SELECT sql FROM sqlite_master WHERE type='table' AND name='trajectories'`,
 		).Scan(&oldSQL); err == nil {
 			if regexp.MustCompile(`(?i)\bissue_id\b[^,\n)]*\bUNIQUE\b`).MatchString(oldSQL) {
-				db.Exec(`CREATE TABLE IF NOT EXISTS trajectories_new (
-					id INTEGER PRIMARY KEY AUTOINCREMENT,
-					issue_id INTEGER NOT NULL,
-					pr_number INTEGER NOT NULL DEFAULT 0,
-					repo TEXT NOT NULL,
-					issue_number INTEGER NOT NULL,
-					issue_title TEXT NOT NULL,
-					issue_body TEXT,
-					keywords TEXT,
-					scout_verdict TEXT,
-					scout_approach TEXT,
-					analyst_plan TEXT,
-					review_rounds INTEGER DEFAULT 0,
-					review_summary TEXT,
-					outcome_label TEXT,
-					success INTEGER DEFAULT 0,
-					created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-					updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-				)`)
-				db.Exec(`INSERT INTO trajectories_new
-					SELECT id, issue_id, pr_number, repo, issue_number, issue_title, issue_body,
-						keywords, scout_verdict, scout_approach, analyst_plan, review_rounds,
-						review_summary, outcome_label, success, created_at, updated_at
-					FROM trajectories`)
-				db.Exec(`DROP TABLE trajectories`)
-				db.Exec(`ALTER TABLE trajectories_new RENAME TO trajectories`)
-				// Rebuild indexes after table recreation.
-				db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
-				db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
-				db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+				if err := db.rebuildTrajectoriesTable(); err != nil {
+					return fmt.Errorf("rebuild trajectories table: %w", err)
+				}
 			}
 		}
 	}
+	return nil
+}
+
+// rebuildTrajectoriesTable recreates the trajectories table inside a transaction
+// to remove any legacy column-level UNIQUE constraint on issue_id.
+// The transaction ensures the original table is never dropped unless the data
+// copy succeeds, preventing irreversible data loss on failure.
+func (db *DB) rebuildTrajectoriesTable() error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+		}
+	}()
+
+	if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS trajectories_new (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		issue_id INTEGER NOT NULL,
+		pr_number INTEGER NOT NULL DEFAULT 0,
+		repo TEXT NOT NULL,
+		issue_number INTEGER NOT NULL,
+		issue_title TEXT NOT NULL,
+		issue_body TEXT,
+		keywords TEXT,
+		scout_verdict TEXT,
+		scout_approach TEXT,
+		analyst_plan TEXT,
+		review_rounds INTEGER DEFAULT 0,
+		review_summary TEXT,
+		outcome_label TEXT,
+		success INTEGER DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create trajectories_new: %w", err)
+	}
+
+	if _, err = tx.Exec(`INSERT INTO trajectories_new
+		SELECT id, issue_id, pr_number, repo, issue_number, issue_title, issue_body,
+			keywords, scout_verdict, scout_approach, analyst_plan, review_rounds,
+			review_summary, outcome_label, success, created_at, updated_at
+		FROM trajectories`); err != nil {
+		return fmt.Errorf("copy trajectories data: %w", err)
+	}
+
+	if _, err = tx.Exec(`DROP TABLE trajectories`); err != nil {
+		return fmt.Errorf("drop old trajectories: %w", err)
+	}
+
+	if _, err = tx.Exec(`ALTER TABLE trajectories_new RENAME TO trajectories`); err != nil {
+		return fmt.Errorf("rename trajectories_new: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit trajectories rebuild: %w", err)
+	}
+
+	// Rebuild indexes after table recreation (outside transaction; non-fatal if they already exist).
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+	return nil
 }
 
 // SaveTrajectory inserts a new trajectory record for this attempt.
