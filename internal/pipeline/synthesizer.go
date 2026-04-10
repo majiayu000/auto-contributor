@@ -141,15 +141,24 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		retiredIDs[rr.ID] = struct{}{}
 	}
 
-	// Build initial dedup pool: all current rules minus those being retired.
-	// Issue 2: this slice is extended as new rules are written so that
-	// near-identical candidates within the same batch are also deduped.
+	// Build initial dedup pool: rules belonging to this stage (or global),
+	// minus those being retired.
+	// Only stage-scoped rules are candidates for dedup because prompt
+	// injection is stage-filtered (ForStage uses stage=="<stage>" || "global").
+	// Merging a candidate into a rule from a different stage would silently
+	// drop the candidate from the originating stage in production.
+	// This slice is extended as new rules are written so that near-identical
+	// candidates within the same batch are also deduped (Issue 2 fix).
 	allRules := p.ruleLoader.All()
 	dedupPool := make([]*rules.Rule, 0, len(allRules))
 	for _, r := range allRules {
-		if _, retiring := retiredIDs[r.ID]; !retiring {
-			dedupPool = append(dedupPool, r)
+		if _, retiring := retiredIDs[r.ID]; retiring {
+			continue
 		}
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		dedupPool = append(dedupPool, r)
 	}
 
 	// Write new rules (validate first)
