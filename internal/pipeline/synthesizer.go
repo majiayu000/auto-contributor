@@ -237,9 +237,16 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			// Use the stage and source captured in the dedup index rather than a
 			// global ByID() lookup, which could resolve to the wrong rule file
 			// when two stages share the same ID.
-			// Manual rules are immutable — treat candidate as new.
+			// Manual rules are immutable; suppress the synthesized candidate so it
+			// cannot bloat the rule set across repeated synthesis runs.
 			if dedup.MatchedRuleSource == "manual" {
-				break
+				log.WithFields(Fields{
+					"candidate": nr.ID,
+					"matched":   dedup.MatchedRuleID,
+					"score":     fmt.Sprintf("%.3f", dedup.Score),
+				}).Info("dedup: candidate matches manual rule, suppressing synthesized duplicate")
+				applied.mergedCount++
+				continue
 			}
 			// If IncrementEvidenceCount fails (I/O error, missing file),
 			// fall through and create the candidate as a new rule rather than

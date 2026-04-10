@@ -98,7 +98,7 @@ type DedupIndex struct {
 }
 
 type dedupEntry struct {
-	ruleID    string
+	ruleID     string
 	ruleStage  string
 	ruleSource string
 	vec        map[string]float64
@@ -141,7 +141,7 @@ func (idx *DedupIndex) Check(candidateText string) DedupResult {
 	bestSource := ""
 	for _, e := range idx.entries {
 		score := cosineSimilarity(candVec, e.vec)
-		if score > bestScore {
+		if score >= bestScore {
 			bestScore = score
 			bestID = e.ruleID
 			bestStage = e.ruleStage
