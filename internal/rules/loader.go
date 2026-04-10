@@ -39,7 +39,23 @@ func (rl *RuleLoader) RulesDir() string {
 }
 
 // Load reads all YAML files from the rules directory.
+// Call this at startup before any write goroutines are running.
 func (rl *RuleLoader) Load() error {
+	return rl.readFromDisk()
+}
+
+// Reload re-reads rules from disk. It holds writeMu so it cannot read a file
+// that is currently being truncated or written by a concurrent WriteRule /
+// UpdateRuleQValue call.
+func (rl *RuleLoader) Reload() error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	return rl.readFromDisk()
+}
+
+// readFromDisk walks the rules directory and reloads the in-memory cache.
+// Callers are responsible for holding writeMu when concurrent writes may occur.
+func (rl *RuleLoader) readFromDisk() error {
 	if rl.rulesDir == "" {
 		return nil
 	}
@@ -102,11 +118,6 @@ func (rl *RuleLoader) Load() error {
 	return nil
 }
 
-// Reload re-reads rules from disk.
-func (rl *RuleLoader) Reload() error {
-	return rl.Load()
-}
-
 // All returns all loaded rules.
 func (rl *RuleLoader) All() []*Rule {
 	rl.mu.RLock()
@@ -142,10 +153,10 @@ func (rl *RuleLoader) IDsForStage(stage string) []string {
 	return ids
 }
 
-// IDsForPrompt returns the IDs of rules that were actually included in the prompt
-// for a given stage, honouring the same MaxPromptChars budget as FormatForPrompt.
-// Use this instead of IDsForStage when recording Q-value participation, so that
-// rules truncated out of the prompt are not credited or penalised for outcomes.
+// IDsForPrompt returns the participation keys of rules actually included in the
+// prompt for a given stage, honouring the same MaxPromptChars budget as
+// FormatForPrompt. Keys are returned as "stage/ruleID" so that Q-value updates
+// can resolve rules unambiguously even when IDs are not unique across stages.
 func (rl *RuleLoader) IDsForPrompt(stage string) []string {
 	matched := rl.ForStage(stage)
 
@@ -158,7 +169,7 @@ func (rl *RuleLoader) IDsForPrompt(stage string) []string {
 		if total+len(entry) > MaxPromptChars {
 			break
 		}
-		ids = append(ids, r.ID)
+		ids = append(ids, r.Stage+"/"+r.ID)
 		total += len(entry)
 	}
 	return ids
@@ -208,7 +219,8 @@ func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
 	return injected
 }
 
-// ByID finds a rule by its ID.
+// ByID finds a rule by its ID. When multiple rules share an ID across stages,
+// the first match is returned. Prefer ByStageAndID for unambiguous lookup.
 func (rl *RuleLoader) ByID(id string) *Rule {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
@@ -261,6 +273,20 @@ func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (
 		}
 	}
 	return false, ""
+}
+
+// ByStageAndID finds a rule by its stage and ID, avoiding false matches when
+// IDs are not unique across stages.
+func (rl *RuleLoader) ByStageAndID(stage, id string) *Rule {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	for _, r := range rl.rules {
+		if r.ID == id && r.Stage == stage {
+			return r
+		}
+	}
+	return nil
 }
 
 // HasSemanticMatchAmong checks whether any rule in the provided candidates slice is
