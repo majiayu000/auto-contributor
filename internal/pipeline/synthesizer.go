@@ -121,6 +121,9 @@ type applyResult struct {
 func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult) applyResult {
 	var applied applyResult
 	rulesDir := p.ruleLoader.RulesDir()
+	// batchAccepted tracks rules written in this call so intra-batch semantic
+	// duplicates are caught before the loader is reloaded.
+	var batchAccepted []*rules.Rule
 
 	// Write new rules (validate first)
 	for _, nr := range result.NewRules {
@@ -144,6 +147,14 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Info("skipping semantically duplicate rule")
 			continue
 		}
+		// Also check rules accepted earlier in this batch: the loader snapshot is
+		// not updated until Reload() runs after this function returns, so without
+		// this check two semantically equivalent rules in the same LLM response
+		// would both pass HasSemanticMatch and both be written.
+		if match, matchID := p.ruleLoader.HasSemanticMatchAmong(nr.ID, nr.Tags, stage, batchAccepted); match {
+			log.WithFields(Fields{"rule": nr.ID, "batchMatch": matchID}).Info("skipping semantically duplicate rule (batch-internal)")
+			continue
+		}
 
 		rule := &rules.Rule{
 			ID:              nr.ID,
@@ -163,6 +174,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID, "error": err}).Warn("failed to write synthesized rule")
 			continue
 		}
+		batchAccepted = append(batchAccepted, rule)
 		applied.newCount++
 	}
 

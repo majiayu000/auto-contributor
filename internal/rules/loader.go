@@ -230,6 +230,36 @@ func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (
 	return false, ""
 }
 
+// HasSemanticMatchAmong checks whether any rule in the provided candidates slice is
+// semantically similar to the proposed rule. It applies the same match criteria as
+// HasSemanticMatch (shared tokens ≥ 2 AND ratio ≥ 0.5) but against a caller-supplied
+// list rather than the loader's disk snapshot. Use this to detect duplicates within a
+// synthesis batch before the loader is reloaded.
+func (rl *RuleLoader) HasSemanticMatchAmong(id string, tags []string, stage string, candidates []*Rule) (bool, string) {
+	newKW := ruleKeywords(id, tags)
+	if len(newKW) < 2 {
+		return false, ""
+	}
+	for _, r := range candidates {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		existKW := ruleKeywords(r.ID, r.Tags)
+		if len(existKW) < 2 {
+			continue
+		}
+		shared := sharedKeywords(newKW, existKW)
+		minLen := len(newKW)
+		if len(existKW) < minLen {
+			minLen = len(existKW)
+		}
+		if shared >= 2 && float64(shared)/float64(minLen) >= 0.5 {
+			return true, r.ID
+		}
+	}
+	return false, ""
+}
+
 // IDSummaryForStage returns a compact newline-separated "id: condition" list for all rules
 // matching the given stage (and global). Used to provide deduplication context to the synthesizer.
 //
