@@ -23,8 +23,10 @@ var (
 )
 
 func main() {
-	// Load .env file if exists (ignore error if not found)
-	_ = godotenv.Load()
+	// Load .env file if it exists; absence is not an error.
+	if err := godotenv.Load(); err != nil {
+		log.Debug("no .env file, relying on environment variables")
+	}
 
 	rootCmd := &cobra.Command{
 		Use:   "auto-contributor",

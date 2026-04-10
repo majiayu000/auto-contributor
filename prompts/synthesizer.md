@@ -21,6 +21,20 @@ that will improve future contributions.
 - Auto-closed (no response): {{ .AutoClosedCount }}
 - Success rate: {{ .SuccessRate }}%
 
+## Existing Rule IDs (Deduplication Reference)
+
+The following rules already exist for this stage. **Before creating any new rule, verify it is not
+semantically equivalent to one of these:**
+
+{{ .ExistingRuleIDs }}
+
+**Deduplication rules (CRITICAL):**
+- If a new pattern is already covered by an existing rule (same condition, same guidance, or overlapping
+  keywords), do NOT create a new rule. Instead add the existing rule to `updated_rules` to adjust confidence.
+- Use clean confidence values for new rules: `0.5`, `0.6`, `0.7`, `0.8`, or `0.9`.
+  Never copy floating-point artifacts such as `0.5019165` from existing data.
+- Default confidence for a brand-new, unvalidated rule: `0.5`.
+
 ## Analysis Tasks
 
 ### 1. Pattern Detection

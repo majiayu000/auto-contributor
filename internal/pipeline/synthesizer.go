@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -95,6 +96,7 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 		"Stage":           stage,
 		"EventsText":      eventsText,
 		"ExistingRules":   existingRules,
+		"ExistingRuleIDs": p.ruleLoader.IDSummaryForStage(stage),
 		"TotalEvents":     len(events),
 		"MergedCount":     merged,
 		"RejectedCount":   rejected,
@@ -131,8 +133,13 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if nr.ID == "" || nr.Body == "" {
 			continue
 		}
-		// Don't overwrite existing rules
+		// Don't overwrite existing rules (exact ID match)
 		if p.ruleLoader.ByID(nr.ID) != nil {
+			continue
+		}
+		// Skip semantically duplicate rules to prevent rule explosion
+		if match, matchID := p.ruleLoader.HasSemanticMatch(nr.ID, nr.Tags, nr.Stage); match {
+			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Debug("skipping semantically duplicate rule")
 			continue
 		}
 
@@ -140,7 +147,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			ID:              nr.ID,
 			Stage:           nr.Stage,
 			Severity:        nr.Severity,
-			Confidence:      nr.Confidence,
+			Confidence:      normalizeNewRuleConfidence(nr.Confidence),
 			Source:          "synthesized",
 			CreatedAt:       time.Now().Format("2006-01-02"),
 			LastValidatedAt: time.Now().Format("2006-01-02"),
@@ -216,6 +223,17 @@ func (p *Pipeline) applyDecay() {
 			log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to apply decay")
 		}
 	}
+}
+
+// normalizeNewRuleConfidence rounds confidence to the nearest 0.1 in [0.3, 0.9].
+// This prevents new rules from inheriting degraded floating-point values from existing ones.
+func normalizeNewRuleConfidence(c float64) float64 {
+	if c < 0.3 {
+		c = 0.5
+	} else if c > 0.9 {
+		c = 0.9
+	}
+	return math.Round(c*10) / 10
 }
 
 func formatEventsForSynthesis(events []*models.PipelineEvent) string {

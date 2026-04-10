@@ -179,3 +179,87 @@ func (rl *RuleLoader) ByID(id string) *Rule {
 	}
 	return nil
 }
+
+// HasSemanticMatch returns true if an existing rule for the given stage is semantically
+// similar to the proposed rule based on keyword and tag overlap (threshold: 2 shared tokens).
+// The second return value is the ID of the matching rule, or "" if none.
+func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (bool, string) {
+	newKW := ruleKeywords(id, tags)
+
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	for _, r := range rl.rules {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		if sharedKeywords(newKW, ruleKeywords(r.ID, r.Tags)) >= 2 {
+			return true, r.ID
+		}
+	}
+	return false, ""
+}
+
+// IDSummaryForStage returns a compact newline-separated "id: condition" list for all rules
+// matching the given stage (and global). Used to provide deduplication context to the synthesizer.
+func (rl *RuleLoader) IDSummaryForStage(stage string) string {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	var sb strings.Builder
+	for _, r := range rl.rules {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		sb.WriteString(r.ID)
+		if r.Condition != "" {
+			sb.WriteString(": ")
+			sb.WriteString(r.Condition)
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+// ruleKeywords extracts meaningful tokens from a rule ID and its tags, dropping stop words.
+func ruleKeywords(id string, tags []string) []string {
+	stop := map[string]bool{
+		"and": true, "or": true, "the": true, "for": true, "in": true,
+		"to": true, "a": true, "of": true, "with": true, "on": true,
+		"is": true, "not": true, "no": true, "per": true,
+	}
+	seen := map[string]bool{}
+	var kw []string
+	for _, p := range strings.Split(id, "-") {
+		p = strings.ToLower(p)
+		if p != "" && !stop[p] && !seen[p] {
+			kw = append(kw, p)
+			seen[p] = true
+		}
+	}
+	for _, t := range tags {
+		t = strings.ToLower(t)
+		if t != "" && !stop[t] && !seen[t] {
+			kw = append(kw, t)
+			seen[t] = true
+		}
+	}
+	return kw
+}
+
+// sharedKeywords counts distinct keywords that appear in both slices.
+func sharedKeywords(a, b []string) int {
+	setA := make(map[string]bool, len(a))
+	for _, x := range a {
+		setA[x] = true
+	}
+	count := 0
+	seen := make(map[string]bool)
+	for _, x := range b {
+		if setA[x] && !seen[x] {
+			count++
+			seen[x] = true
+		}
+	}
+	return count
+}
