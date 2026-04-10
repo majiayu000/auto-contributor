@@ -269,6 +269,12 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 		}
 	}
 
+	// Reload the in-memory rule cache so the next decay pass sees the updated
+	// last_validated_at values and does not wrongly decay the just-stamped rules.
+	if err := p.ruleLoader.Reload(); err != nil {
+		log.WithError(err).Warn("failed to reload rule cache after stamping last_validated_at")
+	}
+
 	log.WithFields(Fields{
 		"pr":     pr.PRURL,
 		"stages": len(seenStages),
