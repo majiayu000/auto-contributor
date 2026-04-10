@@ -171,11 +171,14 @@ func (rl *RuleLoader) FormatForPrompt(stage string) string {
 		return ""
 	}
 
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
 	var sb strings.Builder
-	sb.WriteString("## Self-Learning Rules\n\n")
-	sb.WriteString("Follow these rules based on past experience:\n\n")
+	sb.WriteString(header)
 
-	total := 0
+	// Start total at len(header) so the budget matches IDsForPrompt exactly;
+	// without this, FormatForPrompt could include more entries than IDsForPrompt
+	// reports, causing rules to be injected but not credited in experiences_used.
+	total := len(header)
 	for _, r := range matched {
 		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
 		if total+len(entry) > MaxPromptChars {

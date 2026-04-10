@@ -129,6 +129,7 @@ func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float
 }
 
 // DeleteRule removes a rule file from disk.
+// Holds writeMu to prevent races with UpdateRuleQValue and Reload.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
 	writeMu.Lock()
 	defer writeMu.Unlock()

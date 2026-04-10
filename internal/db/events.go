@@ -2,22 +2,29 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
 // migrateEventsV2 adds the experiences_used column to the pipeline_events table.
-// Safe to call on both new and existing databases; errors are ignored if the column already exists.
-func (db *DB) migrateEventsV2() {
+// Returns nil if the column already exists (SQLite "duplicate column" error is suppressed).
+// All other errors (locked DB, read-only FS, etc.) are propagated so callers know the
+// column may be missing and subsequent reads/writes of experiences_used would fail.
+func (db *DB) migrateEventsV2() error {
 	var stmt string
 	if db.IsPostgres() {
+		// IF NOT EXISTS is supported by Postgres — never errors.
 		stmt = `ALTER TABLE pipeline_events ADD COLUMN IF NOT EXISTS experiences_used TEXT`
 	} else {
 		stmt = `ALTER TABLE pipeline_events ADD COLUMN experiences_used TEXT`
 	}
-	// Ignore errors: SQLite will fail if the column already exists; that's fine.
-	db.Exec(stmt) //nolint:errcheck
+	_, err := db.Exec(stmt)
+	if err != nil && strings.Contains(err.Error(), "duplicate column") {
+		return nil // column already exists — idempotent, not an error
+	}
+	return err
 }
 
 // MigrateEvents creates the pipeline_events table.
@@ -79,8 +86,10 @@ func (db *DB) MigrateEvents() error {
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
-	// Add experiences_used column to existing databases (idempotent, errors ignored).
-	db.migrateEventsV2()
+	// Add experiences_used column to existing databases (idempotent).
+	if err := db.migrateEventsV2(); err != nil {
+		return fmt.Errorf("migrateEventsV2: %w", err)
+	}
 	return nil
 }
 
