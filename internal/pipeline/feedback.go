@@ -33,13 +33,26 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	// Terminal state transitions from GitHub
 	switch prInfo.State {
 	case "MERGED":
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
+		// Use the authoritative GitHub merge timestamp so polling delay does not
+		// inflate the measured response time.
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, prResponseHours(prInfo.CreatedAt, prInfo.MergedAt, pr.CreatedAt)); err != nil {
+			return fmt.Errorf("record merged PR outcome: %w", err)
+		}
+		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
+			return fmt.Errorf("update PR status to merged: %w", err)
+		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		// Use closedAt so response time reflects creation→close, not creation→poll.
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, prInfo.ClosedAt, pr.CreatedAt)); err != nil {
+			return fmt.Errorf("record closed PR outcome: %w", err)
+		}
+		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+			return fmt.Errorf("update PR status to closed: %w", err)
+		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
@@ -58,7 +71,15 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing due to extended inactivity. Happy to reopen if there's still interest."); err != nil {
 			log.WithError(err).Warn("failed to auto-close stale PR")
 		} else {
-			p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			// Record outcome before setting terminal status so that a transient
+			// DB failure here leaves the PR as open; the next loop cycle sees
+			// GitHub state=CLOSED and retries via the terminal-state handler.
+			// terminalAt is empty: we just triggered the close so time.Now()≈close time.
+			if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
+				log.WithError(err).Warn("failed to record stale auto-close outcome")
+			} else {
+				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			}
 		}
 		return nil
 	}
@@ -119,7 +140,13 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 			if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing: CI failures remain unresolved after multiple attempts."); err != nil {
 				log.WithError(err).Warn("failed to auto-close CI-failed PR")
 			} else {
-				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+				// Record outcome before setting terminal status (same retry-safe
+				// ordering as the stale auto-close path above).
+				if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
+					log.WithError(err).Warn("failed to record CI auto-close outcome")
+				} else {
+					p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+				}
 			}
 			return nil
 		}
@@ -534,6 +561,22 @@ func (p *Pipeline) shouldAutoClose(pr *models.PullRequest, prInfo *ghclient.PRIn
 	}
 
 	return true
+}
+
+// prResponseHours returns hours from PR creation to the terminal event.
+// createdAt and terminalAt are RFC3339 strings from GitHub. When both parse
+// successfully the result is terminalAt−createdAt, which is immune to polling
+// delays. If terminalAt is empty or unparseable (e.g. auto-close paths where
+// we just issued the close ourselves), falls back to time.Since(fallback).
+func prResponseHours(createdAt, terminalAt string, fallback time.Time) float64 {
+	if createdAt != "" && terminalAt != "" {
+		created, err1 := time.Parse(time.RFC3339, createdAt)
+		terminal, err2 := time.Parse(time.RFC3339, terminalAt)
+		if err1 == nil && err2 == nil && !terminal.Before(created) {
+			return terminal.Sub(created).Hours()
+		}
+	}
+	return time.Since(fallback).Hours()
 }
 
 // repoFromPRURL extracts "owner/repo" from a GitHub PR URL.

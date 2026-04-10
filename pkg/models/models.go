@@ -280,6 +280,25 @@ type ReviewLesson struct {
 	CreatedAt     time.Time `db:"created_at" json:"created_at"`
 }
 
+// RepoProfile stores per-repository learning data used by the scout phase.
+type RepoProfile struct {
+	Repo                 string     `db:"repo" json:"repo"`
+	TotalPRsSubmitted    int        `db:"total_prs_submitted" json:"total_prs_submitted"`
+	TotalMerged          int        `db:"total_merged" json:"total_merged"`
+	TotalRejected        int        `db:"total_rejected" json:"total_rejected"`
+	MergeRate            float64    `db:"merge_rate" json:"merge_rate"`
+	AvgResponseTimeHours *float64   `db:"avg_response_time_hours" json:"avg_response_time_hours,omitempty"`
+	RequiresCLA          bool       `db:"requires_cla" json:"requires_cla"`
+	RequiresAssignment   bool       `db:"requires_assignment" json:"requires_assignment"`
+	PreferredPRSize      string     `db:"preferred_pr_size" json:"preferred_pr_size,omitempty"`
+	Blacklisted          bool       `db:"blacklisted" json:"blacklisted"`
+	BlacklistReason      string     `db:"blacklist_reason" json:"blacklist_reason,omitempty"`
+	CooldownUntil        *time.Time `db:"cooldown_until" json:"cooldown_until,omitempty"`
+	StrategyNotes        string     `db:"strategy_notes" json:"strategy_notes,omitempty"`
+	LastInteraction      *time.Time `db:"last_interaction" json:"last_interaction,omitempty"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+}
+
 // PipelineEvent records a single agent invocation in the pipeline.
 type PipelineEvent struct {
 	ID              int64      `db:"id" json:"id"`
