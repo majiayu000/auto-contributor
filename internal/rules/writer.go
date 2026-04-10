@@ -161,7 +161,9 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 	return os.WriteFile(path, updated, 0644)
 }
 
-// IncrementEvidenceCount increments the evidence_count field of an existing rule file.
+// IncrementEvidenceCount increments the evidence_count field of an existing rule file
+// and stamps last_validated_at to today. Both fields are updated atomically under fileMu
+// so that applyDecay cannot observe a stale last_validated_at between the two writes.
 // It is called when a candidate rule is merged into an existing rule during dedup.
 func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error {
 	fileMu.Lock()
@@ -183,6 +185,7 @@ func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error 
 	}
 
 	rule.EvidenceCount++
+	rule.LastValidatedAt = time.Now().Format("2006-01-02")
 	updated, err := yaml.Marshal(&rule)
 	if err != nil {
 		return err

@@ -76,6 +76,71 @@ func CheckDedup(candidateText string, existingRules []*Rule) DedupResult {
 	}
 }
 
+// DedupIndex holds pre-computed TF vectors for a set of existing rules.
+// Build it once with NewDedupIndex, then call Check for each candidate.
+// This avoids re-tokenizing and re-vectorizing existing rules on every call,
+// reducing CheckDedup complexity from O(candidates×rules×text) to O(candidates×rules).
+type DedupIndex struct {
+	entries []dedupEntry
+}
+
+type dedupEntry struct {
+	ruleID string
+	vec    map[string]float64
+}
+
+// NewDedupIndex pre-computes TF vectors for each rule in existing.
+func NewDedupIndex(existing []*Rule) *DedupIndex {
+	entries := make([]dedupEntry, 0, len(existing))
+	for _, r := range existing {
+		text := r.Condition + " " + r.Body
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		entries = append(entries, dedupEntry{ruleID: r.ID, vec: termFreq(tokenize(text))})
+	}
+	return &DedupIndex{entries: entries}
+}
+
+// Add pre-computes a TF vector for r and appends it to the index.
+// Call this after writing a new rule so subsequent candidates in the same batch
+// are checked against it.
+func (idx *DedupIndex) Add(r *Rule) {
+	text := r.Condition + " " + r.Body
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	idx.entries = append(idx.entries, dedupEntry{ruleID: r.ID, vec: termFreq(tokenize(text))})
+}
+
+// Check returns the dedup action for candidateText using pre-computed vectors.
+func (idx *DedupIndex) Check(candidateText string) DedupResult {
+	if idx == nil || len(idx.entries) == 0 || strings.TrimSpace(candidateText) == "" {
+		return DedupResult{Action: DedupActionNew}
+	}
+
+	candVec := termFreq(tokenize(candidateText))
+	bestScore := 0.0
+	bestID := ""
+	for _, e := range idx.entries {
+		score := cosineSimilarity(candVec, e.vec)
+		if score > bestScore {
+			bestScore = score
+			bestID = e.ruleID
+		}
+	}
+
+	action := DedupActionNew
+	switch {
+	case bestScore >= MergeThreshold:
+		action = DedupActionMerge
+	case bestScore >= ReviewThreshold:
+		action = DedupActionPossibleDuplicate
+	}
+
+	return DedupResult{Action: action, Score: bestScore, MatchedRuleID: bestID}
+}
+
 // tokenize splits text into lowercase alphanumeric tokens.
 func tokenize(text string) []string {
 	text = strings.ToLower(text)

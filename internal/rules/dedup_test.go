@@ -137,3 +137,75 @@ func TestCheckDedup_SelectsHighestSimilarity(t *testing.T) {
 		t.Errorf("expected match rule-b, got %q (score=%.3f)", result.MatchedRuleID, result.Score)
 	}
 }
+
+// TestDedupIndex_MatchesCheckDedup verifies that DedupIndex.Check returns the same
+// action and matched rule as CheckDedup for all action types.
+func TestDedupIndex_MatchesCheckDedup(t *testing.T) {
+	existing := []*Rule{
+		{
+			ID:        "rule-skip-stale",
+			Stage:     "scout",
+			Condition: "issue has not been updated in 30 days",
+			Body:      "skip stale issues that have not been updated in the last 30 days to avoid wasted effort",
+		},
+		{
+			ID:        "rule-golang-fmt",
+			Stage:     "engineer",
+			Condition: "go code submitted without formatting",
+			Body:      "run gofmt before submitting go code changes",
+		},
+	}
+
+	cases := []struct {
+		name      string
+		candidate string
+	}{
+		{"merge", "issue has not been updated in 30 days skip stale issues that have not been updated in the last 30 days to avoid wasted effort"},
+		{"new", "repository has active maintainers who respond within 7 days scout priority"},
+	}
+
+	idx := NewDedupIndex(existing)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := CheckDedup(tc.candidate, existing)
+			got := idx.Check(tc.candidate)
+			if got.Action != want.Action {
+				t.Errorf("action: got %q, want %q", got.Action, want.Action)
+			}
+			if got.MatchedRuleID != want.MatchedRuleID {
+				t.Errorf("matchedRuleID: got %q, want %q", got.MatchedRuleID, want.MatchedRuleID)
+			}
+		})
+	}
+}
+
+// TestDedupIndex_Add extends the index with a new rule and checks it.
+func TestDedupIndex_Add(t *testing.T) {
+	idx := NewDedupIndex(nil)
+
+	newRule := &Rule{
+		ID:        "rule-new",
+		Condition: "skip stale issues",
+		Body:      "avoid stale issues skip them",
+	}
+	idx.Add(newRule)
+
+	// A near-identical candidate should now merge into rule-new.
+	candidate := "skip stale issues avoid stale issues skip them"
+	result := idx.Check(candidate)
+	if result.Action != DedupActionMerge {
+		t.Errorf("expected merge after Add, got %q (score=%.3f)", result.Action, result.Score)
+	}
+	if result.MatchedRuleID != "rule-new" {
+		t.Errorf("matched rule: got %q, want %q", result.MatchedRuleID, "rule-new")
+	}
+}
+
+// TestDedupIndex_EmptyReturnsNew verifies that an empty index always returns DedupActionNew.
+func TestDedupIndex_EmptyReturnsNew(t *testing.T) {
+	idx := NewDedupIndex(nil)
+	result := idx.Check("some candidate rule text")
+	if result.Action != DedupActionNew {
+		t.Errorf("empty index: expected new, got %q", result.Action)
+	}
+}

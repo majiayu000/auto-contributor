@@ -161,16 +161,15 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		pendingConf[ur.ID] = ur.NewConfidence
 	}
 
-	// Build initial dedup pool: rules belonging to this stage (or global),
-	// minus those being retired.
-	// Only stage-scoped rules are candidates for dedup because prompt
-	// injection is stage-filtered (ForStage uses stage=="<stage>" || "global").
-	// Merging a candidate into a rule from a different stage would silently
-	// drop the candidate from the originating stage in production.
-	// This slice is extended as new rules are written so that near-identical
-	// candidates within the same batch are also deduped.
+	// Build dedup index: rules belonging to this stage (or global), minus those
+	// being retired. Only stage-scoped rules are candidates for dedup because
+	// prompt injection is stage-filtered (ForStage uses stage=="<stage>" || "global").
+	// Merging a candidate into a rule from a different stage would silently drop
+	// the candidate from the originating stage in production.
+	// TF vectors are pre-computed once here; new rules are added via idx.Add so
+	// that later candidates in the same batch are also checked against them.
 	allRules := p.ruleLoader.All()
-	dedupPool := make([]*rules.Rule, 0, len(allRules))
+	initialPool := make([]*rules.Rule, 0, len(allRules))
 	for _, r := range allRules {
 		if _, retiring := retiredIDs[r.ID]; retiring {
 			continue
@@ -179,7 +178,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			continue
 		}
 		// Use post-update confidence when available so rules being downgraded
-		// below the threshold are not included in the dedup pool.
+		// below the threshold are not included in the dedup index.
 		effectiveConf := r.Confidence
 		if newConf, ok := pendingConf[r.ID]; ok {
 			effectiveConf = newConf
@@ -187,8 +186,9 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if effectiveConf < rules.MinConfidenceForInjection {
 			continue
 		}
-		dedupPool = append(dedupPool, r)
+		initialPool = append(initialPool, r)
 	}
+	dedupIdx := rules.NewDedupIndex(initialPool)
 
 	// Write new rules (validate first)
 	for _, nr := range result.NewRules {
@@ -228,20 +228,20 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			continue
 		}
 
-		// Issue 2 fix: pin the candidate's stage to the current synthesis stage.
+		// Pin the candidate's stage to the current synthesis stage.
 		// The model may emit a different or 'global' stage value; using it
-		// verbatim would cause the dedup pool (scoped to 'stage') to mismatch
+		// verbatim would cause the dedup index (scoped to 'stage') to mismatch
 		// the write target, silently dropping valid candidates or writing rules
 		// to the wrong stage directory.
 		nr.Stage = stage
 
-		// Dedup check: compare candidate text against the live dedup pool.
+		// Dedup check: compare candidate text against the pre-computed index.
 		candidateText := nr.Condition + " " + nr.Body
-		dedup := rules.CheckDedup(candidateText, dedupPool)
+		dedup := dedupIdx.Check(candidateText)
 		switch dedup.Action {
 		case rules.DedupActionMerge:
 			matched := p.ruleLoader.ByID(dedup.MatchedRuleID)
-			// Issue 4: manual rules are immutable — treat candidate as new.
+			// Manual rules are immutable — treat candidate as new.
 			if matched != nil && matched.Source == "manual" {
 				break
 			}
@@ -249,9 +249,11 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			if matched != nil {
 				matchedStage = matched.Stage
 			}
-			// Issue 3: if IncrementEvidenceCount fails (I/O error, missing file),
+			// If IncrementEvidenceCount fails (I/O error, missing file),
 			// fall through and create the candidate as a new rule rather than
-			// silently dropping it.
+			// silently dropping it. IncrementEvidenceCount also stamps
+			// last_validated_at atomically, preventing applyDecay from treating
+			// the just-reinforced rule as stale in the same cycle.
 			if err := rules.IncrementEvidenceCount(rulesDir, dedup.MatchedRuleID, matchedStage); err != nil {
 				log.WithFields(Fields{
 					"candidate": nr.ID,
@@ -297,9 +299,9 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			continue
 		}
 		batchAccepted = append(batchAccepted, rule)
-		// Issue 2: extend the dedup pool with the newly written rule so that
+		// Extend the dedup index with the newly written rule so that
 		// later candidates in the same batch are checked against it.
-		dedupPool = append(dedupPool, rule)
+		dedupIdx.Add(rule)
 		applied.newCount++
 	}
 
