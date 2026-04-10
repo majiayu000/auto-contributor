@@ -166,6 +166,13 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 // so that applyDecay cannot observe a stale last_validated_at between the two writes.
 // It is called when a candidate rule is merged into an existing rule during dedup.
 func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error {
+	// Reject IDs that could escape the rules directory via path traversal.
+	// ruleID originates from dedup.MatchedRuleID which is loaded from rule YAML
+	// and may be attacker-controlled; apply the same guard used in WriteRule.
+	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
+		return fmt.Errorf("unsafe rule ID %q", ruleID)
+	}
+
 	fileMu.Lock()
 	defer fileMu.Unlock()
 

@@ -155,6 +155,22 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 	// discarded and no active rule to be created.
 	pendingConf := make(map[string]float64, len(result.UpdatedRules))
 	for _, ur := range result.UpdatedRules {
+		// Only pre-apply confidence downgrades for rules that actually exist,
+		// are non-manual (manual rules are immutable), and belong to this stage
+		// or are global. An attacker-controlled or hallucinated low confidence
+		// for a manual/cross-stage rule ID must not evict that rule from the
+		// dedup pool, which would cause semantically duplicate new_rules to be
+		// written instead of being merged/suppressed.
+		existing := p.ruleLoader.ByID(ur.ID)
+		if existing == nil {
+			continue
+		}
+		if existing.Source == "manual" {
+			continue
+		}
+		if existing.Stage != stage && existing.Stage != "global" {
+			continue
+		}
 		pendingConf[ur.ID] = ur.NewConfidence
 	}
 
