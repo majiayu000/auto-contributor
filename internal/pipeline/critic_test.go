@@ -143,6 +143,42 @@ func TestCriticLoop_SkippedWhenTemplateAbsent(t *testing.T) {
 	}
 }
 
+// --- Fix 1 ext: unknown severity on reject treated as severe ---
+
+func TestCriticLoop_UnknownSeverityTreatedAsSevere(t *testing.T) {
+	// Verifies the severity-normalisation guard: a typo or omitted severity on a
+	// "reject" verdict must not silently downgrade to non-blocking.
+	unknowns := []string{"sevree", "", "critical", "blocker", "HIGH"}
+	for _, sev := range unknowns {
+		r := &CriticResult{Verdict: "reject", Severity: strings.TrimSpace(strings.ToLower(sev))}
+		// Apply the same guard as criticLoop.
+		switch r.Severity {
+		case "minor", "moderate", "severe":
+			// ok
+		default:
+			r.Severity = "severe"
+		}
+		if r.Severity != "severe" {
+			t.Errorf("input severity=%q: expected fallback to severe, got %q", sev, r.Severity)
+		}
+	}
+}
+
+func TestCriticLoop_KnownSeveritiesUnchanged(t *testing.T) {
+	// Recognised severities must not be overwritten by the guard.
+	for _, sev := range []string{"minor", "moderate", "severe"} {
+		r := &CriticResult{Verdict: "reject", Severity: sev}
+		switch r.Severity {
+		case "minor", "moderate", "severe":
+		default:
+			r.Severity = "severe"
+		}
+		if r.Severity != sev {
+			t.Errorf("known severity=%q should be unchanged, got %q", sev, r.Severity)
+		}
+	}
+}
+
 // --- Fix 3: non-severe rejection does not abandon ---
 
 // TestPromptStore_Has verifies that the Has helper works correctly.

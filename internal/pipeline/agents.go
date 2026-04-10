@@ -239,6 +239,24 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 			return nil
 		}
 
+		// Safety: if the LLM returned "reject" with an unrecognised severity
+		// (e.g. a typo like "sevree" or an omitted field), treat it as "severe"
+		// so that malformed output cannot silently bypass the critic gate.
+		if criticResult.Verdict == "reject" {
+			switch criticResult.Severity {
+			case "minor", "moderate", "severe":
+				// recognised — keep as-is
+			default:
+				log.WithFields(Fields{
+					"repo":     issue.Repo,
+					"issue":    issue.IssueNumber,
+					"round":    round,
+					"severity": criticResult.Severity,
+				}).Warn("critic rejected with unrecognised severity; treating as severe to prevent silent bypass")
+				criticResult.Severity = "severe"
+			}
+		}
+
 		// Non-severe (minor/moderate) rejection: non-blocking per critic.md definition.
 		// These findings are informational; proceed to the submitter.
 		if criticResult.Severity != "severe" {
@@ -277,6 +295,28 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 				"issue": issue.IssueNumber,
 				"round": round,
 			}).Warn("engineer rework (critic loop) did not produce FIX_COMPLETE, proceeding to next critic round")
+		}
+
+		// Re-run internal reviewer after critic-driven rework.
+		// The critic covers only maintainer-scope concerns (backward compat, API
+		// contracts, security) and explicitly does NOT check tests/lint — see
+		// prompts/critic.md. Without this pass, engineer rework could introduce
+		// regressions that the critic misses, causing them to ship.
+		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
+			log.WithError(err).Warn("update status to reviewing (post-critic-rework)")
+		}
+		var postCriticReview CodeReviewResult
+		revCtx := p.buildReviewerCtx(issue, analyst, round, nil)
+		revStart := time.Now()
+		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &postCriticReview); err != nil {
+			log.WithError(err).Warn("reviewer parse error after critic rework, treating as approve")
+			postCriticReview.Verdict = "approve"
+		}
+		p.recordEvent(issue, nil, "reviewer", round, revStart, postCriticReview.Verdict, postCriticReview.Verdict == "approve", "", "")
+		if postCriticReview.Verdict != "approve" {
+			p.markAbandoned(issue, fmt.Sprintf("reviewer rejected code after critic rework at round %d", round))
+			return fmt.Errorf("reviewer rejected critic-driven rework at round %d for %s#%d: %s",
+				round, issue.Repo, issue.IssueNumber, postCriticReview.ReworkInstructions)
 		}
 	}
 
