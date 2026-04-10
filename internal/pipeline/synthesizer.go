@@ -55,6 +55,11 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 	// Decay confidence on rules without recent evidence (runs on fresh in-memory state)
 	p.applyDecay()
 
+	// Reload again so runtime uses post-decay confidence values rather than stale pre-decay ones
+	if err := p.ruleLoader.Reload(); err != nil {
+		log.WithFields(Fields{"error": err}).Warn("failed to reload rules after decay")
+	}
+
 	log.WithFields(Fields{
 		"new":     totalNew,
 		"updated": totalUpdated,

@@ -93,6 +93,9 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 
 // DeleteRule removes a rule file from disk.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	path := findRuleFile(rulesDir, ruleID, stage)
 	if path == "" {
 		return nil // already gone
