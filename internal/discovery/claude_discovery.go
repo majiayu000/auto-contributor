@@ -31,8 +31,8 @@ type IssueAnalysis struct {
 	IsWellDefined        bool     `json:"is_well_defined"`
 	HasReproductionSteps bool     `json:"has_reproduction_steps"`
 	IsSelfContained      bool     `json:"is_self_contained"`
-	FixType              string   `json:"fix_type"`      // bug, docs, feature, refactor
-	Complexity           string   `json:"complexity"`    // low, medium, high
+	FixType              string   `json:"fix_type"`   // bug, docs, feature, refactor
+	Complexity           string   `json:"complexity"` // low, medium, high
 	EstimatedFiles       int      `json:"estimated_files"`
 	Blockers             []string `json:"blockers"`
 	Recommendation       string   `json:"recommendation"`

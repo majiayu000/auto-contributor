@@ -15,14 +15,14 @@ type ScoutResult struct {
 
 // AnalystResult is the structured output from the analyst agent.
 type AnalystResult struct {
-	CanFix           bool     `json:"can_fix"`
-	Reason           string   `json:"reason"`
-	BaseBranch       string   `json:"base_branch"`
-	CommitFormat     string   `json:"commit_format"`
-	BranchName       string   `json:"branch_name"`
-	ContributingRules []string `json:"contributing_rules"`
-	CICommands       CICommands `json:"ci_commands"`
-	FixPlan          FixPlan    `json:"fix_plan"`
+	CanFix            bool       `json:"can_fix"`
+	Reason            string     `json:"reason"`
+	BaseBranch        string     `json:"base_branch"`
+	CommitFormat      string     `json:"commit_format"`
+	BranchName        string     `json:"branch_name"`
+	ContributingRules []string   `json:"contributing_rules"`
+	CICommands        CICommands `json:"ci_commands"`
+	FixPlan           FixPlan    `json:"fix_plan"`
 }
 
 // CICommands holds the project's CI/CD verification commands.

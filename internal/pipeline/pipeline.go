@@ -118,9 +118,9 @@ func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error 
 	if openCount >= maxPR {
 		p.markAbandoned(issue, fmt.Sprintf("rate limit: %d open PRs on %s (max %d)", openCount, issue.Repo, maxPR))
 		log.WithFields(Fields{
-			"repo":  issue.Repo,
-			"open":  openCount,
-			"max":   maxPR,
+			"repo": issue.Repo,
+			"open": openCount,
+			"max":  maxPR,
 		}).Warn("skipping issue: too many open PRs on this repo")
 		return nil
 	}
