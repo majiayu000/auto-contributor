@@ -174,6 +174,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		today := time.Now().Format("2006-01-02")
 		if err := rules.UpdateRuleLastValidatedAt(rulesDir, ur.ID, existing.Stage, today); err != nil {
 			log.WithFields(Fields{"rule": ur.ID, "error": err}).Warn("failed to update rule last_validated_at")
+			continue
 		}
 		applied.updatedCount++
 	}
@@ -199,6 +200,9 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 }
 
 // applyDecay reduces confidence on synthesized rules without recent evidence.
+// Each rule's last_validated_at is read from disk inside DecayRuleIfStale under
+// fileMu, so a concurrent stampRuleValidation write is never missed by a stale
+// in-memory snapshot.
 func (p *Pipeline) applyDecay() {
 	rulesDir := p.ruleLoader.RulesDir()
 	for _, r := range p.ruleLoader.All() {
@@ -206,22 +210,11 @@ func (p *Pipeline) applyDecay() {
 			continue
 		}
 		if r.Confidence <= 0.1 {
-			continue // already at floor
+			continue // already at floor, skip disk round-trip
 		}
-
-		// Check if rule was validated recently
-		if r.LastValidatedAt != "" {
-			validated, err := time.Parse("2006-01-02", r.LastValidatedAt)
-			if err == nil && time.Since(validated) < 30*24*time.Hour {
-				continue // validated within 30 days
-			}
+		if err := rules.DecayRuleIfStale(rulesDir, r.ID, r.Stage, 0.9, 0.1, 30); err != nil {
+			log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to apply decay")
 		}
-
-		newConf := r.Confidence * 0.9
-		if newConf < 0.1 {
-			newConf = 0.1 // floor
-		}
-		rules.UpdateRuleConfidence(rulesDir, r.ID, r.Stage, newConf)
 	}
 }
 
