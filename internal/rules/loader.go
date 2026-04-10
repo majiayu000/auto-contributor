@@ -14,6 +14,14 @@ import (
 const MinConfidenceForInjection = 0.3
 const MaxPromptChars = 2000
 
+// maxIDSummaryBytes caps the total byte size of the ExistingRuleIDs payload injected
+// into the synthesizer prompt, which is passed via -p argv. Keeping it well below
+// typical OS ARG_MAX (128 KB per argument on Linux) prevents "argument list too long" failures.
+const maxIDSummaryBytes = 4096
+
+// maxConditionLen caps the per-rule condition snippet included in IDSummaryForStage.
+const maxConditionLen = 80
+
 // RuleLoader reads and caches rules from the rules/ directory tree.
 type RuleLoader struct {
 	rulesDir string
@@ -181,10 +189,17 @@ func (rl *RuleLoader) ByID(id string) *Rule {
 }
 
 // HasSemanticMatch returns true if an existing rule for the given stage is semantically
-// similar to the proposed rule based on keyword and tag overlap (threshold: 2 shared tokens).
+// similar to the proposed rule based on keyword and tag overlap.
+//
+// Match criteria: shared tokens ≥ 2 AND shared/min(|A|,|B|) ≥ 0.5.
+// The ratio guard prevents high-frequency but low-signal tokens (e.g. "ci", "tests")
+// from triggering false-positive suppression of distinct new rules.
 // The second return value is the ID of the matching rule, or "" if none.
 func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (bool, string) {
 	newKW := ruleKeywords(id, tags)
+	if len(newKW) < 2 {
+		return false, ""
+	}
 
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
@@ -193,7 +208,17 @@ func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (
 		if r.Stage != stage && r.Stage != "global" {
 			continue
 		}
-		if sharedKeywords(newKW, ruleKeywords(r.ID, r.Tags)) >= 2 {
+		existKW := ruleKeywords(r.ID, r.Tags)
+		if len(existKW) < 2 {
+			continue
+		}
+		shared := sharedKeywords(newKW, existKW)
+		minLen := len(newKW)
+		if len(existKW) < minLen {
+			minLen = len(existKW)
+		}
+		// Both conditions must hold: enough absolute overlap AND enough relative overlap.
+		if shared >= 2 && float64(shared)/float64(minLen) >= 0.5 {
 			return true, r.ID
 		}
 	}
@@ -202,21 +227,37 @@ func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (
 
 // IDSummaryForStage returns a compact newline-separated "id: condition" list for all rules
 // matching the given stage (and global). Used to provide deduplication context to the synthesizer.
+//
+// Output is capped at maxIDSummaryBytes to stay well within OS ARG_MAX when the result
+// is embedded in the synthesizer prompt passed via -p argv. Each condition snippet is also
+// truncated to maxConditionLen characters.
 func (rl *RuleLoader) IDSummaryForStage(stage string) string {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
 
 	var sb strings.Builder
+	omitted := 0
 	for _, r := range rl.rules {
 		if r.Stage != stage && r.Stage != "global" {
 			continue
 		}
+		if sb.Len() >= maxIDSummaryBytes {
+			omitted++
+			continue
+		}
 		sb.WriteString(r.ID)
 		if r.Condition != "" {
+			cond := r.Condition
+			if len(cond) > maxConditionLen {
+				cond = cond[:maxConditionLen] + "…"
+			}
 			sb.WriteString(": ")
-			sb.WriteString(r.Condition)
+			sb.WriteString(cond)
 		}
 		sb.WriteByte('\n')
+	}
+	if omitted > 0 {
+		fmt.Fprintf(&sb, "(%d more rules omitted — see rules/ directory for full list)\n", omitted)
 	}
 	return sb.String()
 }
@@ -227,6 +268,10 @@ func ruleKeywords(id string, tags []string) []string {
 		"and": true, "or": true, "the": true, "for": true, "in": true,
 		"to": true, "a": true, "of": true, "with": true, "on": true,
 		"is": true, "not": true, "no": true, "per": true,
+		// domain-specific high-frequency tokens that appear in many rules but
+		// do not distinguish rule semantics; without these, two rules sharing
+		// only "ci"+"tests" would falsely trigger semantic-duplicate suppression.
+		"ci": true, "test": true, "tests": true,
 	}
 	seen := map[string]bool{}
 	var kw []string

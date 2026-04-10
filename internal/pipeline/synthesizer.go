@@ -139,7 +139,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		}
 		// Skip semantically duplicate rules to prevent rule explosion
 		if match, matchID := p.ruleLoader.HasSemanticMatch(nr.ID, nr.Tags, nr.Stage); match {
-			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Debug("skipping semantically duplicate rule")
+			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Info("skipping semantically duplicate rule")
 			continue
 		}
 
