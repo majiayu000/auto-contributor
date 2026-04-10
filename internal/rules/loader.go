@@ -183,6 +183,32 @@ func (rl *RuleLoader) HasSimilarInStage(stage, body string) (*Rule, bool) {
 	return nil, false
 }
 
+// HasSimilarInSlice reports whether any rule in candidates for the given stage has a
+// body semantically similar to the candidate body (Jaccard similarity ≥ 0.4).
+// Used for intra-batch deduplication where newly written rules are not yet in the loader snapshot.
+func HasSimilarInSlice(stage, body string, candidates []*Rule) (*Rule, bool) {
+	newKW := extractKeywords(body)
+	if len(newKW) == 0 {
+		return nil, false
+	}
+	var best *Rule
+	bestScore := 0.0
+	for _, r := range candidates {
+		if r.Stage != stage && r.Stage != "global" {
+			continue
+		}
+		score := jaccardSimilarity(newKW, extractKeywords(r.Body))
+		if score > bestScore {
+			bestScore = score
+			best = r
+		}
+	}
+	if bestScore >= 0.4 {
+		return best, true
+	}
+	return nil, false
+}
+
 // extractKeywords tokenizes text into lowercase significant words,
 // filtering out short words and common English stopwords.
 func extractKeywords(text string) map[string]struct{} {

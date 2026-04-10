@@ -116,7 +116,19 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 	var applied applyResult
 	rulesDir := p.ruleLoader.RulesDir()
 
+	// Build the set of IDs being retired in this result (non-manual, existing rules).
+	// Used to allow replacement rules that are semantically similar to their retiring predecessors —
+	// without this, dedup would block Y as a duplicate of X and then X would be deleted, losing both.
+	retiringIDs := make(map[string]struct{}, len(result.RetiredRules))
+	for _, rr := range result.RetiredRules {
+		existing := p.ruleLoader.ByID(rr.ID)
+		if existing != nil && existing.Source != "manual" {
+			retiringIDs[rr.ID] = struct{}{}
+		}
+	}
+
 	// Write new rules (validate first)
+	writtenInBatch := make([]*rules.Rule, 0, len(result.NewRules))
 	for _, nr := range result.NewRules {
 		if nr.EvidenceCount < 3 {
 			continue
@@ -132,8 +144,18 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			continue
 		}
 		// Skip semantically duplicate rules — same concept already covered.
+		// Exclude rules that are being retired in this same result so that their
+		// replacements are not incorrectly suppressed.
 		if similar, ok := p.ruleLoader.HasSimilarInStage(nr.Stage, nr.Body); ok {
-			log.WithFields(Fields{"new": nr.ID, "existing": similar.ID}).Debug("skipping semantically duplicate rule")
+			if _, retiring := retiringIDs[similar.ID]; !retiring {
+				log.WithFields(Fields{"new": nr.ID, "existing": similar.ID}).Debug("skipping semantically duplicate rule")
+				continue
+			}
+		}
+		// Check against rules already written in this batch — the loader snapshot is not
+		// refreshed mid-loop, so intra-batch duplicates would otherwise both be written.
+		if similar, ok := rules.HasSimilarInSlice(nr.Stage, nr.Body, writtenInBatch); ok {
+			log.WithFields(Fields{"new": nr.ID, "existing": similar.ID}).Debug("skipping intra-batch duplicate rule")
 			continue
 		}
 
@@ -164,6 +186,7 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 			log.WithFields(Fields{"rule": nr.ID, "error": err}).Warn("failed to write synthesized rule")
 			continue
 		}
+		writtenInBatch = append(writtenInBatch, rule)
 		applied.newCount++
 	}
 
