@@ -137,8 +137,10 @@ func (p *Pipeline) applySynthesisResult(stage string, result *SynthesizerResult)
 		if p.ruleLoader.ByID(nr.ID) != nil {
 			continue
 		}
-		// Skip semantically duplicate rules to prevent rule explosion
-		if match, matchID := p.ruleLoader.HasSemanticMatch(nr.ID, nr.Tags, nr.Stage); match {
+		// Skip semantically duplicate rules to prevent rule explosion.
+		// Use the trusted function-arg `stage` instead of nr.Stage (model output) to
+		// ensure dedup always runs against the correct stage's rule set.
+		if match, matchID := p.ruleLoader.HasSemanticMatch(nr.ID, nr.Tags, stage); match {
 			log.WithFields(Fields{"rule": nr.ID, "existingMatch": matchID}).Info("skipping semantically duplicate rule")
 			continue
 		}

@@ -24,7 +24,13 @@ var (
 
 func main() {
 	// Load .env file if it exists; absence is not an error.
+	// Any other failure (parse error, permission denied) must abort early to
+	// prevent silently broken env config from causing auth/runtime failures later.
 	if err := godotenv.Load(); err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "fatal: failed to load .env file: %v\n", err)
+			os.Exit(1)
+		}
 		log.Debug("no .env file, relying on environment variables")
 	}
 

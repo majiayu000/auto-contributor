@@ -208,6 +208,11 @@ func (rl *RuleLoader) HasSemanticMatch(id string, tags []string, stage string) (
 		if r.Stage != stage && r.Stage != "global" {
 			continue
 		}
+		// Exclude rules below the injection threshold: stale/decayed rules should
+		// not permanently block creation of fresh replacements.
+		if r.Confidence < MinConfidenceForInjection {
+			continue
+		}
 		existKW := ruleKeywords(r.ID, r.Tags)
 		if len(existKW) < 2 {
 			continue
