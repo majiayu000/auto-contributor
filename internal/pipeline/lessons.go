@@ -179,46 +179,48 @@ func isBot(author string) bool {
 // extractAndStoreLessons fetches reviews/comments for a PR and stores lessons in DB.
 // Called when a PR reaches terminal state (merged/closed) so we learn from the feedback.
 func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo) {
-	// Skip if we already extracted lessons for this PR
-	count, _ := p.db.CountLessonsByPR(pr.ID)
-	if count > 0 {
-		return
-	}
-
-	// Get inline review comments
-	comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
-	if err != nil {
-		log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to fetch comments for lesson extraction")
-		comments = nil
-	}
-
-	// Get issue-level comments — maintainers often explain close reasons here
+	// Issue-level comments are needed for both lesson extraction and outcome
+	// classification, so fetch them unconditionally before any guard.
 	issueComments, _ := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
 
-	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments)
-
-	// Also extract from issue comments when PR was closed without merge
-	if prInfo.State == "CLOSED" {
-		lessons = append(lessons, extractLessonsFromIssueComments(pr, prRepo, issueComments)...)
-	}
-
-	saved := 0
-	for _, l := range lessons {
-		if err := p.db.SaveReviewLesson(l); err != nil {
-			log.WithError(err).Warn("failed to save review lesson")
-			continue
+	// Only extract lessons when none have been stored for this PR. Do NOT return
+	// early here — outcome labeling and merge-stamping must always run so that a
+	// PR first seen as CLOSED still gets its rules stamped when later merged.
+	count, _ := p.db.CountLessonsByPR(pr.ID)
+	if count == 0 {
+		// Get inline review comments
+		comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+		if err != nil {
+			log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to fetch comments for lesson extraction")
+			comments = nil
 		}
-		saved++
+
+		lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments)
+
+		// Also extract from issue comments when PR was closed without merge
+		if prInfo.State == "CLOSED" {
+			lessons = append(lessons, extractLessonsFromIssueComments(pr, prRepo, issueComments)...)
+		}
+
+		saved := 0
+		for _, l := range lessons {
+			if err := p.db.SaveReviewLesson(l); err != nil {
+				log.WithError(err).Warn("failed to save review lesson")
+				continue
+			}
+			saved++
+		}
+
+		if saved > 0 {
+			log.WithFields(Fields{
+				"pr":      pr.PRURL,
+				"lessons": saved,
+			}).Info("extracted review lessons")
+		}
 	}
 
-	if saved > 0 {
-		log.WithFields(Fields{
-			"pr":      pr.PRURL,
-			"lessons": saved,
-		}).Info("extracted review lessons")
-	}
-
-	// Label all pipeline events for this PR/issue with the outcome
+	// Label all pipeline events for this PR/issue with the outcome.
+	// Always runs regardless of whether lessons were already extracted.
 	label := ClassifyOutcome(prInfo, issueComments, pr)
 	if err := p.db.LabelEventsByIssue(pr.IssueID, label); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to label pipeline events")
@@ -252,15 +254,18 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 		}
 		seenStages[e.Stage] = true
 
+		// Only stamp rules that were actually injected into the prompt during this
+		// stage's execution. InjectedRuleIDsForStage replicates the FormatForPrompt
+		// char-budget logic, so rules that passed the confidence threshold but were
+		// truncated by MaxPromptChars are excluded — they never influenced the LLM
+		// output and must not receive a fresh last_validated_at stamp (which would
+		// block their decay indefinitely).
+		injected := p.ruleLoader.InjectedRuleIDsForStage(e.Stage)
 		for _, r := range p.ruleLoader.All() {
-			if r.Stage != e.Stage || r.Source != "synthesized" {
+			if r.Source != "synthesized" {
 				continue
 			}
-			// Only stamp rules that were actually eligible for injection during this PR.
-			// Rules below the injection threshold were never used, so a merged PR is not
-			// evidence that they produced good output; stamping them would prevent decay
-			// of low-quality rules and let them persist indefinitely.
-			if r.Confidence < rules.MinConfidenceForInjection {
+			if !injected[r.ID] {
 				continue
 			}
 			if err := rules.UpdateRuleLastValidatedAt(rulesDir, r.ID, r.Stage, today); err != nil {

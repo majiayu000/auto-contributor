@@ -147,6 +147,26 @@ func (rl *RuleLoader) FormatForPrompt(stage string) string {
 	return sb.String()
 }
 
+// InjectedRuleIDsForStage returns the set of rule IDs that would actually be
+// written into the prompt for stage, respecting the MaxPromptChars budget.
+// Rules that pass MinConfidenceForInjection but are truncated by the char limit
+// are excluded — they were never seen by the LLM and must not be treated as
+// having influenced a merged PR's output.
+func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
+	matched := rl.ForStage(stage)
+	injected := make(map[string]bool)
+	total := 0
+	for _, r := range matched {
+		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
+		if total+len(entry) > MaxPromptChars {
+			break
+		}
+		injected[r.ID] = true
+		total += len(entry)
+	}
+	return injected
+}
+
 // ByID finds a rule by its ID.
 func (rl *RuleLoader) ByID(id string) *Rule {
 	rl.mu.RLock()
