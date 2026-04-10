@@ -109,6 +109,11 @@ func (p *Pipeline) updateQValues(issueID int64) {
 	}
 
 	if updated > 0 {
+		// Reload in-memory cache so subsequent calls in this process use the
+		// freshly-written Q-values/counters rather than the stale baseline.
+		if err := p.ruleLoader.Reload(); err != nil {
+			log.WithError(err).Warn("failed to reload rules after Q-value update")
+		}
 		log.WithFields(Fields{
 			"issue":   issueID,
 			"outcome": outcomeLabel,

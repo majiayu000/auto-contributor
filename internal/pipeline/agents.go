@@ -13,7 +13,7 @@ import (
 // --- Scout ---
 
 func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutResult, error) {
-	stageRules := p.ruleLoader.IDsForStage("scout")
+	stageRules := p.ruleLoader.IDsForPrompt("scout")
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
@@ -42,7 +42,7 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 // --- Analyst ---
 
 func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspace string, scout *ScoutResult) (*AnalystResult, error) {
-	stageRules := p.ruleLoader.IDsForStage("analyst")
+	stageRules := p.ruleLoader.IDsForPrompt("analyst")
 	scoutJSON, _ := json.MarshalIndent(scout, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -141,7 +141,7 @@ func (p *Pipeline) buildReviewerCtx(issue *models.Issue, analyst *AnalystResult,
 // --- Submitter ---
 
 func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) (*SubmitResult, error) {
-	stageRules := p.ruleLoader.IDsForStage("submitter")
+	stageRules := p.ruleLoader.IDsForPrompt("submitter")
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -377,8 +377,8 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 	var lastReview *CodeReviewResult
 	lastSummary := ""
 
-	engineerRules := p.ruleLoader.IDsForStage("engineer")
-	reviewerRules := p.ruleLoader.IDsForStage("reviewer")
+	engineerRules := p.ruleLoader.IDsForPrompt("engineer")
+	reviewerRules := p.ruleLoader.IDsForPrompt("reviewer")
 
 	for round := 1; round <= p.maxReview; round++ {
 		// Engineer

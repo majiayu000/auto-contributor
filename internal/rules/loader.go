@@ -50,12 +50,12 @@ func (rl *RuleLoader) Load() error {
 	}
 
 	var loaded []*Rule
-	// Hold fileMu for the entire walk so we cannot read a file that a concurrent
+	// Hold writeMu for the entire walk so we cannot read a file that a concurrent
 	// writer (UpdateRuleConfidence, UpdateRuleLastValidatedAt, WriteRule, DeleteRule)
 	// has only partially written.  Without this lock, os.ReadFile can observe a
 	// truncated or zero-byte file mid-os.WriteFile, producing a malformed YAML
 	// unmarshal that silently drops the rule from in-memory state.
-	fileMu.Lock()
+	writeMu.Lock()
 	err = filepath.Walk(rl.rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip unreadable files
@@ -82,7 +82,7 @@ func (rl *RuleLoader) Load() error {
 		loaded = append(loaded, &rule)
 		return nil
 	})
-	fileMu.Unlock()
+	writeMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -131,13 +131,35 @@ func (rl *RuleLoader) ForStage(stage string) []*Rule {
 	return matched
 }
 
-// IDsForStage returns the IDs of rules that would be injected for a given stage.
+// IDsForStage returns the IDs of rules that pass the confidence filter for a given stage.
 // This is used to record which rules were active when an agent ran (for Q-value tracking).
 func (rl *RuleLoader) IDsForStage(stage string) []string {
 	matched := rl.ForStage(stage)
 	ids := make([]string, 0, len(matched))
 	for _, r := range matched {
 		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// IDsForPrompt returns the IDs of rules that were actually included in the prompt
+// for a given stage, honouring the same MaxPromptChars budget as FormatForPrompt.
+// Use this instead of IDsForStage when recording Q-value participation, so that
+// rules truncated out of the prompt are not credited or penalised for outcomes.
+func (rl *RuleLoader) IDsForPrompt(stage string) []string {
+	matched := rl.ForStage(stage)
+
+	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
+	total := len(header)
+
+	ids := make([]string, 0, len(matched))
+	for _, r := range matched {
+		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
+		if total+len(entry) > MaxPromptChars {
+			break
+		}
+		ids = append(ids, r.ID)
+		total += len(entry)
 	}
 	return ids
 }
