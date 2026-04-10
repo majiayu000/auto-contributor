@@ -39,6 +39,10 @@ Do NOT repeat the same mistakes. Focus on fixing exactly what the reviewer flagg
 {{ .PastLessons }}
 {{ end }}
 
+{{ if .SimilarTrajectories }}
+{{ .SimilarTrajectories }}
+{{ end }}
+
 ## Implementation Rules
 
 1. **Minimal fix only** — change ONLY what's necessary to fix the issue
