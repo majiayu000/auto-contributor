@@ -34,12 +34,18 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	switch prInfo.State {
 	case "MERGED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged)
+		if err := p.db.SyncRepoProfileStats(prRepo); err != nil {
+			log.WithFields(Fields{"repo": prRepo, "error": err}).Warn("sync repo profile stats after merge")
+		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+		if err := p.db.SyncRepoProfileStats(prRepo); err != nil {
+			log.WithFields(Fields{"repo": prRepo, "error": err}).Warn("sync repo profile stats after close")
+		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
@@ -477,19 +483,19 @@ func (p *Pipeline) buildResponderCtx(
 	}
 
 	return map[string]any{
-		"Repo":                 issue.Repo,
-		"IssueNumber":          issue.IssueNumber,
-		"IssueTitle":           issue.Title,
-		"IssueBody":            issue.Body,
+		"Repo":                  issue.Repo,
+		"IssueNumber":           issue.IssueNumber,
+		"IssueTitle":            issue.Title,
+		"IssueBody":             issue.Body,
 		"OriginalIssueComments": p.fetchOriginalIssueComments(issue),
-		"PRNumber":             pr.PRNumber,
-		"PRURL":                pr.PRURL,
-		"BranchName":           pr.BranchName,
-		"FeedbackRound":        pr.FeedbackRound + 1,
-		"Reviews":              reviewsText,
-		"InlineComments":       commentsText,
-		"IssueComments":        issueCommentsText,
-		"Rules":                p.ruleLoader.FormatForPrompt("responder"),
+		"PRNumber":              pr.PRNumber,
+		"PRURL":                 pr.PRURL,
+		"BranchName":            pr.BranchName,
+		"FeedbackRound":         pr.FeedbackRound + 1,
+		"Reviews":               reviewsText,
+		"InlineComments":        commentsText,
+		"IssueComments":         issueCommentsText,
+		"Rules":                 p.ruleLoader.FormatForPrompt("responder"),
 	}
 }
 

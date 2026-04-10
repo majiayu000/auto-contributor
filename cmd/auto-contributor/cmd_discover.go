@@ -33,6 +33,18 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// Check repo profile: skip blacklisted or cooling-down repos
+		if profile, err := database.GetRepoProfile(issue.Repo); err == nil && profile != nil {
+			if profile.Blacklisted {
+				fmt.Printf("Skipping profile-blacklisted repo: %s (%s)\n", issue.Repo, profile.BlacklistReason)
+				continue
+			}
+			if profile.IsOnCooldown() {
+				fmt.Printf("Skipping repo on cooldown: %s (until %s)\n", issue.Repo, profile.CooldownUntil.Format("2006-01-02"))
+				continue
+			}
+		}
+
 		// Save to database
 		if err := database.CreateIssue(issue); err != nil {
 			fmt.Printf("Warning: failed to save issue %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
@@ -139,6 +151,18 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 				if isBlacklisted {
 					fmt.Printf("   Skipping blacklisted repo: %s\n", issue.Repo)
 					continue
+				}
+
+				// Check repo profile: skip blacklisted or cooling-down repos
+				if profile, err := database.GetRepoProfile(issue.Repo); err == nil && profile != nil {
+					if profile.Blacklisted {
+						fmt.Printf("   Skipping profile-blacklisted repo: %s (%s)\n", issue.Repo, profile.BlacklistReason)
+						continue
+					}
+					if profile.IsOnCooldown() {
+						fmt.Printf("   Skipping repo on cooldown: %s (until %s)\n", issue.Repo, profile.CooldownUntil.Format("2006-01-02"))
+						continue
+					}
 				}
 
 				dbIssue := &models.Issue{
