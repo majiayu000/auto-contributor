@@ -148,13 +148,22 @@ func (db *DB) UpsertRepoProfile(p *models.RepoProfile) error {
 // overlapping loop executions), the second call is a no-op. If the profile update
 // fails after the flag is set, the flag is reset so the next cycle can retry.
 func (db *DB) RecordPROutcome(prID int64, repo string, merged bool, responseHours float64) error {
-	// Atomically claim the right to record this outcome. If outcome_recorded is
-	// already 1 (set by a prior call), affected rows will be 0 → skip.
+	// Wrap the claim and profile upsert in a single transaction so that a
+	// process crash between the two statements rolls both back automatically.
+	// On rollback, outcome_recorded stays 0 and the next loop cycle can retry.
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx for pr %d: %w", prID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck — no-op after Commit; rolls back on any error path
+
+	// Claim the right to record this outcome. If outcome_recorded is already 1
+	// (set by a prior committed run), affected rows will be 0 → skip.
 	claimQ := fmt.Sprintf(
 		`UPDATE pull_requests SET outcome_recorded = 1 WHERE id = %s AND outcome_recorded = 0`,
 		db.placeholder(1),
 	)
-	res, err := db.Exec(claimQ, prID)
+	res, err := tx.Exec(claimQ, prID)
 	if err != nil {
 		return fmt.Errorf("claim outcome_recorded for pr %d: %w", prID, err)
 	}
@@ -163,7 +172,7 @@ func (db *DB) RecordPROutcome(prID int64, repo string, merged bool, responseHour
 		return fmt.Errorf("rows affected for pr %d: %w", prID, err)
 	}
 	if affected == 0 {
-		// Already recorded by a previous run — idempotent skip.
+		// Already recorded by a previous committed run — idempotent skip.
 		return nil
 	}
 
@@ -176,8 +185,7 @@ func (db *DB) RecordPROutcome(prID int64, repo string, merged bool, responseHour
 	}
 	mergeRate := float64(mergedInc) // merge_rate for a brand-new row (1 PR total)
 
-	// Single atomic upsert: increment counters and recompute merge_rate in-database.
-	// Using excluded.* to reference the INSERT values inside ON CONFLICT DO UPDATE.
+	// Increment counters and recompute merge_rate in-database.
 	profileQ := fmt.Sprintf(`
 		INSERT INTO repo_profiles (
 			repo, total_prs_submitted, total_merged, total_rejected,
@@ -198,14 +206,12 @@ func (db *DB) RecordPROutcome(prID int64, repo string, merged bool, responseHour
 		db.placeholder(5), // now (last_interaction)
 		db.placeholder(6), // now (updated_at)
 	)
-	if _, err := db.Exec(profileQ, repo, mergedInc, rejectedInc, mergeRate, now, now); err != nil {
-		// Reset the flag so the next feedback cycle can retry.
-		resetQ := fmt.Sprintf(
-			`UPDATE pull_requests SET outcome_recorded = 0 WHERE id = %s`,
-			db.placeholder(1),
-		)
-		db.Exec(resetQ, prID) //nolint:errcheck — best-effort reset; original error takes priority
+	if _, err := tx.Exec(profileQ, repo, mergedInc, rejectedInc, mergeRate, now, now); err != nil {
 		return fmt.Errorf("record PR outcome: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit PR outcome for pr %d: %w", prID, err)
 	}
 
 	// Update running average response time separately (best-effort; not used in

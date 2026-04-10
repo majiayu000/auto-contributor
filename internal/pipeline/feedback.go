@@ -34,22 +34,26 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	responseHours := prResponseHours(prInfo.CreatedAt, pr.CreatedAt)
 	switch prInfo.State {
 	case "MERGED":
+		// Record outcome first; if it fails return an error so the PR stays open
+		// in the DB and the next loop cycle can retry (outcome_recorded flag is
+		// reset by the transaction rollback in RecordPROutcome on failure).
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, responseHours); err != nil {
+			return fmt.Errorf("record merged PR outcome: %w", err)
+		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
-		}
-		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, responseHours); err != nil {
-			log.WithError(err).Warn("failed to record merged PR outcome")
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
+		// Same retry-safe ordering as MERGED above.
+		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, responseHours); err != nil {
+			return fmt.Errorf("record closed PR outcome: %w", err)
+		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 			return fmt.Errorf("update PR status to closed: %w", err)
-		}
-		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, responseHours); err != nil {
-			log.WithError(err).Warn("failed to record closed PR outcome")
 		}
 		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
 		p.cleanupWorkspace(pr)
@@ -70,6 +74,9 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			log.WithError(err).Warn("failed to auto-close stale PR")
 		} else {
 			p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+			if err := p.db.RecordPROutcome(pr.ID, prRepo, false, responseHours); err != nil {
+				log.WithError(err).Warn("failed to record stale auto-close outcome")
+			}
 		}
 		return nil
 	}
@@ -131,6 +138,9 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 				log.WithError(err).Warn("failed to auto-close CI-failed PR")
 			} else {
 				p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+				if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, pr.CreatedAt)); err != nil {
+					log.WithError(err).Warn("failed to record CI auto-close outcome")
+				}
 			}
 			return nil
 		}
