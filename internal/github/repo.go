@@ -127,7 +127,9 @@ func (c *Client) HasExistingPR(ctx context.Context, repoFullName string, issueNu
 	var prs []struct {
 		Number int `json:"number"`
 	}
-	json.Unmarshal(output, &prs)
+	if err := json.Unmarshal(output, &prs); err != nil {
+		return false, fmt.Errorf("parse pr list for %s#%d: %w", repoFullName, issueNum, err)
+	}
 
 	return len(prs) > 0, nil
 }
