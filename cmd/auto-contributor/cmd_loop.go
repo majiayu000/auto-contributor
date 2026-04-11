@@ -220,9 +220,15 @@ func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 			continue
 		}
 
-		// Double-check for existing PR; treat lookup errors as fail-closed to avoid duplicate PRs
+		// Double-check for existing PR; log lookup errors rather than silently skipping
 		hasPR, err := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
-		if err != nil || hasPR {
+		if err != nil {
+			log.Error("HasExistingPR lookup failed, skipping issue",
+				"repo", issue.Repo, "issue", issue.IssueNumber, "error", err)
+			skipped++
+			continue
+		}
+		if hasPR {
 			skipped++
 			continue
 		}

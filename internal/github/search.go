@@ -69,10 +69,13 @@ func (c *Client) SearchIssues(ctx context.Context, limit int) ([]*models.Issue, 
 			continue
 		}
 
-		// Check if issue already has a linked PR; treat lookup errors as fail-closed to avoid duplicate PRs
+		// Check if issue already has a linked PR; surface lookup errors instead of silently skipping
 		hasPR, err := c.HasExistingPR(ctx, repo, r.Number)
-		if err != nil || hasPR {
-			continue // Skip issues that already have PRs or on lookup error
+		if err != nil {
+			return nil, fmt.Errorf("check existing PR for %s#%d: %w", repo, r.Number, err)
+		}
+		if hasPR {
+			continue
 		}
 
 		// Get repo info
@@ -169,9 +172,12 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 			continue
 		}
 
-		// Skip if already has a competing PR; treat lookup errors as fail-closed to avoid duplicate PRs
+		// Skip if already has a competing PR; surface lookup errors instead of silently skipping
 		hasPR, err := c.HasExistingPR(ctx, repoFullName, r.Number)
-		if err != nil || hasPR {
+		if err != nil {
+			return nil, fmt.Errorf("check existing PR for %s#%d: %w", repoFullName, r.Number, err)
+		}
+		if hasPR {
 			continue
 		}
 
