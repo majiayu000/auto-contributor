@@ -69,10 +69,12 @@ func (c *Client) SearchIssues(ctx context.Context, limit int) ([]*models.Issue, 
 			continue
 		}
 
-		// Check if issue already has a linked PR; surface lookup errors instead of silently skipping
+		// Check if issue already has a linked PR; on transient lookup error skip conservatively
+		// (fail-closed per item) so one bad gh call doesn't abort the entire discovery run.
 		hasPR, err := c.HasExistingPR(ctx, repo, r.Number)
 		if err != nil {
-			return nil, fmt.Errorf("check existing PR for %s#%d: %w", repo, r.Number, err)
+			fmt.Printf("Warning: skipping %s#%d: check existing PR: %v\n", repo, r.Number, err)
+			continue
 		}
 		if hasPR {
 			continue
@@ -172,10 +174,12 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 			continue
 		}
 
-		// Skip if already has a competing PR; surface lookup errors instead of silently skipping
+		// Skip if already has a competing PR; on transient lookup error skip conservatively
+		// (fail-closed per item) so one bad gh call doesn't abort the entire repo scan.
 		hasPR, err := c.HasExistingPR(ctx, repoFullName, r.Number)
 		if err != nil {
-			return nil, fmt.Errorf("check existing PR for %s#%d: %w", repoFullName, r.Number, err)
+			fmt.Printf("Warning: skipping %s#%d: check existing PR: %v\n", repoFullName, r.Number, err)
+			continue
 		}
 		if hasPR {
 			continue
