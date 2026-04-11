@@ -220,9 +220,9 @@ func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 			continue
 		}
 
-		// Double-check for existing PR
-		hasPR, _ := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
-		if hasPR {
+		// Double-check for existing PR; treat lookup errors as fail-closed to avoid duplicate PRs
+		hasPR, err := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
+		if err != nil || hasPR {
 			skipped++
 			continue
 		}
