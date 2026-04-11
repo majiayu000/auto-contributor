@@ -61,6 +61,8 @@ func (c *Client) SearchIssues(ctx context.Context, limit int) ([]*models.Issue, 
 	}
 
 	var issues []*models.Issue
+	var prChecked, prCheckErrs int
+	var lastPRCheckErr error
 	for _, r := range results {
 		repo := r.Repository.NameWithOwner
 
@@ -71,9 +73,12 @@ func (c *Client) SearchIssues(ctx context.Context, limit int) ([]*models.Issue, 
 
 		// Check if issue already has a linked PR; on transient lookup error skip conservatively
 		// (fail-closed per item) so one bad gh call doesn't abort the entire discovery run.
+		prChecked++
 		hasPR, err := c.HasExistingPR(ctx, repo, r.Number)
 		if err != nil {
 			fmt.Printf("Warning: skipping %s#%d: check existing PR: %v\n", repo, r.Number, err)
+			prCheckErrs++
+			lastPRCheckErr = err
 			continue
 		}
 		if hasPR {
@@ -111,6 +116,12 @@ func (c *Client) SearchIssues(ctx context.Context, limit int) ([]*models.Issue, 
 		}
 
 		issues = append(issues, issue)
+	}
+
+	// If every PR-existence check failed, this is a systemic failure (auth/rate-limit/network),
+	// not "zero candidates". Surface the error so callers can distinguish the two cases.
+	if prChecked > 0 && prCheckErrs == prChecked {
+		return nil, fmt.Errorf("all HasExistingPR checks failed (%d/%d items); last error: %w", prCheckErrs, prChecked, lastPRCheckErr)
 	}
 
 	return issues, nil
@@ -169,6 +180,8 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 	}
 
 	var issues []*models.Issue
+	var prChecked, prCheckErrs int
+	var lastPRCheckErr error
 	for _, r := range raw {
 		if len(r.Assignees) > 0 {
 			continue
@@ -176,9 +189,12 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 
 		// Skip if already has a competing PR; on transient lookup error skip conservatively
 		// (fail-closed per item) so one bad gh call doesn't abort the entire repo scan.
+		prChecked++
 		hasPR, err := c.HasExistingPR(ctx, repoFullName, r.Number)
 		if err != nil {
 			fmt.Printf("Warning: skipping %s#%d: check existing PR: %v\n", repoFullName, r.Number, err)
+			prCheckErrs++
+			lastPRCheckErr = err
 			continue
 		}
 		if hasPR {
@@ -206,6 +222,12 @@ func (c *Client) GetUnassignedBugs(ctx context.Context, repoFullName string, lim
 		if len(issues) >= limit {
 			break
 		}
+	}
+
+	// If every PR-existence check failed, this is a systemic failure (auth/rate-limit/network),
+	// not "zero candidates". Surface the error so callers can distinguish the two cases.
+	if prChecked > 0 && prCheckErrs == prChecked {
+		return nil, fmt.Errorf("all HasExistingPR checks failed (%d/%d items); last error: %w", prCheckErrs, prChecked, lastPRCheckErr)
 	}
 
 	return issues, nil
