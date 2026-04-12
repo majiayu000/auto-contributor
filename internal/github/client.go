@@ -9,7 +9,10 @@ import (
 	"strings"
 
 	"github.com/majiayu000/auto-contributor/internal/config"
+	"github.com/majiayu000/auto-contributor/pkg/logger"
 )
+
+var log = logger.NewComponent("github")
 
 // Client wraps the gh CLI for GitHub API calls
 type Client struct {
