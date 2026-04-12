@@ -208,6 +208,48 @@ func TestIncrementEvidenceCount_StampsLastValidatedAt(t *testing.T) {
 	}
 }
 
+// TestWriteRule_UnsafeStage verifies that WriteRule rejects Stage values that
+// could escape the rules directory via path traversal (SEC-07).
+func TestWriteRule_UnsafeStage(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		stage string
+	}{
+		{"../../../etc/cron.d"},
+		{".."},
+		{"scout/../../../etc"},
+		{""},
+		{"unknown-stage"},
+		{"/etc/passwd"},
+	}
+	for _, tc := range cases {
+		rule := &Rule{
+			ID:    "safe-id",
+			Stage: tc.stage,
+			Body:  "test",
+		}
+		if err := WriteRule(dir, rule); err == nil {
+			t.Errorf("WriteRule(%q) should have returned an error for unsafe stage", tc.stage)
+		}
+	}
+}
+
+// TestWriteRule_AllowedStages verifies that WriteRule accepts all valid stage names.
+func TestWriteRule_AllowedStages(t *testing.T) {
+	dir := t.TempDir()
+	stages := []string{"scout", "analyst", "engineer", "reviewer", "submitter", "responder", "global"}
+	for _, stage := range stages {
+		rule := &Rule{
+			ID:    "test-stage-rule",
+			Stage: stage,
+			Body:  "test body",
+		}
+		if err := WriteRule(dir, rule); err != nil {
+			t.Errorf("WriteRule with valid stage %q returned unexpected error: %v", stage, err)
+		}
+	}
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
