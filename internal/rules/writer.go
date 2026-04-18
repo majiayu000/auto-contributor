@@ -278,6 +278,8 @@ func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error 
 }
 
 // findRuleFile locates a rule file by ID, checking stage dir first then walking all dirs.
+// Symlinks are rejected: a poisoned symlink (e.g. rules/engineer/id.yaml -> /etc/cron.d/pwn)
+// would otherwise become an out-of-tree write primitive via the Update*/Decay helpers (SEC-07).
 func findRuleFile(rulesDir, ruleID, stage string) string {
 	// Validate stage against the allowlist to prevent path traversal (SEC-07).
 	// All callers pass stage values that originate from rule YAML (r.Stage), which
@@ -291,18 +293,23 @@ func findRuleFile(rulesDir, ruleID, stage string) string {
 	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
 		return ""
 	}
-	// Check stage-specific dir first
+
+	// Check stage-specific dir first; use Lstat so we never follow a symlink (SEC-07).
 	if stage != "" {
 		path := filepath.Join(rulesDir, stage, ruleID+".yaml")
-		if _, err := os.Stat(path); err == nil {
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return path
 		}
 	}
 
-	// Walk all dirs
+	// Walk all dirs; filepath.Walk uses os.Lstat internally so info reflects the
+	// symlink itself, not its target — skip any entry with ModeSymlink set.
 	var found string
 	filepath.Walk(rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if strings.TrimSuffix(info.Name(), ".yaml") == ruleID {

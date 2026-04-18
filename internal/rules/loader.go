@@ -73,6 +73,11 @@ func (rl *RuleLoader) readFromDisk() error {
 		if err != nil {
 			return nil // skip unreadable files
 		}
+		// Skip symlinks — following them could escape the rules directory (SEC-07).
+		// filepath.Walk uses os.Lstat, so ModeSymlink is set for symlink entries.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
 		if info.IsDir() || !strings.HasSuffix(path, ".yaml") {
 			return nil
 		}
