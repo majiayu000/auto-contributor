@@ -2,6 +2,7 @@ package rules
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -252,8 +253,19 @@ func TestWriteRule_AllowedStages(t *testing.T) {
 
 // TestFindRuleFile_UnsafeStage verifies that findRuleFile returns "" for stage values
 // outside the allowlist, preventing path traversal via LLM-controlled Stage fields (SEC-07).
+// A fixture file is placed outside the rules dir so the test catches regressions:
+// without the stage allowlist guard, stage=".." would resolve to the fixture and return it.
 func TestFindRuleFile_UnsafeStage(t *testing.T) {
-	dir := t.TempDir()
+	parent := t.TempDir()
+	rulesDir := filepath.Join(parent, "rules")
+	if err := os.Mkdir(rulesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// File reachable via stage=".." if the guard is absent: rules/../evil.yaml = parent/evil.yaml
+	outside := filepath.Join(parent, "evil.yaml")
+	if err := os.WriteFile(outside, []byte("id: evil\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	cases := []string{
 		"../../../etc/cron.d",
 		"..",
@@ -262,7 +274,7 @@ func TestFindRuleFile_UnsafeStage(t *testing.T) {
 		"unknown-stage",
 	}
 	for _, stage := range cases {
-		if got := findRuleFile(dir, "any-id", stage); got != "" {
+		if got := findRuleFile(rulesDir, "evil", stage); got != "" {
 			t.Errorf("findRuleFile(stage=%q) = %q, want empty string", stage, got)
 		}
 	}
