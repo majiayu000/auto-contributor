@@ -250,6 +250,48 @@ func TestWriteRule_AllowedStages(t *testing.T) {
 	}
 }
 
+// TestFindRuleFile_UnsafeStage verifies that findRuleFile returns "" for stage values
+// outside the allowlist, preventing path traversal via LLM-controlled Stage fields (SEC-07).
+func TestFindRuleFile_UnsafeStage(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{
+		"../../../etc/cron.d",
+		"..",
+		"scout/../../../etc",
+		"/etc/passwd",
+		"unknown-stage",
+	}
+	for _, stage := range cases {
+		if got := findRuleFile(dir, "any-id", stage); got != "" {
+			t.Errorf("findRuleFile(stage=%q) = %q, want empty string", stage, got)
+		}
+	}
+}
+
+// TestUpdateFunctions_UnsafeStageReturnsError verifies that every update function
+// that delegates to findRuleFile returns an error when the stage is invalid (SEC-07).
+func TestUpdateFunctions_UnsafeStageReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	badStage := "../../../etc/cron.d"
+	id := "any-id"
+
+	if err := UpdateRuleConfidence(dir, id, badStage, 0.5); err == nil {
+		t.Error("UpdateRuleConfidence: expected error for unsafe stage, got nil")
+	}
+	if err := UpdateRuleLastValidatedAt(dir, id, badStage, "2025-01-01"); err == nil {
+		t.Error("UpdateRuleLastValidatedAt: expected error for unsafe stage, got nil")
+	}
+	if err := UpdateRuleQValue(dir, id, badStage, 0.5, 1, 1); err == nil {
+		t.Error("UpdateRuleQValue: expected error for unsafe stage, got nil")
+	}
+	if err := DecayRuleIfStale(dir, id, badStage, 0.9, 0.1, 30); err == nil {
+		t.Error("DecayRuleIfStale: expected error for unsafe stage, got nil")
+	}
+	if err := IncrementEvidenceCount(dir, id, badStage); err == nil {
+		t.Error("IncrementEvidenceCount: expected error for unsafe stage, got nil")
+	}
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {

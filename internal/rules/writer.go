@@ -250,6 +250,12 @@ func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error 
 
 // findRuleFile locates a rule file by ID, checking stage dir first then walking all dirs.
 func findRuleFile(rulesDir, ruleID, stage string) string {
+	// Validate stage against the allowlist to prevent path traversal (SEC-07).
+	// All callers pass stage values that originate from rule YAML (r.Stage), which
+	// may be attacker-controlled; reject any value not in the known-good set.
+	if stage != "" && !allowedStages[stage] {
+		return ""
+	}
 	// Check stage-specific dir first
 	if stage != "" {
 		path := filepath.Join(rulesDir, stage, ruleID+".yaml")
