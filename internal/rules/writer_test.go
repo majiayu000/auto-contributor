@@ -2,6 +2,7 @@ package rules
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -247,6 +248,202 @@ func TestWriteRule_AllowedStages(t *testing.T) {
 		if err := WriteRule(dir, rule); err != nil {
 			t.Errorf("WriteRule with valid stage %q returned unexpected error: %v", stage, err)
 		}
+	}
+}
+
+// TestFindRuleFile_UnsafeStage verifies that findRuleFile returns "" for stage values
+// outside the allowlist, preventing path traversal via LLM-controlled Stage fields (SEC-07).
+// A fixture file is placed outside the rules dir so the test catches regressions:
+// without the stage allowlist guard, stage=".." would resolve to the fixture and return it.
+func TestFindRuleFile_UnsafeStage(t *testing.T) {
+	parent := t.TempDir()
+	rulesDir := filepath.Join(parent, "rules")
+	if err := os.Mkdir(rulesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// File reachable via stage=".." if the guard is absent: rules/../evil.yaml = parent/evil.yaml
+	outside := filepath.Join(parent, "evil.yaml")
+	if err := os.WriteFile(outside, []byte("id: evil\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		"../../../etc/cron.d",
+		"..",
+		"scout/../../../etc",
+		"/etc/passwd",
+		"unknown-stage",
+	}
+	for _, stage := range cases {
+		if got := findRuleFile(rulesDir, "evil", stage); got != "" {
+			t.Errorf("findRuleFile(stage=%q) = %q, want empty string", stage, got)
+		}
+	}
+}
+
+// TestSymlinkRejectedByFindRuleFile verifies that a poisoned symlink inside the rules
+// directory (e.g. rules/engineer/id.yaml -> /external/file) is not returned by
+// findRuleFile, preventing it from being used as a write target by the Update* helpers.
+func TestSymlinkRejectedByFindRuleFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a victim file outside the rules directory.
+	victimDir := t.TempDir()
+	victimFile := filepath.Join(victimDir, "victim.yaml")
+	victimContent := "stage: engineer\nid: poisoned-rule\nbody: original\nconfidence: 0.9\n"
+	if err := os.WriteFile(victimFile, []byte(victimContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the stage directory and plant a symlink pointing at the victim.
+	stageDir := filepath.Join(dir, "engineer")
+	if err := os.MkdirAll(stageDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(stageDir, "poisoned-rule.yaml")
+	if err := os.Symlink(victimFile, symlinkPath); err != nil {
+		t.Skipf("symlink creation not supported: %v", err)
+	}
+
+	// findRuleFile must not surface the symlink path (SEC-07).
+	got := findRuleFile(dir, "poisoned-rule", "engineer")
+	if got != "" {
+		t.Errorf("findRuleFile returned %q for a symlink; want empty string", got)
+	}
+
+	// Update helpers must return an error rather than writing through the symlink.
+	if err := UpdateRuleConfidence(dir, "poisoned-rule", "engineer", 0.1); err == nil {
+		t.Error("UpdateRuleConfidence should fail for a symlink target")
+	}
+	if err := UpdateRuleLastValidatedAt(dir, "poisoned-rule", "engineer", "2024-01-01"); err == nil {
+		t.Error("UpdateRuleLastValidatedAt should fail for a symlink target")
+	}
+	if err := IncrementEvidenceCount(dir, "poisoned-rule", "engineer"); err == nil {
+		t.Error("IncrementEvidenceCount should fail for a symlink target")
+	}
+
+	// Victim file must be unmodified.
+	after, err := os.ReadFile(victimFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != victimContent {
+		t.Errorf("victim file was modified via symlink: got %q", after)
+	}
+}
+
+// TestSymlinkSkippedByLoader verifies that a symlink inside the rules directory
+// is not loaded into the in-memory rule cache.
+func TestSymlinkSkippedByLoader(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a legitimate rule so the stage dir exists.
+	writeTestRule(t, dir, &Rule{
+		ID:    "legitimate-rule",
+		Stage: "engineer",
+		Body:  "real body",
+	})
+
+	// Plant a symlink next to the real rule.
+	victimDir := t.TempDir()
+	victimFile := filepath.Join(victimDir, "victim.yaml")
+	if err := os.WriteFile(victimFile, []byte("stage: engineer\nid: symlinked\nbody: via link\nconfidence: 0.9\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(dir, "engineer", "symlinked.yaml")
+	if err := os.Symlink(victimFile, symlinkPath); err != nil {
+		t.Skipf("symlink creation not supported: %v", err)
+	}
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, r := range rl.All() {
+		if r.ID == "symlinked" {
+			t.Error("loader must not load a rule from a symlink (SEC-07)")
+		}
+	}
+}
+
+// TestUpdateFunctions_UnsafeStageReturnsError verifies that every update function
+// that delegates to findRuleFile returns an error when the stage is invalid (SEC-07).
+// A fixture file is placed one level above rulesDir so that stage=".." traversal
+// would reach it if the guard were absent; this ensures the test fails on a
+// regression rather than vacuously passing because no file exists.
+func TestUpdateFunctions_UnsafeStageReturnsError(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "rules")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Fixture reachable via stage=".." without the guard: rules/../target.yaml = parent/target.yaml
+	fixture := filepath.Join(parent, "target.yaml")
+	fixtureYAML := "id: target\nstage: engineer\nbody: test\nconfidence: 0.5\nlast_validated_at: \"\"\n"
+	if err := os.WriteFile(fixture, []byte(fixtureYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	badStage := ".."
+	id := "target"
+
+	if err := UpdateRuleConfidence(dir, id, badStage, 0.5); err == nil {
+		t.Error("UpdateRuleConfidence: expected error for unsafe stage, got nil")
+	}
+	if err := UpdateRuleLastValidatedAt(dir, id, badStage, "2025-01-01"); err == nil {
+		t.Error("UpdateRuleLastValidatedAt: expected error for unsafe stage, got nil")
+	}
+	if err := UpdateRuleQValue(dir, id, badStage, 0.5, 1, 1); err == nil {
+		t.Error("UpdateRuleQValue: expected error for unsafe stage, got nil")
+	}
+	if err := DecayRuleIfStale(dir, id, badStage, 0.9, 0.1, 30); err == nil {
+		t.Error("DecayRuleIfStale: expected error for unsafe stage, got nil")
+	}
+	if err := IncrementEvidenceCount(dir, id, badStage); err == nil {
+		t.Error("IncrementEvidenceCount: expected error for unsafe stage, got nil")
+	}
+	if err := DeleteRule(dir, id, badStage); err == nil {
+		t.Error("DeleteRule: expected error for unsafe stage, got nil")
+	}
+}
+
+// TestFindRuleFile_UnsafeRuleID verifies that findRuleFile returns "" for ruleID values
+// that could escape the rules directory via path traversal (SEC-07).
+func TestFindRuleFile_UnsafeRuleID(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{
+		"../../../etc/cron.d/pwn",
+		"..",
+		"/etc/passwd",
+		"",
+		"safe/../../../etc",
+	}
+	for _, id := range cases {
+		if got := findRuleFile(dir, id, "engineer"); got != "" {
+			t.Errorf("findRuleFile(ruleID=%q) = %q, want empty string", id, got)
+		}
+	}
+}
+
+// TestUpdateFunctions_UnsafeRuleIDReturnsError verifies that every update function
+// that delegates to findRuleFile returns an error when the ruleID could traverse paths (SEC-07).
+func TestUpdateFunctions_UnsafeRuleIDReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	badID := "../../../etc/cron.d/pwn"
+	stage := "engineer"
+
+	if err := UpdateRuleConfidence(dir, badID, stage, 0.5); err == nil {
+		t.Error("UpdateRuleConfidence: expected error for unsafe ruleID, got nil")
+	}
+	if err := UpdateRuleLastValidatedAt(dir, badID, stage, "2025-01-01"); err == nil {
+		t.Error("UpdateRuleLastValidatedAt: expected error for unsafe ruleID, got nil")
+	}
+	if err := UpdateRuleQValue(dir, badID, stage, 0.5, 1, 1); err == nil {
+		t.Error("UpdateRuleQValue: expected error for unsafe ruleID, got nil")
+	}
+	if err := DecayRuleIfStale(dir, badID, stage, 0.9, 0.1, 30); err == nil {
+		t.Error("DecayRuleIfStale: expected error for unsafe ruleID, got nil")
+	}
+	if err := DeleteRule(dir, badID, stage); err == nil {
+		t.Error("DeleteRule: expected error for unsafe ruleID, got nil")
 	}
 }
 

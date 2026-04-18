@@ -73,6 +73,11 @@ func (rl *RuleLoader) readFromDisk() error {
 		if err != nil {
 			return nil // skip unreadable files
 		}
+		// Skip symlinks — following them could escape the rules directory (SEC-07).
+		// filepath.Walk uses os.Lstat, so ModeSymlink is set for symlink entries.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
 		if info.IsDir() || !strings.HasSuffix(path, ".yaml") {
 			return nil
 		}
@@ -88,7 +93,20 @@ func (rl *RuleLoader) readFromDisk() error {
 			return nil
 		}
 
-		if rule.ID == "" || rule.Body == "" {
+		if rule.Body == "" {
+			return nil
+		}
+		// Rules with an invalid Stage or ID can never be managed via the normal
+		// write paths (WriteRule, DeleteRule, etc. all reject them). Delete them
+		// now so they are not re-injected into prompts on every Reload (self-healing).
+		if !allowedStages[rule.Stage] {
+			fmt.Fprintf(os.Stderr, "warn: quarantining rule with invalid stage %q: %s\n", rule.Stage, path)
+			os.Remove(path) //nolint:errcheck
+			return nil
+		}
+		if rule.ID == "" || strings.ContainsAny(rule.ID, "/\\") || strings.Contains(rule.ID, "..") || filepath.Base(rule.ID) != rule.ID {
+			fmt.Fprintf(os.Stderr, "warn: quarantining rule with unsafe ID %q: %s\n", rule.ID, path)
+			os.Remove(path) //nolint:errcheck
 			return nil
 		}
 

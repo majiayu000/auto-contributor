@@ -59,6 +59,9 @@ func WriteRule(rulesDir string, rule *Rule) error {
 
 // UpdateRuleConfidence updates only the confidence field of an existing rule file.
 func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfidence float64) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -88,6 +91,9 @@ func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfi
 
 // UpdateRuleLastValidatedAt updates the last_validated_at field of an existing rule file.
 func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, validatedAt string) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -117,6 +123,9 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 
 // UpdateRuleQValue updates the q_value, retrieval_count, and success_count fields of an existing rule file.
 func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float64, retrievalCount int, successCount int) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -149,6 +158,20 @@ func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float
 // DeleteRule removes a rule file from disk.
 // Holds writeMu to prevent races with UpdateRuleQValue and Reload.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
+	// Validate stage against the allowlist to prevent path traversal (SEC-07).
+	// Without this guard, an invalid stage causes findRuleFile to return ""
+	// which this function would treat as "already gone", silently leaving
+	// attacker-controlled rule files on disk and active in later runs.
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
+	// Validate ruleID to prevent path traversal (SEC-07).
+	// A poisoned rule with id: ../../../etc/cron.d/pwn and a valid stage would
+	// otherwise reach filepath.Join in findRuleFile and delete an external file.
+	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
+		return fmt.Errorf("unsafe rule ID %q", ruleID)
+	}
+
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -164,6 +187,9 @@ func DeleteRule(rulesDir string, ruleID string, stage string) error {
 // (floored at minConf). The entire read-check-write runs under writeMu, which prevents
 // a concurrent stampRuleValidation write from racing with the applyDecay decision.
 func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float64, staleDays int) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -213,6 +239,9 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 // so that applyDecay cannot observe a stale last_validated_at between the two writes.
 // It is called when a candidate rule is merged into an existing rule during dedup.
 func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	// Reject IDs that could escape the rules directory via path traversal.
 	// ruleID originates from dedup.MatchedRuleID which is loaded from rule YAML
 	// and may be attacker-controlled; apply the same guard used in WriteRule.
@@ -249,19 +278,38 @@ func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error 
 }
 
 // findRuleFile locates a rule file by ID, checking stage dir first then walking all dirs.
+// Symlinks are rejected: a poisoned symlink (e.g. rules/engineer/id.yaml -> /etc/cron.d/pwn)
+// would otherwise become an out-of-tree write primitive via the Update*/Decay helpers (SEC-07).
 func findRuleFile(rulesDir, ruleID, stage string) string {
-	// Check stage-specific dir first
+	// Validate stage against the allowlist to prevent path traversal (SEC-07).
+	// All callers pass stage values that originate from rule YAML (r.Stage), which
+	// may be attacker-controlled; reject any value not in the known-good set.
+	if stage != "" && !allowedStages[stage] {
+		return ""
+	}
+	// Validate ruleID to prevent path traversal via attacker-controlled rule IDs (SEC-07).
+	// RuleLoader.Load reads id: fields verbatim from disk; a poisoned rule with
+	// id: ../../../etc/cron.d/pwn would otherwise escape rulesDir via filepath.Join.
+	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
+		return ""
+	}
+
+	// Check stage-specific dir first; use Lstat so we never follow a symlink (SEC-07).
 	if stage != "" {
 		path := filepath.Join(rulesDir, stage, ruleID+".yaml")
-		if _, err := os.Stat(path); err == nil {
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return path
 		}
 	}
 
-	// Walk all dirs
+	// Walk all dirs; filepath.Walk uses os.Lstat internally so info reflects the
+	// symlink itself, not its target — skip any entry with ModeSymlink set.
 	var found string
 	filepath.Walk(rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
 		if strings.TrimSuffix(info.Name(), ".yaml") == ruleID {
