@@ -149,6 +149,14 @@ func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float
 // DeleteRule removes a rule file from disk.
 // Holds writeMu to prevent races with UpdateRuleQValue and Reload.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
+	// Validate stage against the allowlist to prevent path traversal (SEC-07).
+	// Without this guard, an invalid stage causes findRuleFile to return ""
+	// which this function would treat as "already gone", silently leaving
+	// attacker-controlled rule files on disk and active in later runs.
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
+
 	writeMu.Lock()
 	defer writeMu.Unlock()
 

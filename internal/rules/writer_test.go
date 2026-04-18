@@ -290,6 +290,9 @@ func TestUpdateFunctions_UnsafeStageReturnsError(t *testing.T) {
 	if err := IncrementEvidenceCount(dir, id, badStage); err == nil {
 		t.Error("IncrementEvidenceCount: expected error for unsafe stage, got nil")
 	}
+	if err := DeleteRule(dir, id, badStage); err == nil {
+		t.Error("DeleteRule: expected error for unsafe stage, got nil")
+	}
 }
 
 func containsStr(s, substr string) bool {
