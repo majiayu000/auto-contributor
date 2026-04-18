@@ -295,6 +295,48 @@ func TestUpdateFunctions_UnsafeStageReturnsError(t *testing.T) {
 	}
 }
 
+// TestFindRuleFile_UnsafeRuleID verifies that findRuleFile returns "" for ruleID values
+// that could escape the rules directory via path traversal (SEC-07).
+func TestFindRuleFile_UnsafeRuleID(t *testing.T) {
+	dir := t.TempDir()
+	cases := []string{
+		"../../../etc/cron.d/pwn",
+		"..",
+		"/etc/passwd",
+		"",
+		"safe/../../../etc",
+	}
+	for _, id := range cases {
+		if got := findRuleFile(dir, id, "engineer"); got != "" {
+			t.Errorf("findRuleFile(ruleID=%q) = %q, want empty string", id, got)
+		}
+	}
+}
+
+// TestUpdateFunctions_UnsafeRuleIDReturnsError verifies that every update function
+// that delegates to findRuleFile returns an error when the ruleID could traverse paths (SEC-07).
+func TestUpdateFunctions_UnsafeRuleIDReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	badID := "../../../etc/cron.d/pwn"
+	stage := "engineer"
+
+	if err := UpdateRuleConfidence(dir, badID, stage, 0.5); err == nil {
+		t.Error("UpdateRuleConfidence: expected error for unsafe ruleID, got nil")
+	}
+	if err := UpdateRuleLastValidatedAt(dir, badID, stage, "2025-01-01"); err == nil {
+		t.Error("UpdateRuleLastValidatedAt: expected error for unsafe ruleID, got nil")
+	}
+	if err := UpdateRuleQValue(dir, badID, stage, 0.5, 1, 1); err == nil {
+		t.Error("UpdateRuleQValue: expected error for unsafe ruleID, got nil")
+	}
+	if err := DecayRuleIfStale(dir, badID, stage, 0.9, 0.1, 30); err == nil {
+		t.Error("DecayRuleIfStale: expected error for unsafe ruleID, got nil")
+	}
+	if err := DeleteRule(dir, badID, stage); err == nil {
+		t.Error("DeleteRule: expected error for unsafe ruleID, got nil")
+	}
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {

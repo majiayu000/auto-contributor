@@ -156,6 +156,12 @@ func DeleteRule(rulesDir string, ruleID string, stage string) error {
 	if stage != "" && !allowedStages[stage] {
 		return fmt.Errorf("unsafe rule stage %q", stage)
 	}
+	// Validate ruleID to prevent path traversal (SEC-07).
+	// A poisoned rule with id: ../../../etc/cron.d/pwn and a valid stage would
+	// otherwise reach filepath.Join in findRuleFile and delete an external file.
+	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
+		return fmt.Errorf("unsafe rule ID %q", ruleID)
+	}
 
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -262,6 +268,12 @@ func findRuleFile(rulesDir, ruleID, stage string) string {
 	// All callers pass stage values that originate from rule YAML (r.Stage), which
 	// may be attacker-controlled; reject any value not in the known-good set.
 	if stage != "" && !allowedStages[stage] {
+		return ""
+	}
+	// Validate ruleID to prevent path traversal via attacker-controlled rule IDs (SEC-07).
+	// RuleLoader.Load reads id: fields verbatim from disk; a poisoned rule with
+	// id: ../../../etc/cron.d/pwn would otherwise escape rulesDir via filepath.Join.
+	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
 		return ""
 	}
 	// Check stage-specific dir first
