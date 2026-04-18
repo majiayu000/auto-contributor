@@ -2,6 +2,7 @@ package rules
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -246,6 +247,91 @@ func TestWriteRule_AllowedStages(t *testing.T) {
 		}
 		if err := WriteRule(dir, rule); err != nil {
 			t.Errorf("WriteRule with valid stage %q returned unexpected error: %v", stage, err)
+		}
+	}
+}
+
+// TestSymlinkRejectedByFindRuleFile verifies that a poisoned symlink inside the rules
+// directory (e.g. rules/engineer/id.yaml -> /external/file) is not returned by
+// findRuleFile, preventing it from being used as a write target by the Update* helpers.
+func TestSymlinkRejectedByFindRuleFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a victim file outside the rules directory.
+	victimDir := t.TempDir()
+	victimFile := filepath.Join(victimDir, "victim.yaml")
+	victimContent := "stage: engineer\nid: poisoned-rule\nbody: original\nconfidence: 0.9\n"
+	if err := os.WriteFile(victimFile, []byte(victimContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create the stage directory and plant a symlink pointing at the victim.
+	stageDir := filepath.Join(dir, "engineer")
+	if err := os.MkdirAll(stageDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(stageDir, "poisoned-rule.yaml")
+	if err := os.Symlink(victimFile, symlinkPath); err != nil {
+		t.Skipf("symlink creation not supported: %v", err)
+	}
+
+	// findRuleFile must not surface the symlink path (SEC-07).
+	got := findRuleFile(dir, "poisoned-rule", "engineer")
+	if got != "" {
+		t.Errorf("findRuleFile returned %q for a symlink; want empty string", got)
+	}
+
+	// Update helpers must return an error rather than writing through the symlink.
+	if err := UpdateRuleConfidence(dir, "poisoned-rule", "engineer", 0.1); err == nil {
+		t.Error("UpdateRuleConfidence should fail for a symlink target")
+	}
+	if err := UpdateRuleLastValidatedAt(dir, "poisoned-rule", "engineer", "2024-01-01"); err == nil {
+		t.Error("UpdateRuleLastValidatedAt should fail for a symlink target")
+	}
+	if err := IncrementEvidenceCount(dir, "poisoned-rule", "engineer"); err == nil {
+		t.Error("IncrementEvidenceCount should fail for a symlink target")
+	}
+
+	// Victim file must be unmodified.
+	after, err := os.ReadFile(victimFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != victimContent {
+		t.Errorf("victim file was modified via symlink: got %q", after)
+	}
+}
+
+// TestSymlinkSkippedByLoader verifies that a symlink inside the rules directory
+// is not loaded into the in-memory rule cache.
+func TestSymlinkSkippedByLoader(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write a legitimate rule so the stage dir exists.
+	writeTestRule(t, dir, &Rule{
+		ID:    "legitimate-rule",
+		Stage: "engineer",
+		Body:  "real body",
+	})
+
+	// Plant a symlink next to the real rule.
+	victimDir := t.TempDir()
+	victimFile := filepath.Join(victimDir, "victim.yaml")
+	if err := os.WriteFile(victimFile, []byte("stage: engineer\nid: symlinked\nbody: via link\nconfidence: 0.9\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(dir, "engineer", "symlinked.yaml")
+	if err := os.Symlink(victimFile, symlinkPath); err != nil {
+		t.Skipf("symlink creation not supported: %v", err)
+	}
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, r := range rl.All() {
+		if r.ID == "symlinked" {
+			t.Error("loader must not load a rule from a symlink (SEC-07)")
 		}
 	}
 }
