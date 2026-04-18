@@ -59,6 +59,9 @@ func WriteRule(rulesDir string, rule *Rule) error {
 
 // UpdateRuleConfidence updates only the confidence field of an existing rule file.
 func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfidence float64) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -88,6 +91,9 @@ func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfi
 
 // UpdateRuleLastValidatedAt updates the last_validated_at field of an existing rule file.
 func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, validatedAt string) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -117,6 +123,9 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 
 // UpdateRuleQValue updates the q_value, retrieval_count, and success_count fields of an existing rule file.
 func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float64, retrievalCount int, successCount int) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -178,6 +187,9 @@ func DeleteRule(rulesDir string, ruleID string, stage string) error {
 // (floored at minConf). The entire read-check-write runs under writeMu, which prevents
 // a concurrent stampRuleValidation write from racing with the applyDecay decision.
 func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float64, staleDays int) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -227,6 +239,9 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 // so that applyDecay cannot observe a stale last_validated_at between the two writes.
 // It is called when a candidate rule is merged into an existing rule during dedup.
 func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error {
+	if stage != "" && !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
 	// Reject IDs that could escape the rules directory via path traversal.
 	// ruleID originates from dedup.MatchedRuleID which is loaded from rule YAML
 	// and may be attacker-controlled; apply the same guard used in WriteRule.

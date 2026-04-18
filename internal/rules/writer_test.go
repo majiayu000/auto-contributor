@@ -282,10 +282,23 @@ func TestFindRuleFile_UnsafeStage(t *testing.T) {
 
 // TestUpdateFunctions_UnsafeStageReturnsError verifies that every update function
 // that delegates to findRuleFile returns an error when the stage is invalid (SEC-07).
+// A fixture file is placed one level above rulesDir so that stage=".." traversal
+// would reach it if the guard were absent; this ensures the test fails on a
+// regression rather than vacuously passing because no file exists.
 func TestUpdateFunctions_UnsafeStageReturnsError(t *testing.T) {
-	dir := t.TempDir()
-	badStage := "../../../etc/cron.d"
-	id := "any-id"
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "rules")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Fixture reachable via stage=".." without the guard: rules/../target.yaml = parent/target.yaml
+	fixture := filepath.Join(parent, "target.yaml")
+	fixtureYAML := "id: target\nstage: engineer\nbody: test\nconfidence: 0.5\nlast_validated_at: \"\"\n"
+	if err := os.WriteFile(fixture, []byte(fixtureYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	badStage := ".."
+	id := "target"
 
 	if err := UpdateRuleConfidence(dir, id, badStage, 0.5); err == nil {
 		t.Error("UpdateRuleConfidence: expected error for unsafe stage, got nil")
