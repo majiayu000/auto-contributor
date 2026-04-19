@@ -103,13 +103,27 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 		"--repo", repoFullName,
 		"--json", "name,state")
 
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
 	// gh pr checks exits non-zero when any check fails, but still writes valid JSON to stdout.
 	// Only treat it as unreadable when there is no output at all.
 	output, err := cmd.Output()
 	if err != nil && len(output) == 0 {
+		// "no checks reported" means the repo has no CI configured — treat as success
+		// so draft PRs in check-free repos can still be promoted.
+		if noChecksConfigured(stderr.String()) {
+			return &CIResult{Status: "success"}
+		}
 		return &CIResult{Status: "unknown"}
 	}
 	return parseChecksOutput(output)
+}
+
+// noChecksConfigured returns true when the gh CLI stderr indicates that the PR
+// has no CI checks attached (as opposed to a genuine command error).
+func noChecksConfigured(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "no checks reported")
 }
 
 // parseChecksOutput parses raw JSON from "gh pr checks --json name,state" into a CIResult.
@@ -128,7 +142,7 @@ func parseChecksOutput(data []byte) *CIResult {
 	hasCodePending := false
 	for _, check := range checks {
 		switch check.State {
-		case "FAILURE", "ERROR", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE":
+		case "FAILURE", "ERROR", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED":
 			result.FailedChecks = append(result.FailedChecks, check.Name)
 			if !isMetadataCheck(check.Name) {
 				result.CodeFailures = true
@@ -137,6 +151,8 @@ func parseChecksOutput(data []byte) *CIResult {
 			if !isMetadataCheck(check.Name) {
 				hasCodePending = true
 			}
+		case "SUCCESS", "SKIPPED", "NEUTRAL", "STALE":
+			// explicitly passing — no action needed
 		}
 	}
 

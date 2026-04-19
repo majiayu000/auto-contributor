@@ -338,3 +338,54 @@ func TestParseChecksOutput_ValidJSONWithCommandError(t *testing.T) {
 		t.Error("ci failure json: CodeFailures should be true")
 	}
 }
+
+func TestNoChecksConfigured_DetectsNoChecksMessage(t *testing.T) {
+	cases := []struct {
+		stderr string
+		want   bool
+	}{
+		{"no checks reported for this pull request", true},
+		{"No checks reported on the 'main' branch", true},
+		{"error: authentication required", false},
+		{"", false},
+		{"gh: not found", false},
+	}
+	for _, tc := range cases {
+		if got := noChecksConfigured(tc.stderr); got != tc.want {
+			t.Errorf("noChecksConfigured(%q) = %v, want %v", tc.stderr, got, tc.want)
+		}
+	}
+}
+
+func TestParseChecksOutput_CancelledIsFailure(t *testing.T) {
+	data := `[{"name":"build","state":"CANCELLED"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("cancelled: got status %q, want failure", result.Status)
+	}
+	if !result.CodeFailures {
+		t.Error("cancelled: CodeFailures should be true")
+	}
+	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "build" {
+		t.Errorf("cancelled: FailedChecks = %v, want [build]", result.FailedChecks)
+	}
+}
+
+func TestParseChecksOutput_SkippedIsSuccess(t *testing.T) {
+	data := `[{"name":"optional-scan","state":"SKIPPED"},{"name":"build","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "success" {
+		t.Errorf("skipped+success: got status %q, want success", result.Status)
+	}
+	if result.CodeFailures {
+		t.Error("skipped+success: CodeFailures should be false")
+	}
+}
+
+func TestParseChecksOutput_NeutralIsSuccess(t *testing.T) {
+	data := `[{"name":"lint","state":"NEUTRAL"},{"name":"build","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "success" {
+		t.Errorf("neutral+success: got status %q, want success", result.Status)
+	}
+}
