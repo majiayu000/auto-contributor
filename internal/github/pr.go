@@ -105,15 +105,22 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 
 	output, err := cmd.Output()
 	if err != nil {
+		// Command failure means no CI is configured or gh returned non-zero.
 		return &CIResult{Status: "unknown"}
 	}
 
+	return parseCIChecks(output)
+}
+
+// parseCIChecks parses raw JSON output from "gh pr checks --json name,state".
+// Returns Status "error" on malformed JSON so callers pause rather than promote.
+func parseCIChecks(output []byte) *CIResult {
 	var checks []struct {
 		Name  string `json:"name"`
 		State string `json:"state"`
 	}
 	if err := json.Unmarshal(output, &checks); err != nil {
-		return &CIResult{Status: "unknown"}
+		return &CIResult{Status: "error"}
 	}
 
 	result := &CIResult{}

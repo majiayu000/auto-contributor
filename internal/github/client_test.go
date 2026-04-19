@@ -174,6 +174,54 @@ func TestBuildSearchQuery(t *testing.T) {
 	}
 }
 
+func TestParseCIChecks(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          []byte
+		wantStatus     string
+		wantCodeFail   bool
+	}{
+		{
+			name:       "invalid JSON returns error",
+			input:      []byte(`not valid json`),
+			wantStatus: "error",
+		},
+		{
+			name:       "empty array returns success",
+			input:      []byte(`[]`),
+			wantStatus: "success",
+		},
+		{
+			name:       "all passing checks returns success",
+			input:      []byte(`[{"name":"build","state":"SUCCESS"}]`),
+			wantStatus: "success",
+		},
+		{
+			name:         "code check failure returns failure with CodeFailures true",
+			input:        []byte(`[{"name":"build","state":"FAILURE"}]`),
+			wantStatus:   "failure",
+			wantCodeFail: true,
+		},
+		{
+			name:       "pending code check returns pending",
+			input:      []byte(`[{"name":"build","state":"PENDING"}]`),
+			wantStatus: "pending",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseCIChecks(tt.input)
+			if got.Status != tt.wantStatus {
+				t.Errorf("parseCIChecks() status = %q, want %q", got.Status, tt.wantStatus)
+			}
+			if got.CodeFailures != tt.wantCodeFail {
+				t.Errorf("parseCIChecks() CodeFailures = %v, want %v", got.CodeFailures, tt.wantCodeFail)
+			}
+		})
+	}
+}
+
 func TestRepoInfoStruct(t *testing.T) {
 	info := &RepoInfo{
 		Stars:           1234,
