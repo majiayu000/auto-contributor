@@ -172,6 +172,10 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 	case ci.Status == "pending":
 		log.WithField("pr", pr.PRURL).Debug("draft PR waiting for CI")
 		return nil
+
+	case ci.Status == "error":
+		log.WithField("pr", pr.PRURL).Warn("CI result parse error; leaving PR as draft until next cycle")
+		return nil
 	}
 
 	return nil

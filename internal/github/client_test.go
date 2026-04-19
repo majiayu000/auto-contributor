@@ -207,6 +207,21 @@ func TestParseCIChecks(t *testing.T) {
 			input:      []byte(`[{"name":"build","state":"PENDING"}]`),
 			wantStatus: "pending",
 		},
+		{
+			name:       "empty state field (missing state key) returns error",
+			input:      []byte(`[{}]`),
+			wantStatus: "error",
+		},
+		{
+			name:       "wrong field name (status instead of state) returns error",
+			input:      []byte(`[{"name":"build","status":"FAILURE"}]`),
+			wantStatus: "error",
+		},
+		{
+			name:       "unrecognised state value returns error",
+			input:      []byte(`[{"name":"build","state":"UNKNOWN_FUTURE_STATE"}]`),
+			wantStatus: "error",
+		},
 	}
 
 	for _, tt := range tests {

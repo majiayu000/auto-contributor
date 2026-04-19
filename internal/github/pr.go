@@ -112,8 +112,20 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 	return parseCIChecks(output)
 }
 
+// knownCheckStates is the exhaustive set of values gh returns for the "state" field.
+// Anything outside this set signals payload schema drift or a wrong field name.
+var knownCheckStates = map[string]bool{
+	"SUCCESS": true, "FAILURE": true, "ERROR": true,
+	"NEUTRAL": true, "SKIPPED": true, "CANCELLED": true,
+	"TIMED_OUT": true, "ACTION_REQUIRED": true, "STALE": true,
+	"STARTUP_FAILURE": true,
+	"PENDING": true, "QUEUED": true, "IN_PROGRESS": true,
+	"WAITING": true, "REQUESTED": true, "COMPLETED": true,
+}
+
 // parseCIChecks parses raw JSON output from "gh pr checks --json name,state".
-// Returns Status "error" on malformed JSON so callers pause rather than promote.
+// Returns Status "error" on malformed JSON or unknown state values so callers
+// pause rather than promote a draft PR on ambiguous CI data.
 func parseCIChecks(output []byte) *CIResult {
 	var checks []struct {
 		Name  string `json:"name"`
@@ -121,6 +133,15 @@ func parseCIChecks(output []byte) *CIResult {
 	}
 	if err := json.Unmarshal(output, &checks); err != nil {
 		return &CIResult{Status: "error"}
+	}
+
+	// Fail closed on any missing or unrecognised state; an empty state typically
+	// means the payload used a different field name (e.g. "status" instead of
+	// "state") and we cannot determine whether the check passed or failed.
+	for _, check := range checks {
+		if !knownCheckStates[check.State] {
+			return &CIResult{Status: "error"}
+		}
 	}
 
 	result := &CIResult{}
