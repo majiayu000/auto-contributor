@@ -259,3 +259,82 @@ func TestParseChecksOutput_Pending(t *testing.T) {
 		t.Errorf("pending: got status %q, want pending", result.Status)
 	}
 }
+
+func TestParseChecksOutput_QueuedIsPending(t *testing.T) {
+	data := `[{"name":"build","state":"QUEUED"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("queued: got status %q, want pending", result.Status)
+	}
+}
+
+func TestParseChecksOutput_InProgressIsPending(t *testing.T) {
+	data := `[{"name":"build","state":"IN_PROGRESS"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("in_progress: got status %q, want pending", result.Status)
+	}
+}
+
+func TestParseChecksOutput_RequestedIsPending(t *testing.T) {
+	data := `[{"name":"build","state":"REQUESTED"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("requested: got status %q, want pending", result.Status)
+	}
+}
+
+func TestParseChecksOutput_WaitingIsPending(t *testing.T) {
+	data := `[{"name":"build","state":"WAITING"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("waiting: got status %q, want pending", result.Status)
+	}
+}
+
+func TestParseChecksOutput_TimedOutIsFailure(t *testing.T) {
+	data := `[{"name":"build","state":"TIMED_OUT"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("timed_out: got status %q, want failure", result.Status)
+	}
+	if !result.CodeFailures {
+		t.Error("timed_out: CodeFailures should be true")
+	}
+}
+
+func TestParseChecksOutput_ActionRequiredIsFailure(t *testing.T) {
+	data := `[{"name":"build","state":"ACTION_REQUIRED"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("action_required: got status %q, want failure", result.Status)
+	}
+	if !result.CodeFailures {
+		t.Error("action_required: CodeFailures should be true")
+	}
+}
+
+func TestParseChecksOutput_StartupFailureIsFailure(t *testing.T) {
+	data := `[{"name":"build","state":"STARTUP_FAILURE"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("startup_failure: got status %q, want failure", result.Status)
+	}
+	if !result.CodeFailures {
+		t.Error("startup_failure: CodeFailures should be true")
+	}
+}
+
+// TestParseChecksOutput_NonEmptyOutputOnCommandError verifies that valid JSON returned
+// alongside a non-zero exit code (normal for gh pr checks when CI fails) is still parsed.
+func TestParseChecksOutput_ValidJSONWithCommandError(t *testing.T) {
+	// Simulates the stdout bytes that cmd.Output() still returns on ExitError.
+	data := `[{"name":"build","state":"FAILURE"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("ci failure json: got status %q, want failure", result.Status)
+	}
+	if !result.CodeFailures {
+		t.Error("ci failure json: CodeFailures should be true")
+	}
+}

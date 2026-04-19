@@ -103,8 +103,10 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 		"--repo", repoFullName,
 		"--json", "name,state")
 
+	// gh pr checks exits non-zero when any check fails, but still writes valid JSON to stdout.
+	// Only treat it as unreadable when there is no output at all.
 	output, err := cmd.Output()
-	if err != nil {
+	if err != nil && len(output) == 0 {
 		return &CIResult{Status: "unknown"}
 	}
 	return parseChecksOutput(output)
@@ -125,14 +127,16 @@ func parseChecksOutput(data []byte) *CIResult {
 	result := &CIResult{}
 	hasCodePending := false
 	for _, check := range checks {
-		if check.State == "FAILURE" || check.State == "ERROR" {
+		switch check.State {
+		case "FAILURE", "ERROR", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE":
 			result.FailedChecks = append(result.FailedChecks, check.Name)
 			if !isMetadataCheck(check.Name) {
 				result.CodeFailures = true
 			}
-		}
-		if check.State == "PENDING" && !isMetadataCheck(check.Name) {
-			hasCodePending = true
+		case "PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING":
+			if !isMetadataCheck(check.Name) {
+				hasCodePending = true
+			}
 		}
 	}
 
