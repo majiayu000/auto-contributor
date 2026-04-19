@@ -107,12 +107,18 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 	if err != nil {
 		return &CIResult{Status: "unknown"}
 	}
+	return parseChecksOutput(output)
+}
 
+// parseChecksOutput parses raw JSON from "gh pr checks --json name,state" into a CIResult.
+// Returns Status="unknown" on any parse failure so callers can distinguish unreadable
+// output from a genuine empty-checks (no CI) result.
+func parseChecksOutput(data []byte) *CIResult {
 	var checks []struct {
 		Name  string `json:"name"`
 		State string `json:"state"`
 	}
-	if err := json.Unmarshal(output, &checks); err != nil {
+	if err := json.Unmarshal(data, &checks); err != nil {
 		return &CIResult{Status: "unknown"}
 	}
 

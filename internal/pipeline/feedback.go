@@ -119,19 +119,15 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 	// Check CI status
 	ci := p.gh.GetCIResult(ctx, prRepo, pr.PRNumber)
 	switch {
-	case ci.Status == "success" || ci.Status == "unknown":
-		// All checks pass or no CI configured — promote to ready
-		if err := p.gh.MarkPRReady(ctx, prRepo, pr.PRNumber); err != nil {
-			log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to mark PR ready")
-			return nil
-		}
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
-		log.WithFields(Fields{"pr": pr.PRURL, "ci": ci.Status}).Info("draft PR promoted to ready")
+	case ci.Status == "unknown":
+		// CI output was unreadable (command error or malformed JSON) — skip this
+		// poll cycle instead of auto-promoting on unvalidated state.
+		log.WithField("pr", pr.PRURL).Warn("CI status unknown (parse error or no checks configured), deferring promotion")
 		return nil
 
-	case ci.Status == "failure" && !ci.CodeFailures:
-		// Only metadata checks failed — promote anyway
-		log.WithFields(Fields{"pr": pr.PRURL, "failed": ci.FailedChecks}).Info("only metadata checks failed, promoting draft PR")
+	case shouldPromoteDraft(ci):
+		// All checks pass, or only metadata checks failed — promote to ready
+		log.WithFields(Fields{"pr": pr.PRURL, "ci": ci.Status}).Info("draft PR promoted to ready")
 		if err := p.gh.MarkPRReady(ctx, prRepo, pr.PRNumber); err != nil {
 			log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to mark PR ready")
 			return nil
@@ -591,6 +587,12 @@ func prResponseHours(createdAt, terminalAt string, fallback time.Time) float64 {
 
 // repoFromPRURL extracts "owner/repo" from a GitHub PR URL.
 // e.g. "https://github.com/ollama/ollama/pull/14671" -> "ollama/ollama"
+// shouldPromoteDraft reports whether a CI result justifies promoting a draft PR to ready.
+// "unknown" always returns false: unreadable CI output must never auto-promote.
+func shouldPromoteDraft(ci *ghclient.CIResult) bool {
+	return ci.Status == "success" || (ci.Status == "failure" && !ci.CodeFailures)
+}
+
 func repoFromPRURL(prURL string) string {
 	// Expected format: https://github.com/{owner}/{repo}/pull/{number}
 	const prefix = "github.com/"

@@ -196,3 +196,66 @@ func TestRepoInfoStruct(t *testing.T) {
 		t.Error("RepoInfo.HasClaudeMD should be false")
 	}
 }
+
+func TestParseChecksOutput_MalformedJSON(t *testing.T) {
+	result := parseChecksOutput([]byte("not json at all"))
+	if result.Status != "unknown" {
+		t.Errorf("malformed JSON: got status %q, want unknown", result.Status)
+	}
+}
+
+func TestParseChecksOutput_EmptyArray(t *testing.T) {
+	// No checks configured — should report success, not unknown.
+	result := parseChecksOutput([]byte(`[]`))
+	if result.Status != "success" {
+		t.Errorf("empty checks: got status %q, want success", result.Status)
+	}
+	if len(result.FailedChecks) != 0 {
+		t.Errorf("empty checks: expected no failed checks, got %v", result.FailedChecks)
+	}
+}
+
+func TestParseChecksOutput_AllSuccess(t *testing.T) {
+	data := `[{"name":"build","state":"SUCCESS"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "success" {
+		t.Errorf("all success: got status %q, want success", result.Status)
+	}
+	if result.CodeFailures {
+		t.Error("all success: CodeFailures should be false")
+	}
+}
+
+func TestParseChecksOutput_CodeFailure(t *testing.T) {
+	data := `[{"name":"build","state":"FAILURE"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("code failure: got status %q, want failure", result.Status)
+	}
+	if !result.CodeFailures {
+		t.Error("code failure: CodeFailures should be true")
+	}
+	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "build" {
+		t.Errorf("code failure: FailedChecks = %v, want [build]", result.FailedChecks)
+	}
+}
+
+func TestParseChecksOutput_MetadataFailureOnly(t *testing.T) {
+	// DCO and similar metadata checks should not set CodeFailures.
+	data := `[{"name":"DCO","state":"FAILURE"},{"name":"build","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "failure" {
+		t.Errorf("metadata failure: got status %q, want failure", result.Status)
+	}
+	if result.CodeFailures {
+		t.Error("metadata failure: CodeFailures should be false for DCO-only failure")
+	}
+}
+
+func TestParseChecksOutput_Pending(t *testing.T) {
+	data := `[{"name":"build","state":"PENDING"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("pending: got status %q, want pending", result.Status)
+	}
+}
