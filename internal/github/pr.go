@@ -112,7 +112,9 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 		Name  string `json:"name"`
 		State string `json:"state"`
 	}
-	json.Unmarshal(output, &checks)
+	if err := json.Unmarshal(output, &checks); err != nil {
+		return &CIResult{Status: "unknown"}
+	}
 
 	result := &CIResult{}
 	hasCodePending := false
