@@ -157,7 +157,7 @@ func parseChecksOutput(data []byte) *CIResult {
 	}
 
 	switch {
-	case len(result.FailedChecks) > 0:
+	case result.CodeFailures || (len(result.FailedChecks) > 0 && !hasCodePending):
 		result.Status = "failure"
 	case hasCodePending:
 		result.Status = "pending"

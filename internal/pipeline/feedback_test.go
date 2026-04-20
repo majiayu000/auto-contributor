@@ -36,6 +36,11 @@ func TestShouldPromoteDraft(t *testing.T) {
 			wantPromote: true,
 		},
 		{
+			name:        "metadata failure with code pending does not promote",
+			ci:          &ghclient.CIResult{Status: "pending", CodeFailures: false, FailedChecks: []string{"DCO"}},
+			wantPromote: false,
+		},
+		{
 			name:        "code failure does not promote",
 			ci:          &ghclient.CIResult{Status: "failure", CodeFailures: true, FailedChecks: []string{"build"}},
 			wantPromote: false,

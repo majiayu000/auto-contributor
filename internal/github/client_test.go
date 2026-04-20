@@ -300,6 +300,20 @@ func TestParseChecksOutput_ExpectedIsPending(t *testing.T) {
 	}
 }
 
+func TestParseChecksOutput_MetadataFailureWithCodeExpectedIsPending(t *testing.T) {
+	data := `[{"name":"DCO","state":"FAILURE"},{"name":"build","state":"EXPECTED"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("metadata failure with code expected: got status %q, want pending", result.Status)
+	}
+	if result.CodeFailures {
+		t.Error("metadata failure with code expected: CodeFailures should be false")
+	}
+	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "DCO" {
+		t.Errorf("metadata failure with code expected: FailedChecks = %v, want [DCO]", result.FailedChecks)
+	}
+}
+
 func TestParseChecksOutput_TimedOutIsFailure(t *testing.T) {
 	data := `[{"name":"build","state":"TIMED_OUT"}]`
 	result := parseChecksOutput([]byte(data))
