@@ -101,7 +101,7 @@ func (c *Client) GetCIResult(ctx context.Context, repoFullName string, prNum int
 	cmd := exec.CommandContext(ctx, "gh", "pr", "checks",
 		fmt.Sprintf("%d", prNum),
 		"--repo", repoFullName,
-		"--json", "name,state")
+		"--json", "name,bucket")
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -126,13 +126,13 @@ func noChecksConfigured(stderr string) bool {
 	return strings.Contains(strings.ToLower(stderr), "no checks reported")
 }
 
-// parseChecksOutput parses raw JSON from "gh pr checks --json name,state" into a CIResult.
-// Returns Status="unknown" on any parse failure so callers can distinguish unreadable
-// output from a genuine empty-checks (no CI) result.
+// parseChecksOutput parses raw JSON from "gh pr checks --json name,bucket" into a CIResult.
+// Returns Status="unknown" on any parse failure or unrecognized bucket so callers can
+// distinguish unreadable output from a genuine empty-checks (no CI) result.
 func parseChecksOutput(data []byte) *CIResult {
 	var checks []struct {
-		Name  string `json:"name"`
-		State string `json:"state"`
+		Name   string `json:"name"`
+		Bucket string `json:"bucket"`
 	}
 	if err := json.Unmarshal(data, &checks); err != nil {
 		return &CIResult{Status: "unknown"}
@@ -141,18 +141,22 @@ func parseChecksOutput(data []byte) *CIResult {
 	result := &CIResult{}
 	hasCodePending := false
 	for _, check := range checks {
-		switch check.State {
-		case "FAILURE", "ERROR", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED":
+		switch check.Bucket {
+		case "fail", "cancel":
 			result.FailedChecks = append(result.FailedChecks, check.Name)
 			if !isMetadataCheck(check.Name) {
 				result.CodeFailures = true
 			}
-		case "PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING", "EXPECTED":
+		case "pending":
 			if !isMetadataCheck(check.Name) {
 				hasCodePending = true
 			}
-		case "SUCCESS", "SKIPPED", "NEUTRAL", "STALE":
-			// explicitly passing — no action needed
+		case "pass", "skipping":
+			// explicitly non-blocking — no action needed
+		case "":
+			return &CIResult{Status: "unknown"}
+		default:
+			return &CIResult{Status: "unknown"}
 		}
 	}
 

@@ -216,7 +216,7 @@ func TestParseChecksOutput_EmptyArray(t *testing.T) {
 }
 
 func TestParseChecksOutput_AllSuccess(t *testing.T) {
-	data := `[{"name":"build","state":"SUCCESS"},{"name":"lint","state":"SUCCESS"}]`
+	data := `[{"name":"build","bucket":"pass"},{"name":"lint","bucket":"pass"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "success" {
 		t.Errorf("all success: got status %q, want success", result.Status)
@@ -227,7 +227,7 @@ func TestParseChecksOutput_AllSuccess(t *testing.T) {
 }
 
 func TestParseChecksOutput_CodeFailure(t *testing.T) {
-	data := `[{"name":"build","state":"FAILURE"},{"name":"lint","state":"SUCCESS"}]`
+	data := `[{"name":"build","bucket":"fail"},{"name":"lint","bucket":"pass"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "failure" {
 		t.Errorf("code failure: got status %q, want failure", result.Status)
@@ -242,7 +242,7 @@ func TestParseChecksOutput_CodeFailure(t *testing.T) {
 
 func TestParseChecksOutput_MetadataFailureOnly(t *testing.T) {
 	// DCO and similar metadata checks should not set CodeFailures.
-	data := `[{"name":"DCO","state":"FAILURE"},{"name":"build","state":"SUCCESS"}]`
+	data := `[{"name":"DCO","bucket":"fail"},{"name":"build","bucket":"pass"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "failure" {
 		t.Errorf("metadata failure: got status %q, want failure", result.Status)
@@ -253,97 +253,49 @@ func TestParseChecksOutput_MetadataFailureOnly(t *testing.T) {
 }
 
 func TestParseChecksOutput_Pending(t *testing.T) {
-	data := `[{"name":"build","state":"PENDING"},{"name":"lint","state":"SUCCESS"}]`
+	data := `[{"name":"build","bucket":"pending"},{"name":"lint","bucket":"pass"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "pending" {
 		t.Errorf("pending: got status %q, want pending", result.Status)
 	}
 }
 
-func TestParseChecksOutput_QueuedIsPending(t *testing.T) {
-	data := `[{"name":"build","state":"QUEUED"},{"name":"lint","state":"SUCCESS"}]`
+func TestParseChecksOutput_MetadataFailureWithCodePendingIsPending(t *testing.T) {
+	data := `[{"name":"DCO","bucket":"fail"},{"name":"build","bucket":"pending"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "pending" {
-		t.Errorf("queued: got status %q, want pending", result.Status)
-	}
-}
-
-func TestParseChecksOutput_InProgressIsPending(t *testing.T) {
-	data := `[{"name":"build","state":"IN_PROGRESS"},{"name":"lint","state":"SUCCESS"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "pending" {
-		t.Errorf("in_progress: got status %q, want pending", result.Status)
-	}
-}
-
-func TestParseChecksOutput_RequestedIsPending(t *testing.T) {
-	data := `[{"name":"build","state":"REQUESTED"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "pending" {
-		t.Errorf("requested: got status %q, want pending", result.Status)
-	}
-}
-
-func TestParseChecksOutput_WaitingIsPending(t *testing.T) {
-	data := `[{"name":"build","state":"WAITING"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "pending" {
-		t.Errorf("waiting: got status %q, want pending", result.Status)
-	}
-}
-
-func TestParseChecksOutput_ExpectedIsPending(t *testing.T) {
-	data := `[{"name":"build","state":"EXPECTED"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "pending" {
-		t.Errorf("expected: got status %q, want pending", result.Status)
-	}
-}
-
-func TestParseChecksOutput_MetadataFailureWithCodeExpectedIsPending(t *testing.T) {
-	data := `[{"name":"DCO","state":"FAILURE"},{"name":"build","state":"EXPECTED"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "pending" {
-		t.Errorf("metadata failure with code expected: got status %q, want pending", result.Status)
+		t.Errorf("metadata failure with code pending: got status %q, want pending", result.Status)
 	}
 	if result.CodeFailures {
-		t.Error("metadata failure with code expected: CodeFailures should be false")
+		t.Error("metadata failure with code pending: CodeFailures should be false")
 	}
 	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "DCO" {
-		t.Errorf("metadata failure with code expected: FailedChecks = %v, want [DCO]", result.FailedChecks)
+		t.Errorf("metadata failure with code pending: FailedChecks = %v, want [DCO]", result.FailedChecks)
 	}
 }
 
-func TestParseChecksOutput_TimedOutIsFailure(t *testing.T) {
-	data := `[{"name":"build","state":"TIMED_OUT"}]`
+func TestParseChecksOutput_CancelledIsFailure(t *testing.T) {
+	data := `[{"name":"build","bucket":"cancel"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "failure" {
-		t.Errorf("timed_out: got status %q, want failure", result.Status)
+		t.Errorf("cancelled: got status %q, want failure", result.Status)
 	}
 	if !result.CodeFailures {
-		t.Error("timed_out: CodeFailures should be true")
+		t.Error("cancelled: CodeFailures should be true")
+	}
+	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "build" {
+		t.Errorf("cancelled: FailedChecks = %v, want [build]", result.FailedChecks)
 	}
 }
 
-func TestParseChecksOutput_ActionRequiredIsFailure(t *testing.T) {
-	data := `[{"name":"build","state":"ACTION_REQUIRED"}]`
+func TestParseChecksOutput_SkippingIsSuccess(t *testing.T) {
+	data := `[{"name":"optional-scan","bucket":"skipping"},{"name":"build","bucket":"pass"}]`
 	result := parseChecksOutput([]byte(data))
-	if result.Status != "failure" {
-		t.Errorf("action_required: got status %q, want failure", result.Status)
+	if result.Status != "success" {
+		t.Errorf("skipping+pass: got status %q, want success", result.Status)
 	}
-	if !result.CodeFailures {
-		t.Error("action_required: CodeFailures should be true")
-	}
-}
-
-func TestParseChecksOutput_StartupFailureIsFailure(t *testing.T) {
-	data := `[{"name":"build","state":"STARTUP_FAILURE"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "failure" {
-		t.Errorf("startup_failure: got status %q, want failure", result.Status)
-	}
-	if !result.CodeFailures {
-		t.Error("startup_failure: CodeFailures should be true")
+	if result.CodeFailures {
+		t.Error("skipping+pass: CodeFailures should be false")
 	}
 }
 
@@ -351,13 +303,29 @@ func TestParseChecksOutput_StartupFailureIsFailure(t *testing.T) {
 // alongside a non-zero exit code (normal for gh pr checks when CI fails) is still parsed.
 func TestParseChecksOutput_ValidJSONWithCommandError(t *testing.T) {
 	// Simulates the stdout bytes that cmd.Output() still returns on ExitError.
-	data := `[{"name":"build","state":"FAILURE"}]`
+	data := `[{"name":"build","bucket":"fail"}]`
 	result := parseChecksOutput([]byte(data))
 	if result.Status != "failure" {
 		t.Errorf("ci failure json: got status %q, want failure", result.Status)
 	}
 	if !result.CodeFailures {
 		t.Error("ci failure json: CodeFailures should be true")
+	}
+}
+
+func TestParseChecksOutput_UnknownBucketIsUnknown(t *testing.T) {
+	data := `[{"name":"build","bucket":"mystery"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "unknown" {
+		t.Errorf("unknown bucket: got status %q, want unknown", result.Status)
+	}
+}
+
+func TestParseChecksOutput_MissingBucketIsUnknown(t *testing.T) {
+	data := `[{"name":"build"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "unknown" {
+		t.Errorf("missing bucket: got status %q, want unknown", result.Status)
 	}
 }
 
@@ -376,38 +344,5 @@ func TestNoChecksConfigured_DetectsNoChecksMessage(t *testing.T) {
 		if got := noChecksConfigured(tc.stderr); got != tc.want {
 			t.Errorf("noChecksConfigured(%q) = %v, want %v", tc.stderr, got, tc.want)
 		}
-	}
-}
-
-func TestParseChecksOutput_CancelledIsFailure(t *testing.T) {
-	data := `[{"name":"build","state":"CANCELLED"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "failure" {
-		t.Errorf("cancelled: got status %q, want failure", result.Status)
-	}
-	if !result.CodeFailures {
-		t.Error("cancelled: CodeFailures should be true")
-	}
-	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "build" {
-		t.Errorf("cancelled: FailedChecks = %v, want [build]", result.FailedChecks)
-	}
-}
-
-func TestParseChecksOutput_SkippedIsSuccess(t *testing.T) {
-	data := `[{"name":"optional-scan","state":"SKIPPED"},{"name":"build","state":"SUCCESS"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "success" {
-		t.Errorf("skipped+success: got status %q, want success", result.Status)
-	}
-	if result.CodeFailures {
-		t.Error("skipped+success: CodeFailures should be false")
-	}
-}
-
-func TestParseChecksOutput_NeutralIsSuccess(t *testing.T) {
-	data := `[{"name":"lint","state":"NEUTRAL"},{"name":"build","state":"SUCCESS"}]`
-	result := parseChecksOutput([]byte(data))
-	if result.Status != "success" {
-		t.Errorf("neutral+success: got status %q, want success", result.Status)
 	}
 }

@@ -120,9 +120,9 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 	ci := p.gh.GetCIResult(ctx, prRepo, pr.PRNumber)
 	switch {
 	case ci.Status == "unknown":
-		// CI output was unreadable (command error or malformed JSON) — skip this
+		// CI output was unreadable or contained an unrecognized bucket — skip this
 		// poll cycle instead of auto-promoting on unvalidated state.
-		log.WithField("pr", pr.PRURL).Warn("CI status unknown (parse error or no checks configured), deferring promotion")
+		log.WithField("pr", pr.PRURL).Warn("CI status unknown (parse error or unrecognized bucket), deferring promotion")
 		return nil
 
 	case shouldPromoteDraft(ci):
