@@ -300,6 +300,20 @@ func TestParseChecksOutput_ExpectedIsPending(t *testing.T) {
 	}
 }
 
+func TestParseChecksOutput_MetadataFailureDoesNotOverridePendingCodeCheck(t *testing.T) {
+	data := `[{"name":"build","state":"EXPECTED"},{"name":"DCO","state":"FAILURE"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("mixed metadata failure + pending code check: got status %q, want pending", result.Status)
+	}
+	if result.CodeFailures {
+		t.Error("mixed metadata failure + pending code check: CodeFailures should be false")
+	}
+	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "DCO" {
+		t.Errorf("mixed metadata failure + pending code check: FailedChecks = %v, want [DCO]", result.FailedChecks)
+	}
+}
+
 func TestParseChecksOutput_UnknownStateIsPending(t *testing.T) {
 	data := `[{"name":"build","state":"SCHEDULED"},{"name":"lint","state":"SUCCESS"}]`
 	result := parseChecksOutput([]byte(data))
