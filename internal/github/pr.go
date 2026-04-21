@@ -140,27 +140,35 @@ func parseChecksOutput(data []byte) *CIResult {
 
 	result := &CIResult{}
 	hasCodePending := false
+	hasUnknownState := false
+	hasMetadataFailure := false
 	for _, check := range checks {
 		switch check.State {
 		case "FAILURE", "ERROR", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED":
 			result.FailedChecks = append(result.FailedChecks, check.Name)
-			if !isMetadataCheck(check.Name) {
+			if isMetadataCheck(check.Name) {
+				hasMetadataFailure = true
+			} else {
 				result.CodeFailures = true
 			}
-		case "PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING":
+		case "PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING", "EXPECTED":
 			if !isMetadataCheck(check.Name) {
 				hasCodePending = true
 			}
 		case "SUCCESS", "SKIPPED", "NEUTRAL", "STALE":
 			// explicitly passing — no action needed
+		default:
+			hasUnknownState = true
 		}
 	}
 
 	switch {
-	case len(result.FailedChecks) > 0:
+	case result.CodeFailures:
 		result.Status = "failure"
-	case hasCodePending:
+	case hasCodePending || hasUnknownState:
 		result.Status = "pending"
+	case hasMetadataFailure:
+		result.Status = "failure"
 	default:
 		result.Status = "success"
 	}
