@@ -339,14 +339,17 @@ func TestParseChecksOutput_TimedOutIsFailure(t *testing.T) {
 	}
 }
 
-func TestParseChecksOutput_ActionRequiredIsFailure(t *testing.T) {
+func TestParseChecksOutput_ActionRequiredIsPending(t *testing.T) {
 	data := `[{"name":"build","state":"ACTION_REQUIRED"}]`
 	result := parseChecksOutput([]byte(data))
-	if result.Status != "failure" {
-		t.Errorf("action_required: got status %q, want failure", result.Status)
+	if result.Status != "pending" {
+		t.Errorf("action_required: got status %q, want pending", result.Status)
 	}
-	if !result.CodeFailures {
-		t.Error("action_required: CodeFailures should be true")
+	if result.CodeFailures {
+		t.Error("action_required: CodeFailures should be false")
+	}
+	if len(result.FailedChecks) != 0 {
+		t.Errorf("action_required: FailedChecks = %v, want []", result.FailedChecks)
 	}
 }
 
@@ -393,17 +396,17 @@ func TestNoChecksConfigured_DetectsNoChecksMessage(t *testing.T) {
 	}
 }
 
-func TestParseChecksOutput_CancelledIsFailure(t *testing.T) {
+func TestParseChecksOutput_CancelledIsPending(t *testing.T) {
 	data := `[{"name":"build","state":"CANCELLED"}]`
 	result := parseChecksOutput([]byte(data))
-	if result.Status != "failure" {
-		t.Errorf("cancelled: got status %q, want failure", result.Status)
+	if result.Status != "pending" {
+		t.Errorf("cancelled: got status %q, want pending", result.Status)
 	}
-	if !result.CodeFailures {
-		t.Error("cancelled: CodeFailures should be true")
+	if result.CodeFailures {
+		t.Error("cancelled: CodeFailures should be false")
 	}
-	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "build" {
-		t.Errorf("cancelled: FailedChecks = %v, want [build]", result.FailedChecks)
+	if len(result.FailedChecks) != 0 {
+		t.Errorf("cancelled: FailedChecks = %v, want []", result.FailedChecks)
 	}
 }
 

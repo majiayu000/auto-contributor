@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -249,30 +250,38 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 
 	today := time.Now().Format("2006-01-02")
 	rulesDir := p.ruleLoader.RulesDir()
-	seenStages := make(map[string]bool)
+	seenRules := make(map[string]bool)
 
 	for _, e := range events {
-		if seenStages[e.Stage] {
+		if e.ExperiencesUsed == "" {
 			continue
 		}
-		seenStages[e.Stage] = true
 
-		// Only stamp rules that were actually injected into the prompt during this
-		// stage's execution. InjectedRuleIDsForStage replicates the FormatForPrompt
-		// char-budget logic, so rules that passed the confidence threshold but were
-		// truncated by MaxPromptChars are excluded — they never influenced the LLM
-		// output and must not receive a fresh last_validated_at stamp (which would
-		// block their decay indefinitely).
-		injected := p.ruleLoader.InjectedRuleIDsForStage(e.Stage)
-		for _, r := range p.ruleLoader.All() {
-			if r.Source != "synthesized" {
+		var ruleKeys []string
+		if err := json.Unmarshal([]byte(e.ExperiencesUsed), &ruleKeys); err != nil {
+			log.WithFields(Fields{"stage": e.Stage, "error": err}).Warn("failed to parse experiences_used for rule validation stamp")
+			continue
+		}
+
+		for _, key := range ruleKeys {
+			if seenRules[key] {
 				continue
 			}
-			if !injected[r.ID] {
+			seenRules[key] = true
+
+			stage := e.Stage
+			ruleID := key
+			if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
+				stage = parts[0]
+				ruleID = parts[1]
+			}
+
+			rule := p.ruleLoader.ByStageAndID(stage, ruleID)
+			if rule == nil || rule.Source != "synthesized" {
 				continue
 			}
-			if err := rules.UpdateRuleLastValidatedAt(rulesDir, r.ID, r.Stage, today); err != nil {
-				log.WithFields(Fields{"rule": r.ID, "error": err}).Warn("failed to stamp rule last_validated_at")
+			if err := rules.UpdateRuleLastValidatedAt(rulesDir, ruleID, stage, today); err != nil {
+				log.WithFields(Fields{"rule": key, "error": err}).Warn("failed to stamp rule last_validated_at")
 			}
 		}
 	}
@@ -284,8 +293,8 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 	}
 
 	log.WithFields(Fields{
-		"pr":     pr.PRURL,
-		"stages": len(seenStages),
+		"pr":    pr.PRURL,
+		"rules": len(seenRules),
 	}).Info("stamped last_validated_at on synthesized rules for merged PR")
 }
 
