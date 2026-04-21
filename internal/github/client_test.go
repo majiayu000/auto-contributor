@@ -300,6 +300,20 @@ func TestParseChecksOutput_ExpectedIsPending(t *testing.T) {
 	}
 }
 
+func TestParseChecksOutput_UnknownStateIsPending(t *testing.T) {
+	data := `[{"name":"build","state":"SCHEDULED"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("unknown state: got status %q, want pending", result.Status)
+	}
+	if result.CodeFailures {
+		t.Error("unknown state: CodeFailures should be false")
+	}
+	if len(result.FailedChecks) != 0 {
+		t.Errorf("unknown state: FailedChecks = %v, want []", result.FailedChecks)
+	}
+}
+
 func TestParseChecksOutput_TimedOutIsFailure(t *testing.T) {
 	data := `[{"name":"build","state":"TIMED_OUT"}]`
 	result := parseChecksOutput([]byte(data))

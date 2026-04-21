@@ -140,6 +140,7 @@ func parseChecksOutput(data []byte) *CIResult {
 
 	result := &CIResult{}
 	hasCodePending := false
+	hasUnknownState := false
 	for _, check := range checks {
 		switch check.State {
 		case "FAILURE", "ERROR", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE", "CANCELLED":
@@ -153,13 +154,15 @@ func parseChecksOutput(data []byte) *CIResult {
 			}
 		case "SUCCESS", "SKIPPED", "NEUTRAL", "STALE":
 			// explicitly passing — no action needed
+		default:
+			hasUnknownState = true
 		}
 	}
 
 	switch {
 	case len(result.FailedChecks) > 0:
 		result.Status = "failure"
-	case hasCodePending:
+	case hasCodePending || hasUnknownState:
 		result.Status = "pending"
 	default:
 		result.Status = "success"
