@@ -16,7 +16,7 @@ Automated GitHub contribution bot powered by Claude Code CLI. Discovers issues, 
 
 - Go 1.21+
 - [Claude Code CLI](https://claude.ai/code) - `claude` command available in PATH
-- [GitHub CLI](https://cli.github.com/) - `gh` command authenticated
+- [GitHub CLI](https://cli.github.com/) - `gh` command authenticated (`gh pr checks --json name,state` must be supported)
 
 ## Installation
 
