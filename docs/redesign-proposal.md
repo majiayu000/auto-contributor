@@ -393,7 +393,7 @@ func (o *Orchestrator) runAgent(name string, ctx map[string]any) AgentResult {
 # 全局配置
 github:
   username: majiayu000
-  email: 1835304752@qq.com
+  email: user@example.com
 
 # Agent 配置
 agents:
