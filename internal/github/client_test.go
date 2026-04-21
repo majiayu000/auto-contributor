@@ -292,6 +292,14 @@ func TestParseChecksOutput_WaitingIsPending(t *testing.T) {
 	}
 }
 
+func TestParseChecksOutput_ExpectedIsPending(t *testing.T) {
+	data := `[{"name":"build","state":"EXPECTED"},{"name":"lint","state":"SUCCESS"}]`
+	result := parseChecksOutput([]byte(data))
+	if result.Status != "pending" {
+		t.Errorf("expected: got status %q, want pending", result.Status)
+	}
+}
+
 func TestParseChecksOutput_TimedOutIsFailure(t *testing.T) {
 	data := `[{"name":"build","state":"TIMED_OUT"}]`
 	result := parseChecksOutput([]byte(data))

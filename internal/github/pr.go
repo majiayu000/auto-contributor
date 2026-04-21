@@ -147,7 +147,7 @@ func parseChecksOutput(data []byte) *CIResult {
 			if !isMetadataCheck(check.Name) {
 				result.CodeFailures = true
 			}
-		case "PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING":
+		case "PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING", "EXPECTED":
 			if !isMetadataCheck(check.Name) {
 				hasCodePending = true
 			}
