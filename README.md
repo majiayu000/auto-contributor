@@ -262,4 +262,4 @@ MIT
 
 ## Author
 
-majiayu000 <1835304752@qq.com>
+majiayu000 <user@example.com>

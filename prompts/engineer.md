@@ -72,7 +72,7 @@ Run ALL of these before marking complete:
 
 ```bash
 git config user.name "majiayu000"
-git config user.email "1835304752@qq.com"
+git config user.email "user@example.com"
 ```
 
 ## Commit Rules
