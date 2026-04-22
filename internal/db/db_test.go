@@ -86,6 +86,9 @@ func TestCreatePullRequestPopulatesIDAndSupportsUpdatePostgres(t *testing.T) {
 	if databaseURL == "" {
 		t.Skip("DATABASE_URL is not set")
 	}
+	if os.Getenv("RUN_POSTGRES_INTEGRATION_TESTS") == "" {
+		t.Skip("RUN_POSTGRES_INTEGRATION_TESTS is not set")
+	}
 
 	db, err := NewWithURL(databaseURL, filepath.Join(t.TempDir(), "unused.db"))
 	if err != nil {
