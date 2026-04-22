@@ -228,3 +228,55 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 		t.Fatalf("got error_message=%q, want reviewer_failed prefix", stored.ErrorMessage)
 	}
 }
+
+func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing.T) {
+	rt := &stubRuntime{outputs: []stubOutput{
+		{output: "FIX_COMPLETE"},
+		{err: errors.New("reviewer runtime exploded")},
+	}}
+	p, database := newLoopTestPipeline(t, rt)
+
+	issue := &models.Issue{
+		Repo:            "owner/repo",
+		IssueNumber:     45,
+		Title:           "reviewer runtime failure should block",
+		Status:          models.IssueStatusDiscovered,
+		DifficultyScore: 0.1,
+	}
+	if err := database.CreateIssue(issue); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	analyst := &AnalystResult{
+		CanFix:       true,
+		BaseBranch:   "main",
+		CommitFormat: "test",
+		BranchName:   "feat/test-45",
+		FixPlan: FixPlan{
+			Description:  "minimal fix",
+			TestStrategy: "go test ./...",
+		},
+	}
+
+	rounds, _, err := p.engineerReviewLoopWithStats(context.Background(), issue, t.TempDir(), analyst)
+	if err == nil {
+		t.Fatal("expected reviewer runtime failure error, got nil")
+	}
+	if rounds != 1 {
+		t.Fatalf("got rounds=%d, want 1", rounds)
+	}
+	if !strings.Contains(err.Error(), "reviewer runtime exploded") {
+		t.Fatalf("got error %q, want reviewer runtime failure", err)
+	}
+
+	stored, err := database.GetIssueByID(issue.ID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if stored.Status != models.IssueStatusFailed {
+		t.Fatalf("got status=%q, want %q", stored.Status, models.IssueStatusFailed)
+	}
+	if !strings.Contains(stored.ErrorMessage, "reviewer_failed") {
+		t.Fatalf("got error_message=%q, want reviewer_failed prefix", stored.ErrorMessage)
+	}
+}
