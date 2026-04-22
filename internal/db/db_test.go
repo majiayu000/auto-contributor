@@ -155,6 +155,9 @@ func testCreatePullRequestPopulatesIDAndSupportsUpdate(t *testing.T, db *DB) {
 	if err := db.UpdatePRStatus(pr.ID, models.PRStatusOpen); err != nil {
 		t.Fatalf("update PR status: %v", err)
 	}
+	if err := db.UpdatePRFeedbackCheck(pr.ID, 2); err != nil {
+		t.Fatalf("update PR feedback check: %v", err)
+	}
 
 	stored, err := db.getPRByID(pr.ID)
 	if err != nil {
@@ -162,6 +165,12 @@ func testCreatePullRequestPopulatesIDAndSupportsUpdate(t *testing.T, db *DB) {
 	}
 	if stored.Status != models.PRStatusOpen {
 		t.Fatalf("stored status = %q, want %q", stored.Status, models.PRStatusOpen)
+	}
+	if stored.FeedbackRound != 2 {
+		t.Fatalf("stored feedback round = %d, want %d", stored.FeedbackRound, 2)
+	}
+	if stored.LastFeedbackCheckAt == nil {
+		t.Fatal("stored last feedback check timestamp is nil")
 	}
 }
 
