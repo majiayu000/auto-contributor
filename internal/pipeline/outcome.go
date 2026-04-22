@@ -10,6 +10,7 @@ import (
 // Outcome labels for pipeline events.
 const (
 	OutcomeMerged          = "merged"
+	OutcomeHostileSpam     = "hostile_spam"
 	OutcomeRejectedScope   = "rejected_scope"
 	OutcomeRejectedQuality = "rejected_quality"
 	OutcomeRejectedStyle   = "rejected_style"
@@ -31,6 +32,9 @@ var outcomeKeywords = map[string][]string{
 func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment, pr *models.PullRequest) string {
 	if prInfo.State == "MERGED" {
 		return OutcomeMerged
+	}
+	if prInfo.State == "CLOSED" && isHostileLockReason(prInfo.LockReason) {
+		return OutcomeHostileSpam
 	}
 
 	// Check if we auto-closed it
@@ -70,4 +74,13 @@ func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComm
 	}
 
 	return OutcomeUnknownClosed
+}
+
+func isHostileLockReason(lockReason string) bool {
+	switch lockReason {
+	case "SPAM", "OFF_TOPIC":
+		return true
+	default:
+		return false
+	}
 }
