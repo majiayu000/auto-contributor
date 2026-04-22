@@ -264,17 +264,17 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 		}
 
 		for _, key := range ruleKeys {
-			if seenRules[key] {
-				continue
-			}
-			seenRules[key] = true
-
 			stage := e.Stage
 			ruleID := key
 			if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
 				stage = parts[0]
 				ruleID = parts[1]
 			}
+			normalizedKey := stage + "/" + ruleID
+			if seenRules[normalizedKey] {
+				continue
+			}
+			seenRules[normalizedKey] = true
 
 			rule := p.ruleLoader.ByStageAndID(stage, ruleID)
 			if rule == nil || rule.Source != "synthesized" {
