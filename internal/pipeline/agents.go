@@ -414,8 +414,9 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 		revCtx := p.buildReviewerCtx(issue, analyst, round, lastReview, revRulesFormatted)
 		revStart := time.Now()
 		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &review); err != nil {
-			log.WithError(err).Warn("reviewer parse error, treating as approve")
-			review.Verdict = "approve"
+			p.recordEvent(issue, nil, "reviewer", round, revStart, "error", false, "", err.Error(), reviewerRules)
+			p.markFailed(issue, "reviewer_failed", err.Error())
+			return round, lastSummary, err
 		}
 		reviewSummaryJSON, _ := json.Marshal(map[string]any{"verdict": review.Verdict, "confidence": review.Confidence, "issues": len(review.IssuesFound)})
 		lastSummary = review.Summary
