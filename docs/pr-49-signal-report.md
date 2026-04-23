@@ -9,21 +9,31 @@ The original engineer-review loop treated reviewer `RunJSON` runtime or
 JSON parse failures as implicit approval, allowing the pipeline to continue
 toward submission without a valid reviewer result.
 
-## Current Branch Diagnosis
+## Branch Diagnosis
 
 - `internal/pipeline/agents.go` now records a failed reviewer event, marks the
   issue failed with `reviewer_failed`, and returns the reviewer error.
-- Existing regression tests cover failed issue status for reviewer parse and
-  runtime failures.
-- The remaining enforcement gap is that tests do not assert the failure is
-  persisted to `pipeline_events`, even though issue #45 requires recording it.
+- Regression tests cover failed issue status for reviewer parse and runtime
+  failures.
+- Regression tests also assert that the failure is persisted to
+  `pipeline_events` with `stage=reviewer`, `success=false`, `verdict=error`,
+  and the original error message.
 
-## Fix Direction
+## Resolution
 
-Add deterministic regression assertions that reviewer parse and runtime
-failures create failed reviewer events containing the original error message.
+- Reviewer parse/runtime failures no longer become implicit approval.
+- The engineer-review loop stops immediately on reviewer failures.
+- The issue status and event log both preserve the reviewer failure signal.
 
 ## Review Comments
 
 - PR review comments: none.
 - PR submitted reviews: none.
+
+## Validation
+
+- `gofmt -w .`: passed
+- `go vet ./...`: passed
+- `go build ./...`: passed
+- `go test ./...`: passed
+- `cargo check && cargo test`: not applicable; repository has no `Cargo.toml`
