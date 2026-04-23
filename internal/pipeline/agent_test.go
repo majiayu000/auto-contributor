@@ -86,6 +86,34 @@ func newLoopTestPipeline(t *testing.T, rt runtime.Runtime) (*Pipeline, *db.DB) {
 	}, database
 }
 
+func assertReviewerFailureEvent(t *testing.T, database *db.DB, issueID int64, wantErr string) {
+	t.Helper()
+
+	events, err := database.GetEventsByIssue(issueID)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	for _, event := range events {
+		if event.Stage != "reviewer" {
+			continue
+		}
+		if event.Round != 1 {
+			t.Fatalf("got reviewer round=%d, want 1", event.Round)
+		}
+		if event.Success {
+			t.Fatal("got reviewer success=true, want false")
+		}
+		if event.Verdict != "error" {
+			t.Fatalf("got reviewer verdict=%q, want error", event.Verdict)
+		}
+		if !strings.Contains(event.ErrorMessage, wantErr) {
+			t.Fatalf("got reviewer error_message=%q, want %q", event.ErrorMessage, wantErr)
+		}
+		return
+	}
+	t.Fatal("expected reviewer failure event, found none")
+}
+
 func TestExtractJSON_PlainJSON(t *testing.T) {
 	var dest map[string]any
 	err := extractJSON(`{"verdict":"PROCEED","score":0.9}`, &dest)
@@ -227,6 +255,8 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 	if !strings.Contains(stored.ErrorMessage, "reviewer_failed") {
 		t.Fatalf("got error_message=%q, want reviewer_failed prefix", stored.ErrorMessage)
 	}
+
+	assertReviewerFailureEvent(t, database, issue.ID, "parse reviewer JSON output")
 }
 
 func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing.T) {
@@ -279,4 +309,6 @@ func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing
 	if !strings.Contains(stored.ErrorMessage, "reviewer_failed") {
 		t.Fatalf("got error_message=%q, want reviewer_failed prefix", stored.ErrorMessage)
 	}
+
+	assertReviewerFailureEvent(t, database, issue.ID, "reviewer runtime exploded")
 }
