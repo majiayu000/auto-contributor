@@ -360,7 +360,8 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	}
 
 	// Build context for responder agent (human feedback only)
-	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments, humanIssueComments)
+	responderRules, rulesFormatted := p.ruleLoader.PromptSnapshot("responder")
+	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments, humanIssueComments, rulesFormatted)
 
 	log.WithFields(Fields{
 		"pr":       pr.PRURL,
@@ -370,10 +371,15 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	}).Info("processing feedback")
 
 	// Run responder agent
+	start := time.Now()
 	var result FeedbackResult
-	if _, err := p.runner.RunJSON(ctx, "responder", workspace, tmplCtx, &result); err != nil {
+	raw, err := p.runner.RunJSON(ctx, "responder", workspace, tmplCtx, &result)
+	if err != nil {
 		log.WithError(err).Warn("responder parse error, treating as no_action")
+		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, "", false, "", err.Error(), responderRules)
 		result.Action = "no_action"
+	} else {
+		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
 	}
 
 	// Post replies and collect replied comment IDs
@@ -481,6 +487,7 @@ func (p *Pipeline) buildResponderCtx(
 	reviews []ghclient.PRReview,
 	comments []ghclient.PRReviewComment,
 	issueComments []ghclient.IssueComment,
+	rulesFormatted string,
 ) map[string]any {
 	// Format reviews as readable text
 	var reviewsText string
@@ -522,7 +529,7 @@ func (p *Pipeline) buildResponderCtx(
 		"Reviews":               reviewsText,
 		"InlineComments":        commentsText,
 		"IssueComments":         issueCommentsText,
-		"Rules":                 p.ruleLoader.FormatForPrompt("responder"),
+		"Rules":                 rulesFormatted,
 	}
 }
 

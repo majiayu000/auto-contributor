@@ -348,6 +348,9 @@ func TestParseChecksOutput_ActionRequiredIsFailure(t *testing.T) {
 	if !result.CodeFailures {
 		t.Error("action_required: CodeFailures should be true")
 	}
+	if len(result.FailedChecks) != 1 || result.FailedChecks[0] != "build" {
+		t.Errorf("action_required: FailedChecks = %v, want [build]", result.FailedChecks)
+	}
 }
 
 func TestParseChecksOutput_StartupFailureIsFailure(t *testing.T) {

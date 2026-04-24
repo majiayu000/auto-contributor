@@ -271,7 +271,7 @@ func (db *DB) UpdateTrajectoryOutcome(issueID int64, prNumber int, outcomeLabel 
 // GetSuccessfulTrajectories returns recent successful trajectories for experience replay.
 func (db *DB) GetSuccessfulTrajectories(limit int) ([]*models.Trajectory, error) {
 	query := fmt.Sprintf(`
-		SELECT id, issue_id, repo, issue_number, issue_title, issue_body,
+		SELECT id, issue_id, pr_number, repo, issue_number, issue_title, issue_body,
 			COALESCE(keywords,''), COALESCE(scout_verdict,''), COALESCE(scout_approach,''),
 			COALESCE(analyst_plan,''), review_rounds, COALESCE(review_summary,''),
 			COALESCE(outcome_label,''), success, created_at, updated_at
@@ -292,7 +292,7 @@ func (db *DB) GetSuccessfulTrajectories(limit int) ([]*models.Trajectory, error)
 // GetRecentTrajectories returns recent trajectories regardless of outcome.
 func (db *DB) GetRecentTrajectories(limit int) ([]*models.Trajectory, error) {
 	query := fmt.Sprintf(`
-		SELECT id, issue_id, repo, issue_number, issue_title, issue_body,
+		SELECT id, issue_id, pr_number, repo, issue_number, issue_title, issue_body,
 			COALESCE(keywords,''), COALESCE(scout_verdict,''), COALESCE(scout_approach,''),
 			COALESCE(analyst_plan,''), review_rounds, COALESCE(review_summary,''),
 			COALESCE(outcome_label,''), success, created_at, updated_at
@@ -319,7 +319,7 @@ func scanTrajectories(rows interface {
 		t := &models.Trajectory{}
 		var successInt int
 		err := rows.Scan(
-			&t.ID, &t.IssueID, &t.Repo, &t.IssueNumber, &t.IssueTitle, &t.IssueBody,
+			&t.ID, &t.IssueID, &t.PRNumber, &t.Repo, &t.IssueNumber, &t.IssueTitle, &t.IssueBody,
 			&t.Keywords, &t.ScoutVerdict, &t.ScoutApproach, &t.AnalystPlan,
 			&t.ReviewRounds, &t.ReviewSummary, &t.OutcomeLabel, &successInt,
 			&t.CreatedAt, &t.UpdatedAt,
