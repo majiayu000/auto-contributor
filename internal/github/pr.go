@@ -36,12 +36,13 @@ type PRReviewComment struct {
 
 // PRInfo bundles state + reviews from a single gh call.
 type PRInfo struct {
-	State     string     `json:"state"`
-	IsDraft   bool       `json:"isDraft"`
-	Reviews   []PRReview `json:"reviews"`
-	CreatedAt string     `json:"createdAt"` // RFC3339, authoritative GitHub PR open time
-	MergedAt  string     `json:"mergedAt"`  // RFC3339, set when state=MERGED
-	ClosedAt  string     `json:"closedAt"`  // RFC3339, set when state=CLOSED or MERGED
+	State      string     `json:"state"`
+	IsDraft    bool       `json:"isDraft"`
+	LockReason string     `json:"lockReason"`
+	Reviews    []PRReview `json:"reviews"`
+	CreatedAt  string     `json:"createdAt"` // RFC3339, authoritative GitHub PR open time
+	MergedAt   string     `json:"mergedAt"`  // RFC3339, set when state=MERGED
+	ClosedAt   string     `json:"closedAt"`  // RFC3339, set when state=CLOSED or MERGED
 }
 
 // GetPRInfo fetches state and reviews in one gh call to avoid rate limiting.
@@ -49,7 +50,7 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
 		fmt.Sprintf("%d", prNum),
 		"-R", repo,
-		"--json", "state,isDraft,reviews,createdAt,mergedAt,closedAt")
+		"--json", "state,isDraft,lockReason,reviews,createdAt,mergedAt,closedAt")
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -60,12 +61,13 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 
 	// Parse with nested author object
 	var raw struct {
-		State     string `json:"state"`
-		IsDraft   bool   `json:"isDraft"`
-		CreatedAt string `json:"createdAt"`
-		MergedAt  string `json:"mergedAt"`
-		ClosedAt  string `json:"closedAt"`
-		Reviews   []struct {
+		State      string `json:"state"`
+		IsDraft    bool   `json:"isDraft"`
+		LockReason string `json:"lockReason"`
+		CreatedAt  string `json:"createdAt"`
+		MergedAt   string `json:"mergedAt"`
+		ClosedAt   string `json:"closedAt"`
+		Reviews    []struct {
 			Author struct {
 				Login string `json:"login"`
 			} `json:"author"`
@@ -78,7 +80,14 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 		return nil, fmt.Errorf("parse PR info: %w", err)
 	}
 
-	info := &PRInfo{State: raw.State, IsDraft: raw.IsDraft, CreatedAt: raw.CreatedAt, MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt}
+	info := &PRInfo{
+		State:      raw.State,
+		IsDraft:    raw.IsDraft,
+		LockReason: raw.LockReason,
+		CreatedAt:  raw.CreatedAt,
+		MergedAt:   raw.MergedAt,
+		ClosedAt:   raw.ClosedAt,
+	}
 	for _, r := range raw.Reviews {
 		info.Reviews = append(info.Reviews, PRReview{
 			Author:      r.Author.Login,

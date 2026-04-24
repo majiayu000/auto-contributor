@@ -17,6 +17,7 @@ const qAlpha = 0.1
 //	unknown_closed → 0.2  (closed without clear reason; may not be our fault)
 //	auto_closed    → 0.5  (closed for external reasons such as inactivity/CI timeout;
 //	                       not attributable to rule quality — neutral signal)
+//	hostile_spam   → 0.5  (closed for hostile/spam moderation; neutral signal)
 //	everything else → 0.0  (rejected for a specific reason)
 func rewardForOutcome(outcomeLabel string) float64 {
 	switch outcomeLabel {
@@ -24,7 +25,7 @@ func rewardForOutcome(outcomeLabel string) float64 {
 		return 1.0
 	case OutcomeUnknownClosed:
 		return 0.2
-	case OutcomeAutoClosed:
+	case OutcomeAutoClosed, OutcomeHostileSpam:
 		return 0.5
 	default:
 		return 0.0
