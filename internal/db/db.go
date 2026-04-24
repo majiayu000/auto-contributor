@@ -613,13 +613,30 @@ func (db *DB) CreatePullRequest(pr *models.PullRequest) error {
 		VALUES (%s)
 	`, db.placeholders(6))
 
-	result, err := db.Exec(query, pr.IssueID, pr.PRURL, pr.PRNumber, pr.BranchName, pr.Status, pr.CIStatus)
+	args := []interface{}{pr.IssueID, pr.PRURL, pr.PRNumber, pr.BranchName, pr.Status, pr.CIStatus}
+	if db.IsPostgres() {
+		if err := db.QueryRow(query+" RETURNING id", args...).Scan(&pr.ID); err != nil {
+			return fmt.Errorf("insert pull request: %w", err)
+		}
+		if pr.ID <= 0 {
+			return fmt.Errorf("insert pull request: invalid id %d", pr.ID)
+		}
+		return nil
+	}
 
+	result, err := db.Exec(query, args...)
 	if err != nil {
 		return err
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("resolve pull request id: %w", err)
+	}
+	if id <= 0 {
+		return fmt.Errorf("resolve pull request id: invalid id %d", id)
+	}
+
 	pr.ID = id
 	return nil
 }
