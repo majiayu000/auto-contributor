@@ -101,6 +101,65 @@ func TestCreatePullRequestPopulatesIDAndSupportsUpdatePostgres(t *testing.T) {
 	testCreatePullRequestPopulatesIDAndSupportsUpdate(t, db)
 }
 
+func TestRuleEmbeddingsSQLiteNoop(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	if err := db.MigrateRuleEmbeddings(); err != nil {
+		t.Fatalf("MigrateRuleEmbeddings() failed: %v", err)
+	}
+	hashes, err := db.GetRuleEmbeddingHashes()
+	if err != nil {
+		t.Fatalf("GetRuleEmbeddingHashes() failed: %v", err)
+	}
+	if len(hashes) != 0 {
+		t.Fatalf("hash count = %d, want 0", len(hashes))
+	}
+	if err := db.UpsertRuleEmbedding("engineer/rule", "engineer", "hash", []float64{0.1, 0.2}, "hash-v1"); err != nil {
+		t.Fatalf("UpsertRuleEmbedding() failed: %v", err)
+	}
+	if err := db.DeleteRuleEmbeddingsExcept([]string{"engineer/rule"}); err != nil {
+		t.Fatalf("DeleteRuleEmbeddingsExcept() failed: %v", err)
+	}
+	candidates, err := db.FindRuleEmbeddingCandidates([]string{"engineer"}, []float64{0.1, 0.2}, 5)
+	if err != nil {
+		t.Fatalf("FindRuleEmbeddingCandidates() failed: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("candidate count = %d, want 0", len(candidates))
+	}
+}
+
+func TestMigrateRuleEmbeddingsPostgresCreatesVectorSchema(t *testing.T) {
+	stub := &ruleEmbeddingsPostgresStub{}
+	registerRuleEmbeddingsPostgresStub(t, stub)
+
+	sqlDB, err := sql.Open(ruleEmbeddingsPostgresStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open stub postgres db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypePostgres}
+	if err := db.MigrateRuleEmbeddings(); err != nil {
+		t.Fatalf("MigrateRuleEmbeddings() failed: %v", err)
+	}
+
+	if len(stub.execQueries) != 3 {
+		t.Fatalf("exec count = %d, want 3", len(stub.execQueries))
+	}
+	if stub.execQueries[0] != "CREATE EXTENSION IF NOT EXISTS vector" {
+		t.Fatalf("first query = %q", stub.execQueries[0])
+	}
+	if !strings.Contains(stub.execQueries[1], "CREATE TABLE IF NOT EXISTS rule_embeddings") || !strings.Contains(stub.execQueries[1], "embedding vector(64) NOT NULL") {
+		t.Fatalf("table query = %q", stub.execQueries[1])
+	}
+	if stub.execQueries[2] != "CREATE INDEX IF NOT EXISTS idx_rule_embeddings_stage ON rule_embeddings(stage)" {
+		t.Fatalf("index query = %q", stub.execQueries[2])
+	}
+}
+
 func testCreatePullRequestPopulatesIDAndSupportsUpdate(t *testing.T, db *DB) {
 
 	uniqueSuffix := time.Now().UnixNano()
@@ -191,11 +250,14 @@ func newSQLiteTestDB(t *testing.T) *DB {
 }
 
 const createPullRequestPostgresStubDriverName = "create_pull_request_postgres_stub"
+const ruleEmbeddingsPostgresStubDriverName = "rule_embeddings_postgres_stub"
 
 var createPullRequestPostgresStubValue atomic.Pointer[createPullRequestPostgresStub]
+var ruleEmbeddingsPostgresStubValue atomic.Pointer[ruleEmbeddingsPostgresStub]
 
 func init() {
 	sql.Register(createPullRequestPostgresStubDriverName, createPullRequestPostgresStubDriver{})
+	sql.Register(ruleEmbeddingsPostgresStubDriverName, ruleEmbeddingsPostgresStubDriver{})
 }
 
 func registerCreatePullRequestPostgresStub(t *testing.T, stub *createPullRequestPostgresStub) {
@@ -203,6 +265,14 @@ func registerCreatePullRequestPostgresStub(t *testing.T, stub *createPullRequest
 	createPullRequestPostgresStubValue.Store(stub)
 	t.Cleanup(func() {
 		createPullRequestPostgresStubValue.Store(nil)
+	})
+}
+
+func registerRuleEmbeddingsPostgresStub(t *testing.T, stub *ruleEmbeddingsPostgresStub) {
+	t.Helper()
+	ruleEmbeddingsPostgresStubValue.Store(stub)
+	t.Cleanup(func() {
+		ruleEmbeddingsPostgresStubValue.Store(nil)
 	})
 }
 
@@ -215,6 +285,7 @@ type createPullRequestPostgresStub struct {
 }
 
 type createPullRequestPostgresStubDriver struct{}
+type ruleEmbeddingsPostgresStubDriver struct{}
 
 func (createPullRequestPostgresStubDriver) Open(string) (driver.Conn, error) {
 	stub := createPullRequestPostgresStubValue.Load()
@@ -224,8 +295,24 @@ func (createPullRequestPostgresStubDriver) Open(string) (driver.Conn, error) {
 	return &createPullRequestPostgresStubConn{stub: stub}, nil
 }
 
+func (ruleEmbeddingsPostgresStubDriver) Open(string) (driver.Conn, error) {
+	stub := ruleEmbeddingsPostgresStubValue.Load()
+	if stub == nil {
+		return nil, fmt.Errorf("rule embeddings postgres stub not registered")
+	}
+	return &ruleEmbeddingsPostgresStubConn{stub: stub}, nil
+}
+
 type createPullRequestPostgresStubConn struct {
 	stub *createPullRequestPostgresStub
+}
+
+type ruleEmbeddingsPostgresStub struct {
+	execQueries []string
+}
+
+type ruleEmbeddingsPostgresStubConn struct {
+	stub *ruleEmbeddingsPostgresStub
 }
 
 func (c *createPullRequestPostgresStubConn) Prepare(string) (driver.Stmt, error) {
@@ -248,6 +335,27 @@ func (c *createPullRequestPostgresStubConn) QueryContext(_ context.Context, quer
 		columns: []string{"id"},
 		rows:    [][]driver.Value{{c.stub.nextID}},
 	}, nil
+}
+
+func (c *ruleEmbeddingsPostgresStubConn) Prepare(string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("prepare not implemented")
+}
+
+func (c *ruleEmbeddingsPostgresStubConn) Close() error {
+	return nil
+}
+
+func (c *ruleEmbeddingsPostgresStubConn) Begin() (driver.Tx, error) {
+	return nil, fmt.Errorf("transactions not implemented")
+}
+
+func (c *ruleEmbeddingsPostgresStubConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	return nil, fmt.Errorf("unexpected QueryContext call")
+}
+
+func (c *ruleEmbeddingsPostgresStubConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	c.stub.execQueries = append(c.stub.execQueries, normalizeWhitespace(query))
+	return driver.RowsAffected(0), nil
 }
 
 func (c *createPullRequestPostgresStubConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
@@ -294,3 +402,6 @@ var _ driver.Conn = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.QueryerContext = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.ExecerContext = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.Rows = (*createPullRequestPostgresStubRows)(nil)
+var _ driver.Conn = (*ruleEmbeddingsPostgresStubConn)(nil)
+var _ driver.QueryerContext = (*ruleEmbeddingsPostgresStubConn)(nil)
+var _ driver.ExecerContext = (*ruleEmbeddingsPostgresStubConn)(nil)

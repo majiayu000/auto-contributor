@@ -52,8 +52,14 @@ type Config struct {
 	RuntimePath string `mapstructure:"runtime_path"` // override CLI binary path
 
 	// Self-learning
-	RulesDir          string `mapstructure:"rules_dir"`
-	SynthesisInterval int    `mapstructure:"synthesis_interval"` // hours between synthesis cycles
+	RulesDir                  string  `mapstructure:"rules_dir"`
+	SynthesisInterval         int     `mapstructure:"synthesis_interval"` // hours between synthesis cycles
+	SemanticRetrievalEnabled  bool    `mapstructure:"semantic_retrieval_enabled"`
+	SemanticRetrievalPhaseA   int     `mapstructure:"semantic_retrieval_phase_a_candidates"`
+	SemanticRetrievalTopK     int     `mapstructure:"semantic_retrieval_top_k"`
+	SemanticRetrievalLambda   float64 `mapstructure:"semantic_retrieval_lambda"`
+	SemanticRetrievalProvider string  `mapstructure:"semantic_retrieval_provider"`
+	SemanticRetrievalModel    string  `mapstructure:"semantic_retrieval_model"`
 
 	// Logging
 	LogLevel string `mapstructure:"log_level"`
@@ -66,32 +72,38 @@ func Default() *Config {
 	dataDir := filepath.Join(homeDir, ".auto-contributor")
 
 	return &Config{
-		GitHubEmail:            "",
-		ClaudeTimeout:          24 * time.Hour,
-		ClaudeMaxRetries:       3,
-		WorkspaceDir:           filepath.Join(homeDir, "Desktop", "code", "opensourece", "auto-workspace"),
-		DatabasePath:           filepath.Join(dataDir, "data.db"),
-		Languages:              []string{"go", "python", "typescript", "javascript", "rust"},
-		IncludeLabels:          []string{"good first issue", "help wanted", "bug"},
-		ExcludeLabels:          []string{"wontfix", "duplicate", "invalid"},
-		ExcludeRepos:           []string{},
-		PriorityRepos:          []string{},
-		MinRepoStars:           1000,
-		MaxIssueAgeDays:        30,
-		MaxReviewRounds:        3,
-		MaxCriticRounds:        2,
-		MaxPRsPerRepo:          1,
-		MaxConcurrentPipelines: 5,
-		PromptsDir:             filepath.Join(dataDir, "prompts"),
-		Mode:                   "full",
-		DiscoveryInterval:      30,
-		FeedbackInterval:       30,
-		Topic:                  "ai",
-		AnalysisDepth:          "deep",
-		RulesDir:               "",
-		SynthesisInterval:      24,
-		LogLevel:               "info",
-		LogFile:                filepath.Join(dataDir, "auto-contributor.log"),
+		GitHubEmail:               "",
+		ClaudeTimeout:             24 * time.Hour,
+		ClaudeMaxRetries:          3,
+		WorkspaceDir:              filepath.Join(homeDir, "Desktop", "code", "opensourece", "auto-workspace"),
+		DatabasePath:              filepath.Join(dataDir, "data.db"),
+		Languages:                 []string{"go", "python", "typescript", "javascript", "rust"},
+		IncludeLabels:             []string{"good first issue", "help wanted", "bug"},
+		ExcludeLabels:             []string{"wontfix", "duplicate", "invalid"},
+		ExcludeRepos:              []string{},
+		PriorityRepos:             []string{},
+		MinRepoStars:              1000,
+		MaxIssueAgeDays:           30,
+		MaxReviewRounds:           3,
+		MaxCriticRounds:           2,
+		MaxPRsPerRepo:             1,
+		MaxConcurrentPipelines:    5,
+		PromptsDir:                filepath.Join(dataDir, "prompts"),
+		Mode:                      "full",
+		DiscoveryInterval:         30,
+		FeedbackInterval:          30,
+		Topic:                     "ai",
+		AnalysisDepth:             "deep",
+		RulesDir:                  "",
+		SynthesisInterval:         24,
+		SemanticRetrievalEnabled:  false,
+		SemanticRetrievalPhaseA:   20,
+		SemanticRetrievalTopK:     5,
+		SemanticRetrievalLambda:   0.2,
+		SemanticRetrievalProvider: "local",
+		SemanticRetrievalModel:    "hash-v1",
+		LogLevel:                  "info",
+		LogFile:                   filepath.Join(dataDir, "auto-contributor.log"),
 	}
 }
 
@@ -113,6 +125,12 @@ func Load() (*Config, error) {
 	viper.BindEnv("github_token", "GITHUB_TOKEN")
 	viper.BindEnv("github_username", "GITHUB_USERNAME")
 	viper.BindEnv("database_url", "DATABASE_URL")
+	viper.BindEnv("semantic_retrieval_enabled", "SEMANTIC_RETRIEVAL_ENABLED")
+	viper.BindEnv("semantic_retrieval_phase_a_candidates", "SEMANTIC_RETRIEVAL_PHASE_A_CANDIDATES")
+	viper.BindEnv("semantic_retrieval_top_k", "SEMANTIC_RETRIEVAL_TOP_K")
+	viper.BindEnv("semantic_retrieval_lambda", "SEMANTIC_RETRIEVAL_LAMBDA")
+	viper.BindEnv("semantic_retrieval_provider", "SEMANTIC_RETRIEVAL_PROVIDER")
+	viper.BindEnv("semantic_retrieval_model", "SEMANTIC_RETRIEVAL_MODEL")
 
 	// Read config file (optional)
 	if err := viper.ReadInConfig(); err != nil {

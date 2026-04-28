@@ -119,6 +119,9 @@ func (db *DB) Migrate() error {
 	if err := db.MigrateTrajectories(); err != nil {
 		return err
 	}
+	if err := db.MigrateRuleEmbeddings(); err != nil {
+		return err
+	}
 
 	return nil
 }

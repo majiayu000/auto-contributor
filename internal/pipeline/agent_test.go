@@ -2,12 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/internal/rules"
@@ -20,6 +22,7 @@ var _ runtime.Runtime = (*stubRuntime)(nil)
 type stubRuntime struct {
 	outputs []stubOutput
 	index   int
+	prompts []string
 }
 
 type stubOutput struct {
@@ -35,6 +38,7 @@ func (r *stubRuntime) Execute(ctx context.Context, workDir string, prompt string
 	if r.index >= len(r.outputs) {
 		return "", errors.New("unexpected runtime call")
 	}
+	r.prompts = append(r.prompts, prompt)
 	result := r.outputs[r.index]
 	r.index++
 	return result.output, result.err
@@ -257,6 +261,107 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 	}
 
 	assertReviewerFailureEvent(t, database, issue.ID, "parse reviewer JSON output")
+}
+
+func TestRunScoutUsesSemanticRetrieverRuleSelection(t *testing.T) {
+	rt := &stubRuntime{outputs: []stubOutput{
+		{output: `{"verdict":"PROCEED","reason":"","difficulty":1,"has_competing_pr":false,"suggested_approach":"minimal fix"}`},
+	}}
+	database, err := db.New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+
+	promptsDir := t.TempDir()
+	writePromptTemplate(t, promptsDir, "scout", `rules={{.Rules}}`)
+
+	ps := prompt.NewStore(promptsDir)
+	if err := ps.Load(); err != nil {
+		t.Fatalf("load prompts: %v", err)
+	}
+
+	rulesDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rulesDir, "scout"), 0755); err != nil {
+		t.Fatalf("mkdir rules dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "scout", "full-load.yaml"), []byte(
+		"id: full-load\nstage: scout\nconfidence: 0.9\nbody: full load fallback text\n",
+	), 0644); err != nil {
+		t.Fatalf("write rule: %v", err)
+	}
+
+	rl := rules.NewRuleLoader(rulesDir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	p := &Pipeline{
+		cfg:           &config.Config{WorkspaceDir: t.TempDir()},
+		db:            database,
+		prompts:       ps,
+		runner:        NewAgentRunner(ps, rt, 0),
+		ruleLoader:    rl,
+		ruleRetriever: stubStageRuleRetriever{ids: []string{"scout/semantic-one", "global/semantic-two"}, prompt: "semantic retrieval text"},
+	}
+
+	issue := &models.Issue{
+		Repo:        "owner/repo",
+		IssueNumber: 7,
+		Title:       "panic in parser",
+		Body:        "repro details",
+		Labels:      "[\"bug\"]",
+	}
+	if err := database.CreateIssue(issue); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	if _, err := p.runScout(context.Background(), issue); err != nil {
+		t.Fatalf("runScout() failed: %v", err)
+	}
+
+	if len(rt.prompts) != 1 {
+		t.Fatalf("runtime prompt count = %d, want 1", len(rt.prompts))
+	}
+	if !strings.Contains(rt.prompts[0], "semantic retrieval text") {
+		t.Fatalf("runtime prompt did not include semantic retrieval text:\n%s", rt.prompts[0])
+	}
+	if strings.Contains(rt.prompts[0], "full load fallback text") {
+		t.Fatalf("runtime prompt used full-load rules instead of semantic selection:\n%s", rt.prompts[0])
+	}
+
+	events, err := database.GetEventsByIssue(issue.ID)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1", len(events))
+	}
+
+	var recorded []string
+	if err := json.Unmarshal([]byte(events[0].ExperiencesUsed), &recorded); err != nil {
+		t.Fatalf("unmarshal experiences_used: %v", err)
+	}
+	want := []string{"scout/semantic-one", "global/semantic-two"}
+	if strings.Join(recorded, ",") != strings.Join(want, ",") {
+		t.Fatalf("recorded rule IDs = %v, want %v", recorded, want)
+	}
+}
+
+type stubStageRuleRetriever struct {
+	ids    []string
+	prompt string
+	err    error
+}
+
+func (s stubStageRuleRetriever) Retrieve(stage string, issue *models.Issue) ([]string, string, error) {
+	return s.ids, s.prompt, s.err
+}
+
+func (s stubStageRuleRetriever) Sync() error {
+	return nil
 }
 
 func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing.T) {

@@ -44,6 +44,7 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 		if err := p.ruleLoader.Reload(); err != nil {
 			log.WithFields(Fields{"stage": stage, "error": err}).Warn("failed to reload rules after stage synthesis")
 		}
+		p.syncRuleRetriever("stage_synthesis_" + stage)
 
 		totalNew += applied.newCount
 		totalUpdated += applied.updatedCount
@@ -64,6 +65,7 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 	if err := p.ruleLoader.Reload(); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to reload rules after synthesis")
 	}
+	p.syncRuleRetriever("post_synthesis_reload")
 
 	// Decay confidence on rules without recent evidence (runs on fresh in-memory state)
 	p.applyDecay()
@@ -72,6 +74,7 @@ func (p *Pipeline) RunSynthesis(ctx context.Context) error {
 	if err := p.ruleLoader.Reload(); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to reload rules after decay")
 	}
+	p.syncRuleRetriever("post_decay_reload")
 
 	log.WithFields(Fields{
 		"new":     totalNew,

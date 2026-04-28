@@ -13,7 +13,7 @@ import (
 // --- Scout ---
 
 func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutResult, error) {
-	stageRules, rulesFormatted := p.ruleLoader.PromptSnapshot("scout")
+	stageRules, rulesFormatted := p.getRulesForStageIssue("scout", issue)
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
@@ -42,7 +42,7 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 // --- Analyst ---
 
 func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspace string, scout *ScoutResult) (*AnalystResult, error) {
-	stageRules, rulesFormatted := p.ruleLoader.PromptSnapshot("analyst")
+	stageRules, rulesFormatted := p.getRulesForStageIssue("analyst", issue)
 	scoutJSON, _ := json.MarshalIndent(scout, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -141,7 +141,7 @@ func (p *Pipeline) buildReviewerCtx(issue *models.Issue, analyst *AnalystResult,
 // --- Submitter ---
 
 func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult) (*SubmitResult, error) {
-	stageRules, rulesFormatted := p.ruleLoader.PromptSnapshot("submitter")
+	stageRules, rulesFormatted := p.getRulesForStageIssue("submitter", issue)
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -179,7 +179,7 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 // --- Critic ---
 
 func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace string, analyst *AnalystResult, round int) (*CriticResult, error) {
-	criticRules, rulesFormatted := p.ruleLoader.PromptSnapshot("critic")
+	criticRules, rulesFormatted := p.getRulesForStageIssue("critic", issue)
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	tmplCtx := map[string]any{
@@ -229,8 +229,8 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		return err
 	}
 	for round := 1; round <= p.maxCriticRounds; round++ {
-		engineerRules, engRulesFormatted := p.ruleLoader.PromptSnapshot("engineer")
-		reviewerRules, revRulesFormatted := p.ruleLoader.PromptSnapshot("reviewer")
+		engineerRules, engRulesFormatted := p.getRulesForStageIssue("engineer", issue)
+		reviewerRules, revRulesFormatted := p.getRulesForStageIssue("reviewer", issue)
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusReviewing, ""); err != nil {
 			log.WithError(err).Warn("update status to reviewing (critic)")
 		}
@@ -378,8 +378,8 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 	lastSummary := ""
 
 	for round := 1; round <= p.maxReview; round++ {
-		engineerRules, engRulesFormatted := p.ruleLoader.PromptSnapshot("engineer")
-		reviewerRules, revRulesFormatted := p.ruleLoader.PromptSnapshot("reviewer")
+		engineerRules, engRulesFormatted := p.getRulesForStageIssue("engineer", issue)
+		reviewerRules, revRulesFormatted := p.getRulesForStageIssue("reviewer", issue)
 
 		// Engineer
 		if err := p.db.UpdateIssueStatus(issue.ID, models.IssueStatusEngineering, ""); err != nil {
