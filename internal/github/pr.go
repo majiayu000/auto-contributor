@@ -59,6 +59,14 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 		return nil, fmt.Errorf("gh pr view %s#%d: %s", repo, prNum, stderr.String())
 	}
 
+	info, err := parsePRInfoOutput(output)
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func parsePRInfoOutput(output []byte) (*PRInfo, error) {
 	// Parse with nested author object
 	var raw struct {
 		State      string `json:"state"`
