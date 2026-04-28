@@ -30,8 +30,14 @@ type Pipeline struct {
 	prompts         *prompt.Store
 	runner          *AgentRunner
 	ruleLoader      *rules.RuleLoader
+	ruleRetriever   stageRuleRetriever
 	maxReview       int
 	maxCriticRounds int
+}
+
+type stageRuleRetriever interface {
+	Retrieve(stage string, issue *models.Issue) ([]string, string, error)
+	Sync() error
 }
 
 // New creates a Pipeline. promptsDir is the path to the prompts/ directory.
@@ -75,6 +81,16 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		log.WithFields(Fields{"count": len(rl.All())}).Info("loaded self-learning rules")
 	}
 
+	retriever, err := rules.NewRuleRetriever(cfg, database, rl)
+	if err != nil {
+		log.WithFields(Fields{"error": err}).Warn("failed to initialize semantic rule retrieval, falling back to full prompt snapshots")
+		retriever = nil
+	} else if retriever != nil {
+		if err := retriever.Sync(); err != nil {
+			log.WithFields(Fields{"error": err}).Warn("failed to sync semantic rule index, falling back to full prompt snapshots")
+		}
+	}
+
 	return &Pipeline{
 		cfg:             cfg,
 		db:              database,
@@ -82,9 +98,39 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		prompts:         ps,
 		runner:          NewAgentRunner(ps, rt, timeout),
 		ruleLoader:      rl,
+		ruleRetriever:   retriever,
 		maxReview:       maxReview,
 		maxCriticRounds: maxCriticRounds,
 	}, nil
+}
+
+func (p *Pipeline) getRulesForStageIssue(stage string, issue *models.Issue) ([]string, string) {
+	fallbackIDs, fallbackPrompt := p.ruleLoader.PromptSnapshot(stage)
+	if p.ruleRetriever == nil {
+		return fallbackIDs, fallbackPrompt
+	}
+
+	ids, promptText, err := p.ruleRetriever.Retrieve(stage, issue)
+	if err != nil {
+		fields := Fields{"stage": stage, "error": err}
+		if issue != nil {
+			fields["repo"] = issue.Repo
+			fields["issue"] = issue.IssueNumber
+		}
+		log.WithFields(fields).Warn("semantic rule retrieval failed, falling back to full prompt snapshot")
+		return fallbackIDs, fallbackPrompt
+	}
+
+	return ids, promptText
+}
+
+func (p *Pipeline) syncRuleRetriever(reason string) {
+	if p.ruleRetriever == nil {
+		return
+	}
+	if err := p.ruleRetriever.Sync(); err != nil {
+		log.WithFields(Fields{"reason": reason, "error": err}).Warn("failed to sync semantic rule index")
+	}
 }
 
 // saveTrajectory persists an experience-replay trajectory. Non-fatal on error.
