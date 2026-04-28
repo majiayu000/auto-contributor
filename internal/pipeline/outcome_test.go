@@ -18,3 +18,15 @@ func TestClassifyOutcome_HostileSpamLockReason(t *testing.T) {
 		t.Fatalf("ClassifyOutcome() = %q, want %q", got, OutcomeHostileSpam)
 	}
 }
+
+func TestClassifyOutcome_HostileSpamLockReasonLowercase(t *testing.T) {
+	prInfo := &ghclient.PRInfo{
+		State:      "CLOSED",
+		LockReason: "spam",
+	}
+
+	got := ClassifyOutcome(prInfo, nil, &models.PullRequest{})
+	if got != OutcomeHostileSpam {
+		t.Fatalf("ClassifyOutcome() = %q, want %q", got, OutcomeHostileSpam)
+	}
+}
