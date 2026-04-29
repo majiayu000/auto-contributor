@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -17,9 +18,7 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
-		"IssueTitle":  issue.Title,
-		"IssueBody":   issue.Body,
-		"IssueLabels": issue.Labels,
+		"IssueData":   formatIssueForPrompt(issue),
 		"Rules":       rulesFormatted,
 	}
 
@@ -30,7 +29,7 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 
 	start := time.Now()
 	var result ScoutResult
-	if _, err := p.runner.RunJSON(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result); err != nil {
+	if _, err := p.runner.RunJSONWithPolicy(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
@@ -48,15 +47,14 @@ func (p *Pipeline) runAnalyst(ctx context.Context, issue *models.Issue, workspac
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
-		"IssueTitle":  issue.Title,
-		"IssueBody":   issue.Body,
+		"IssueData":   formatIssueForPrompt(issue),
 		"ScoutResult": string(scoutJSON),
 		"Rules":       rulesFormatted,
 	}
 
 	start := time.Now()
 	var result AnalystResult
-	if _, err := p.runner.RunJSON(ctx, "analyst", workspace, tmplCtx, &result); err != nil {
+	if _, err := p.runner.RunJSONWithPolicy(ctx, "analyst", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		p.recordEvent(issue, nil, "analyst", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
@@ -81,8 +79,7 @@ func (p *Pipeline) buildEngineerCtx(issue *models.Issue, analyst *AnalystResult,
 	ctx := map[string]any{
 		"Repo":         issue.Repo,
 		"IssueNumber":  issue.IssueNumber,
-		"IssueTitle":   issue.Title,
-		"IssueBody":    issue.Body,
+		"IssueData":    formatIssueForPrompt(issue),
 		"AnalystPlan":  string(planJSON),
 		"BaseBranch":   analyst.BaseBranch,
 		"CommitFormat": analyst.CommitFormat,
@@ -93,8 +90,10 @@ func (p *Pipeline) buildEngineerCtx(issue *models.Issue, analyst *AnalystResult,
 
 	if lastReview != nil {
 		ctx["ReworkRound"] = round
-		ctx["ReworkInstructions"] = lastReview.ReworkInstructions
-		ctx["IssuesFound"] = lastReview.IssuesFound
+		ctx["ReworkInstructionsData"] = formatUntrustedGitHubData(map[string]any{
+			"rework_instructions": lastReview.ReworkInstructions,
+			"issues_found":        lastReview.IssuesFound,
+		})
 	}
 
 	// Inject lessons from past reviews
@@ -120,8 +119,7 @@ func (p *Pipeline) buildReviewerCtx(issue *models.Issue, analyst *AnalystResult,
 	ctx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
-		"IssueTitle":  issue.Title,
-		"IssueBody":   issue.Body,
+		"IssueData":   formatIssueForPrompt(issue),
 		"AnalystPlan": string(planJSON),
 		"BaseBranch":  analyst.BaseBranch,
 		"CICommands":  analyst.CICommands,
@@ -147,8 +145,7 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 	tmplCtx := map[string]any{
 		"Repo":           issue.Repo,
 		"IssueNumber":    issue.IssueNumber,
-		"IssueTitle":     issue.Title,
-		"IssueBody":      issue.Body,
+		"IssueData":      formatIssueForPrompt(issue),
 		"AnalystPlan":    string(planJSON),
 		"BranchName":     analyst.BranchName,
 		"BaseBranch":     analyst.BaseBranch,
@@ -161,7 +158,7 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 
 	start := time.Now()
 	var result SubmitResult
-	raw, err := p.runner.RunJSON(ctx, "submitter", workspace, tmplCtx, &result)
+	raw, err := p.runner.RunJSONWithPolicy(ctx, "submitter", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
 		log.WithFields(Fields{
 			"repo":        issue.Repo,
@@ -185,8 +182,7 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
-		"IssueTitle":  issue.Title,
-		"IssueBody":   issue.Body,
+		"IssueData":   formatIssueForPrompt(issue),
 		"AnalystPlan": string(planJSON),
 		"BaseBranch":  analyst.BaseBranch,
 		"CICommands":  analyst.CICommands,
@@ -197,7 +193,7 @@ func (p *Pipeline) runCritic(ctx context.Context, issue *models.Issue, workspace
 
 	start := time.Now()
 	var result CriticResult
-	if _, err := p.runner.RunJSON(ctx, "critic", workspace, tmplCtx, &result); err != nil {
+	if _, err := p.runner.RunJSONWithPolicy(ctx, "critic", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		p.recordEvent(issue, nil, "critic", round, start, "", false, "", err.Error(), criticRules)
 		return nil, err
 	}
@@ -322,7 +318,7 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		}
 		engCtx := p.buildEngineerCtx(issue, analyst, criticRework, round, engRulesFormatted)
 		engStart := time.Now()
-		raw, err := p.runner.Run(ctx, "engineer", workspace, engCtx)
+		raw, err := p.runner.RunWithPolicy(ctx, "engineer", workspace, engCtx, runtime.ExecutionPolicyUntrusted)
 		if err != nil {
 			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error(), engineerRules)
 			p.markFailed(issue, "engineer_failed_critic_rework", err.Error())
@@ -350,7 +346,7 @@ func (p *Pipeline) criticLoop(ctx context.Context, issue *models.Issue, workspac
 		var postCriticReview CodeReviewResult
 		revCtx := p.buildReviewerCtx(issue, analyst, round, nil, revRulesFormatted)
 		revStart := time.Now()
-		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &postCriticReview); err != nil {
+		if _, err := p.runner.RunJSONWithPolicy(ctx, "reviewer", workspace, revCtx, &postCriticReview, runtime.ExecutionPolicyUntrusted); err != nil {
 			p.recordEvent(issue, nil, "reviewer", round, revStart, "", false, "", err.Error(), reviewerRules)
 			p.markFailed(issue, "reviewer_parse_error_after_critic_rework", err.Error())
 			return fmt.Errorf("reviewer parse error after critic rework at round %d for %s#%d: %w", round, issue.Repo, issue.IssueNumber, err)
@@ -388,7 +384,7 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 
 		engCtx := p.buildEngineerCtx(issue, analyst, lastReview, round, engRulesFormatted)
 		engStart := time.Now()
-		raw, err := p.runner.Run(ctx, "engineer", workspace, engCtx)
+		raw, err := p.runner.RunWithPolicy(ctx, "engineer", workspace, engCtx, runtime.ExecutionPolicyUntrusted)
 		if err != nil {
 			p.recordEvent(issue, nil, "engineer", round, engStart, "", false, "", err.Error(), engineerRules)
 			p.markFailed(issue, "engineer_failed", err.Error())
@@ -413,7 +409,7 @@ func (p *Pipeline) engineerReviewLoopWithStats(ctx context.Context, issue *model
 		var review CodeReviewResult
 		revCtx := p.buildReviewerCtx(issue, analyst, round, lastReview, revRulesFormatted)
 		revStart := time.Now()
-		if _, err := p.runner.RunJSON(ctx, "reviewer", workspace, revCtx, &review); err != nil {
+		if _, err := p.runner.RunJSONWithPolicy(ctx, "reviewer", workspace, revCtx, &review, runtime.ExecutionPolicyUntrusted); err != nil {
 			p.recordEvent(issue, nil, "reviewer", round, revStart, "error", false, "", err.Error(), reviewerRules)
 			p.markFailed(issue, "reviewer_failed", err.Error())
 			return round, lastSummary, err

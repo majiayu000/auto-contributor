@@ -7,6 +7,7 @@ import (
 	"time"
 
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -247,17 +248,17 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 				tmplCtx := map[string]any{
 					"Repo":        prRepo,
 					"IssueNumber": issue.IssueNumber,
-					"IssueTitle":  issue.Title,
+					"IssueData":   formatIssueForPrompt(issue),
 					"PRNumber":    pr.PRNumber,
 					"PRURL":       pr.PRURL,
 					"BranchName":  pr.BranchName,
 					"IsRework":    true,
 					"ReworkRound": pr.FeedbackRound + 1,
-					"ReworkInstructions": "Codecov reports missing test coverage on changed lines. " +
-						"Read the Codecov comment on the PR to identify which lines need coverage. " +
-						"Add tests to cover the missing lines, then push.",
+					"ReworkInstructionsData": formatUntrustedGitHubData(map[string]any{
+						"rework_instructions": "Codecov reports missing test coverage on changed lines. Read the Codecov comment on the PR to identify which lines need coverage. Add tests to cover the missing lines, then push.",
+					}),
 				}
-				raw, err := p.runner.Run(ctx, "engineer", workspace, tmplCtx)
+				raw, err := p.runner.RunWithPolicy(ctx, "engineer", workspace, tmplCtx, runtime.ExecutionPolicyUntrusted)
 				if err == nil && containsMarker(raw, "FIX_COMPLETE") {
 					log.WithField("pr", pr.PRURL).Info("engineer pushed coverage fix")
 					p.db.UpdatePRFeedbackCheck(pr.ID, pr.FeedbackRound+1)
@@ -373,7 +374,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	// Run responder agent
 	start := time.Now()
 	var result FeedbackResult
-	raw, err := p.runner.RunJSON(ctx, "responder", workspace, tmplCtx, &result)
+	raw, err := p.runner.RunJSONWithPolicy(ctx, "responder", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
 		log.WithError(err).Warn("responder parse error, treating as no_action")
 		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, "", false, "", err.Error(), responderRules)
@@ -426,20 +427,22 @@ func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prR
 	tmplCtx := map[string]any{
 		"Repo":         prRepo,
 		"IssueNumber":  issue.IssueNumber,
-		"IssueTitle":   issue.Title,
+		"IssueData":    formatIssueForPrompt(issue),
 		"PRNumber":     pr.PRNumber,
 		"PRURL":        pr.PRURL,
 		"BranchName":   pr.BranchName,
 		"FailedChecks": strings.Join(ci.FailedChecks, ", "),
 		"IsRework":     true,
 		"ReworkRound":  pr.FeedbackRound + 1,
-		"ReworkInstructions": fmt.Sprintf(
-			"CI checks failed: %s. Read the CI logs, identify the root cause, fix the code, and push.",
-			strings.Join(ci.FailedChecks, ", "),
-		),
+		"ReworkInstructionsData": formatUntrustedGitHubData(map[string]any{
+			"rework_instructions": fmt.Sprintf(
+				"CI checks failed: %s. Read the CI logs, identify the root cause, fix the code, and push.",
+				strings.Join(ci.FailedChecks, ", "),
+			),
+		}),
 	}
 
-	raw, err := p.runner.Run(ctx, "engineer", workspace, tmplCtx)
+	raw, err := p.runner.RunWithPolicy(ctx, "engineer", workspace, tmplCtx, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
 		log.WithError(err).WithField("pr", pr.PRURL).Warn("engineer CI fix failed")
 		return
@@ -489,70 +492,42 @@ func (p *Pipeline) buildResponderCtx(
 	issueComments []ghclient.IssueComment,
 	rulesFormatted string,
 ) map[string]any {
-	// Format reviews as readable text
-	var reviewsText string
-	for _, r := range reviews {
-		reviewsText += fmt.Sprintf("- **%s** (%s): %s\n", r.Author, r.State, r.Body)
-	}
-	if reviewsText == "" {
-		reviewsText = "(none)"
-	}
-
-	// Format inline comments
-	var commentsText string
-	for _, c := range comments {
-		commentsText += fmt.Sprintf("- [%s:%d] **%s** (id:%d): %s\n", c.Path, c.Line, c.Author, c.ID, c.Body)
-	}
-	if commentsText == "" {
-		commentsText = "(none)"
-	}
-
-	// Format issue-level comments (maintainer replies on the PR thread)
-	var issueCommentsText string
-	for _, c := range issueComments {
-		issueCommentsText += fmt.Sprintf("- **%s** (id:%d): %s\n", c.Author, c.ID, c.Body)
-	}
-	if issueCommentsText == "" {
-		issueCommentsText = "(none)"
-	}
-
 	return map[string]any{
-		"Repo":                  issue.Repo,
-		"IssueNumber":           issue.IssueNumber,
-		"IssueTitle":            issue.Title,
-		"IssueBody":             issue.Body,
-		"OriginalIssueComments": p.fetchOriginalIssueComments(issue),
-		"PRNumber":              pr.PRNumber,
-		"PRURL":                 pr.PRURL,
-		"BranchName":            pr.BranchName,
-		"FeedbackRound":         pr.FeedbackRound + 1,
-		"Reviews":               reviewsText,
-		"InlineComments":        commentsText,
-		"IssueComments":         issueCommentsText,
-		"Rules":                 rulesFormatted,
+		"Repo":                      issue.Repo,
+		"IssueNumber":               issue.IssueNumber,
+		"IssueData":                 formatIssueForPrompt(issue),
+		"OriginalIssueCommentsData": formatUntrustedGitHubData(p.fetchOriginalIssueComments(issue)),
+		"PRNumber":                  pr.PRNumber,
+		"PRURL":                     pr.PRURL,
+		"BranchName":                pr.BranchName,
+		"FeedbackRound":             pr.FeedbackRound + 1,
+		"ReviewsData":               formatUntrustedGitHubData(reviews),
+		"InlineCommentsData":        formatUntrustedGitHubData(comments),
+		"IssueCommentsData":         formatUntrustedGitHubData(issueComments),
+		"Rules":                     rulesFormatted,
 	}
 }
 
 // fetchOriginalIssueComments fetches recent comments from the original issue (not the PR).
 // Maintainers may add clarifications, new context, or updated requirements on the issue.
-func (p *Pipeline) fetchOriginalIssueComments(issue *models.Issue) string {
+func (p *Pipeline) fetchOriginalIssueComments(issue *models.Issue) []ghclient.IssueComment {
+	if p == nil || p.gh == nil {
+		return nil
+	}
 	ctx := context.Background()
 	comments, err := p.gh.GetPRIssueComments(ctx, issue.Repo, issue.IssueNumber)
 	if err != nil || len(comments) == 0 {
-		return "(none)"
+		return nil
 	}
 
-	var sb strings.Builder
+	filtered := make([]ghclient.IssueComment, 0, len(comments))
 	for _, c := range comments {
 		if isBot(c.Author) {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", c.Author, c.Body))
+		filtered = append(filtered, c)
 	}
-	if sb.Len() == 0 {
-		return "(none)"
-	}
-	return sb.String()
+	return filtered
 }
 
 // shouldAutoClose returns true if a PR should be auto-closed due to staleness.

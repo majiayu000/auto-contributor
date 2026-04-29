@@ -251,7 +251,7 @@ func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string
 		}
 	}()
 
-	output, err := d.rt.ExecuteStdin(ctx, prompt)
+	output, err := d.rt.ExecuteStdin(ctx, prompt, runtime.ExecutionPolicyTrusted)
 	close(done)
 
 	if err != nil {

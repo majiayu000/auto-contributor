@@ -24,35 +24,100 @@ var roleMarkerRE = regexp.MustCompile(
 		`|ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?`,
 )
 
-// sanitizeForPrompt strips characters and patterns from user-controlled text that could
-// be used to inject instructions into an LLM prompt. It collapses newlines to spaces
-// and removes sequences that look like markdown headings or role markers.
-func sanitizeForPrompt(s string) string {
-	// Replace newlines/tabs with a space so multi-line content cannot introduce
-	// new prompt sections.
-	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(s)
+// sanitizeUntrustedText preserves the content while stripping common role markers
+// as defense in depth. Structural isolation is handled by formatUntrustedGitHubData.
+func sanitizeUntrustedText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.TrimSpace(roleMarkerRE.ReplaceAllString(s, ""))
+}
 
-	// Remove markdown heading markers (###, ##, #) that could introduce fake sections.
-	// NOTE: trimmed is computed inside the loop so the condition and mutation operate on
-	// the same value; using TrimLeft on the un-trimmed string would skip leading whitespace
-	// and leave s unchanged when the string starts with spaces, causing an infinite loop.
-	for strings.Contains(s, "##") || strings.HasPrefix(strings.TrimSpace(s), "#") {
-		s = strings.ReplaceAll(s, "##", "")
-		trimmed := strings.TrimSpace(s)
-		if strings.HasPrefix(trimmed, "#") {
-			s = strings.TrimLeft(trimmed, "#")
+func sanitizeUntrustedValue(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case string:
+		return sanitizeUntrustedText(x)
+	case bool:
+		return x
+	case float64:
+		return x
+	case float32:
+		return x
+	case int:
+		return x
+	case int8:
+		return x
+	case int16:
+		return x
+	case int32:
+		return x
+	case int64:
+		return x
+	case uint:
+		return x
+	case uint8:
+		return x
+	case uint16:
+		return x
+	case uint32:
+		return x
+	case uint64:
+		return x
+	case []any:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = sanitizeUntrustedValue(x[i])
 		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, value := range x {
+			out[k] = sanitizeUntrustedValue(value)
+		}
+		return out
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return sanitizeUntrustedText(fmt.Sprint(v))
+		}
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return sanitizeUntrustedText(string(raw))
+		}
+		return sanitizeUntrustedValue(decoded)
 	}
+}
 
-	// Remove common role-marker prefixes used in prompt injection (case-insensitive).
-	s = roleMarkerRE.ReplaceAllString(s, "")
-
-	// Collapse multiple spaces.
-	for strings.Contains(s, "  ") {
-		s = strings.ReplaceAll(s, "  ", " ")
+func formatUntrustedGitHubData(v any) string {
+	sanitized := sanitizeUntrustedValue(v)
+	raw, err := json.MarshalIndent(sanitized, "", "  ")
+	if err != nil {
+		raw = []byte(`"(unavailable)"`)
 	}
+	return "```json\n" + string(raw) + "\n```"
+}
 
-	return strings.TrimSpace(s)
+func parseIssueLabels(raw string) any {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+		return parsed
+	}
+	return raw
+}
+
+func formatIssueForPrompt(issue *models.Issue) string {
+	if issue == nil {
+		return formatUntrustedGitHubData(map[string]any{})
+	}
+	return formatUntrustedGitHubData(map[string]any{
+		"title":  issue.Title,
+		"body":   issue.Body,
+		"labels": parseIssueLabels(issue.Labels),
+	})
 }
 
 // stopWords is a minimal set of common English words to exclude from keyword extraction.
@@ -235,43 +300,43 @@ func formatTrajectoriesForPrompt(trajectories []*models.Trajectory) string {
 			}
 		}
 
-		fmt.Fprintf(&b, "Trajectory %d [%s] - %s#%d\n", i+1, label, sanitizeForPrompt(t.Repo), t.IssueNumber)
-		fmt.Fprintf(&b, "Issue: %s\n", sanitizeForPrompt(t.IssueTitle))
-
+		fmt.Fprintf(&b, "Trajectory %d [%s]\n", i+1, label)
+		payload := map[string]any{
+			"repo":         t.Repo,
+			"issue_number": t.IssueNumber,
+			"issue_title":  t.IssueTitle,
+		}
 		if t.ScoutApproach != "" {
-			fmt.Fprintf(&b, "Approach taken: %s\n", sanitizeForPrompt(truncate(t.ScoutApproach, 300)))
+			payload["approach_taken"] = truncate(t.ScoutApproach, 300)
 		}
 
 		if t.AnalystPlan != "" {
 			var plan FixPlan
 			if err := json.Unmarshal([]byte(t.AnalystPlan), &plan); err == nil {
 				if plan.Description != "" {
-					fmt.Fprintf(&b, "Fix plan: %s\n", sanitizeForPrompt(truncate(plan.Description, 300)))
+					payload["fix_plan"] = truncate(plan.Description, 300)
 				}
 				if len(plan.FilesToModify) > 0 {
 					files := plan.FilesToModify
 					if len(files) > 10 {
 						files = files[:10]
 					}
-					sanitizedFiles := make([]string, len(files))
-					for i, f := range files {
-						sanitizedFiles[i] = sanitizeForPrompt(f)
-					}
-					fmt.Fprintf(&b, "Files modified: %s\n", strings.Join(sanitizedFiles, ", "))
+					payload["files_modified"] = files
 				}
 			}
 		}
 
 		if t.ReviewRounds > 0 {
-			fmt.Fprintf(&b, "Review rounds: %d\n", t.ReviewRounds)
+			payload["review_rounds"] = t.ReviewRounds
 		}
 
 		if t.ReviewSummary != "" {
-			fmt.Fprintf(&b, "Review summary: %s\n", sanitizeForPrompt(t.ReviewSummary))
+			payload["review_summary"] = t.ReviewSummary
 		}
 
-		b.WriteString("\n")
+		b.WriteString(formatUntrustedGitHubData(payload))
+		b.WriteString("\n\n")
 	}
 
-	return b.String()
+	return strings.TrimSpace(b.String())
 }
