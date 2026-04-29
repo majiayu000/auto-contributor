@@ -32,6 +32,9 @@ directory but does not clone, fetch, or check out the PR head branch.
   head branch.
 - Feedback responders and CI fixers now run from a checked-out PR branch rather
   than an empty or stale directory.
+- Follow-up regression coverage now exercises `preparePRWorkspace` directly so
+  the tracked-branch checkout path is verified in tests, not only by manual PR
+  inspection.
 
 ## Review Comments
 
