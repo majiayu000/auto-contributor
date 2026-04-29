@@ -119,17 +119,24 @@ func toInt(v interface{}) int {
 
 // ClaudeDiscoverer uses an agent runtime to find and analyze issues
 type ClaudeDiscoverer struct {
-	rt      runtime.Runtime
-	timeout time.Duration
-	log     *logger.ComponentLogger
+	rt         runtime.Runtime
+	timeout    time.Duration
+	retryCount int
+	sleep      func(context.Context, time.Duration) error
+	log        *logger.ComponentLogger
 }
 
 // NewClaudeDiscoverer creates a new discoverer with the given runtime
-func NewClaudeDiscoverer(rt runtime.Runtime, timeout time.Duration) *ClaudeDiscoverer {
+func NewClaudeDiscoverer(rt runtime.Runtime, timeout time.Duration, retryCount int) *ClaudeDiscoverer {
+	if retryCount < 0 {
+		retryCount = 0
+	}
 	return &ClaudeDiscoverer{
-		rt:      rt,
-		timeout: timeout,
-		log:     logger.NewComponent("discovery"),
+		rt:         rt,
+		timeout:    timeout,
+		retryCount: retryCount,
+		sleep:      sleepWithContext,
+		log:        logger.NewComponent("discovery"),
 	}
 }
 
@@ -231,36 +238,70 @@ JSON 格式:
 }
 
 func (d *ClaudeDiscoverer) runClaude(ctx context.Context, prompt string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, d.timeout)
-	defer cancel()
-
-	// Start progress logger
 	startTime := time.Now()
-	done := make(chan bool)
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				elapsed := time.Since(startTime)
-				d.log.Info("discovery still running...", "elapsed", elapsed.Round(time.Second).String())
+
+	for attempt := 0; ; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, d.timeout)
+		attemptNumber := attempt + 1
+
+		done := make(chan bool)
+		go func(attemptNumber int) {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					elapsed := time.Since(startTime)
+					d.log.Info("discovery still running...", "elapsed", elapsed.Round(time.Second).String(), "attempt", attemptNumber)
+				}
 			}
+		}(attemptNumber)
+
+		output, err := d.rt.ExecuteStdin(attemptCtx, prompt)
+		close(done)
+		cancel()
+
+		if err == nil {
+			d.log.Info("discovery finished",
+				"elapsed", time.Since(startTime).Round(time.Second).String(),
+				"output_bytes", len(output),
+				"attempts", attemptNumber,
+			)
+			return output, nil
 		}
-	}()
 
-	output, err := d.rt.ExecuteStdin(ctx, prompt)
-	close(done)
+		if !runtime.IsClaudeThrottleError(err) {
+			d.log.Error("discovery agent failed", "error", err, "attempt", attemptNumber)
+			return "", fmt.Errorf("discovery agent failed: %w", err)
+		}
+		if attempt >= d.retryCount {
+			d.log.Warn("discovery throttle retries exhausted",
+				"attempts", attemptNumber,
+				"retries", d.retryCount,
+				"error", err,
+			)
+			return "", fmt.Errorf("discovery agent throttled after %d retries: %w", d.retryCount, err)
+		}
 
-	if err != nil {
-		d.log.Error("discovery agent failed", "error", err)
-		return "", fmt.Errorf("discovery agent failed: %w", err)
+		backoff := discoveryRetryBackoff(attempt)
+		d.log.Warn("discovery throttled, retrying",
+			"attempt", attemptNumber,
+			"retry_in", backoff.String(),
+			"error", err,
+		)
+
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("discovery retry canceled: %w", ctx.Err())
+		default:
+		}
+
+		if err := d.sleep(ctx, backoff); err != nil {
+			return "", fmt.Errorf("discovery retry canceled: %w", err)
+		}
 	}
-
-	d.log.Info("discovery finished", "elapsed", time.Since(startTime).Round(time.Second).String(), "output_bytes", len(output))
-	return output, nil
 }
 
 func (d *ClaudeDiscoverer) parseDiscoveryResult(output string) (*DiscoveryResult, error) {
@@ -299,4 +340,27 @@ func (d *ClaudeDiscoverer) DiscoverAndSave(ctx context.Context, req DiscoveryReq
 
 func writeFile(path string, data []byte) error {
 	return os.WriteFile(path, data, 0644)
+}
+
+func discoveryRetryBackoff(attempt int) time.Duration {
+	backoff := 5 * time.Second
+	for i := 0; i < attempt; i++ {
+		backoff *= 2
+		if backoff >= 20*time.Second {
+			return 20 * time.Second
+		}
+	}
+	return backoff
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

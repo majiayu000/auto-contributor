@@ -4,10 +4,50 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 )
+
+type ClaudeErrorClass string
+
+const (
+	ClaudeErrorClassQuotaBilling ClaudeErrorClass = "quota_billing"
+	ClaudeErrorClassThrottle     ClaudeErrorClass = "throttle"
+)
+
+// ClaudeExecutionError marks Claude CLI failures that callers may handle specially.
+type ClaudeExecutionError struct {
+	Class  ClaudeErrorClass
+	Stderr string
+	Err    error
+}
+
+func (e *ClaudeExecutionError) Error() string {
+	msg := strings.TrimSpace(e.Stderr)
+	if msg == "" && e.Err != nil {
+		msg = e.Err.Error()
+	}
+	if msg == "" {
+		msg = "unknown claude failure"
+	}
+	return fmt.Sprintf("claude %s: %s", e.Class, msg)
+}
+
+func (e *ClaudeExecutionError) Unwrap() error {
+	return e.Err
+}
+
+func IsClaudeQuotaBillingError(err error) bool {
+	var claudeErr *ClaudeExecutionError
+	return errors.As(err, &claudeErr) && claudeErr.Class == ClaudeErrorClassQuotaBilling
+}
+
+func IsClaudeThrottleError(err error) bool {
+	var claudeErr *ClaudeExecutionError
+	return errors.As(err, &claudeErr) && claudeErr.Class == ClaudeErrorClassThrottle
+}
 
 // ClaudeRuntime executes prompts via Claude Code CLI.
 type ClaudeRuntime struct {
@@ -37,14 +77,13 @@ func (r *ClaudeRuntime) Execute(ctx context.Context, workDir string, prompt stri
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("claude exited with error: %w\nstderr: %s", err, strings.TrimSpace(stderr.String()))
+		return stdout.String(), wrapClaudeCommandError(ctx, err, stderr.String())
 	}
 
 	output := strings.TrimSpace(stdout.String())
 	if output == "" {
-		stderrMsg := strings.TrimSpace(stderr.String())
-		if stderrMsg != "" {
-			return "", fmt.Errorf("claude returned empty output, stderr: %s", stderrMsg)
+		if err := wrapClaudeEmptyOutputError(stderr.String()); err != nil {
+			return "", err
 		}
 		return "", fmt.Errorf("claude returned empty output (silent failure)")
 	}
@@ -69,14 +108,13 @@ func (r *ClaudeRuntime) ExecuteJSON(ctx context.Context, workDir string, prompt 
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("claude exited with error: %w\nstderr: %s", err, strings.TrimSpace(stderr.String()))
+		return stdout.String(), wrapClaudeCommandError(ctx, err, stderr.String())
 	}
 
 	raw := stdout.String()
 	if strings.TrimSpace(raw) == "" {
-		stderrStr := strings.TrimSpace(stderr.String())
-		if strings.Contains(strings.ToLower(stderrStr), "rate limit") || strings.Contains(stderrStr, "429") {
-			return "", fmt.Errorf("claude rate limited: %s", stderrStr)
+		if err := wrapClaudeEmptyOutputError(stderr.String()); err != nil {
+			return "", err
 		}
 		return "", fmt.Errorf("claude returned empty output")
 	}
@@ -116,7 +154,78 @@ func (r *ClaudeRuntime) ExecuteStdin(ctx context.Context, prompt string) (string
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("claude timed out: %w", ctx.Err())
 		}
-		return "", fmt.Errorf("claude failed: %w", err)
+		return "", wrapClaudeCommandError(ctx, err, string(output))
 	}
 	return string(output), nil
+}
+
+func wrapClaudeCommandError(ctx context.Context, runErr error, stderr string) error {
+	if ctx.Err() != nil {
+		return fmt.Errorf("claude timed out: %w", ctx.Err())
+	}
+
+	stderrMsg := strings.TrimSpace(stderr)
+	switch classifyClaudeError(stderrMsg) {
+	case ClaudeErrorClassQuotaBilling:
+		return &ClaudeExecutionError{Class: ClaudeErrorClassQuotaBilling, Stderr: stderrMsg, Err: runErr}
+	case ClaudeErrorClassThrottle:
+		return &ClaudeExecutionError{Class: ClaudeErrorClassThrottle, Stderr: stderrMsg, Err: runErr}
+	}
+
+	if stderrMsg == "" {
+		return fmt.Errorf("claude exited with error: %w", runErr)
+	}
+	return fmt.Errorf("claude exited with error: %w\nstderr: %s", runErr, stderrMsg)
+}
+
+func wrapClaudeEmptyOutputError(stderr string) error {
+	stderrMsg := strings.TrimSpace(stderr)
+	switch classifyClaudeError(stderrMsg) {
+	case ClaudeErrorClassQuotaBilling:
+		return &ClaudeExecutionError{Class: ClaudeErrorClassQuotaBilling, Stderr: stderrMsg}
+	case ClaudeErrorClassThrottle:
+		return &ClaudeExecutionError{Class: ClaudeErrorClassThrottle, Stderr: stderrMsg}
+	}
+	if stderrMsg == "" {
+		return nil
+	}
+	return fmt.Errorf("claude returned empty output, stderr: %s", stderrMsg)
+}
+
+func classifyClaudeError(stderr string) ClaudeErrorClass {
+	msg := strings.ToLower(strings.TrimSpace(stderr))
+	if msg == "" {
+		return ""
+	}
+
+	for _, needle := range []string{
+		"quota exceeded",
+		"quota has been exceeded",
+		"billing",
+		"payment required",
+		"usage limit reached",
+		"reached your usage limit",
+		"insufficient credits",
+		"credit balance is too low",
+		"purchase more credits",
+	} {
+		if strings.Contains(msg, needle) {
+			return ClaudeErrorClassQuotaBilling
+		}
+	}
+
+	for _, needle := range []string{
+		"429",
+		"rate limit",
+		"too many requests",
+		"overloaded",
+		"try again later",
+		"throttle",
+	} {
+		if strings.Contains(msg, needle) {
+			return ClaudeErrorClassThrottle
+		}
+	}
+
+	return ""
 }

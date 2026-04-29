@@ -91,8 +91,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("create runtime: %w", err)
 	}
-	timeout := 24 * time.Hour
-	discoverer := discovery.NewClaudeDiscoverer(rt, timeout)
+	discoverer := discovery.NewClaudeDiscoverer(rt, cfg.ClaudeTimeout, cfg.ClaudeMaxRetries)
 
 	fmt.Println("Running Claude discovery (this may take a few minutes)...")
 	fmt.Println()
@@ -100,7 +99,14 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
-		return fmt.Errorf("discovery failed: %w", err)
+		switch {
+		case runtime.IsClaudeQuotaBillingError(err):
+			return fmt.Errorf("discovery failed: Claude quota or billing exhausted: %w", err)
+		case runtime.IsClaudeThrottleError(err):
+			return fmt.Errorf("discovery failed: Claude transient throttling exhausted short retries: %w", err)
+		default:
+			return fmt.Errorf("discovery failed: %w", err)
+		}
 	}
 
 	// Output results
