@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/internal/config"
@@ -326,6 +328,58 @@ func (p *Pipeline) createWorkspace(issue *models.Issue) (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// preparePRWorkspace ensures feedback/CI fix agents run in the PR head branch,
+// not in an empty directory or the upstream default branch.
+func (p *Pipeline) preparePRWorkspace(ctx context.Context, prRepo string, pr *models.PullRequest, issue *models.Issue) (string, error) {
+	branch := strings.TrimSpace(pr.BranchName)
+	if branch == "" {
+		return "", fmt.Errorf("missing head branch for PR %s", pr.PRURL)
+	}
+
+	workspace, err := p.createWorkspace(issue)
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := os.Stat(filepath.Join(workspace, ".git")); err != nil {
+		os.RemoveAll(workspace)
+		if err := p.gh.CloneRepo(ctx, prRepo, workspace); err != nil {
+			return "", fmt.Errorf("clone %s for PR feedback: %w", prRepo, err)
+		}
+	}
+
+	if err := p.gh.SetupForkRemote(ctx, workspace, prRepo); err != nil {
+		log.WithError(err).WithField("workspace", workspace).Warn("setup fork remote for PR feedback")
+	}
+
+	if err := fetchPRBranch(ctx, workspace, "fork", branch); err != nil {
+		forkErr := err
+		if err := fetchPRBranch(ctx, workspace, "origin", branch); err != nil {
+			return "", fmt.Errorf("fetch PR branch %q from fork (%v) or origin (%w)", branch, forkErr, err)
+		}
+	}
+
+	if err := runGit(ctx, workspace, "checkout", "-B", branch, "FETCH_HEAD"); err != nil {
+		return "", fmt.Errorf("checkout PR branch %q: %w", branch, err)
+	}
+
+	return workspace, nil
+}
+
+func fetchPRBranch(ctx context.Context, workDir, remote, branch string) error {
+	return runGit(ctx, workDir, "fetch", "--depth", "1", remote, branch)
+}
+
+func runGit(ctx context.Context, workDir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = workDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %s - %w", strings.Join(args, " "), strings.TrimSpace(string(output)), err)
+	}
+	return nil
 }
 
 // cleanupWorkspace removes the workspace directory for a PR after it reaches a terminal state.

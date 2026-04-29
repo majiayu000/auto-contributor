@@ -161,10 +161,16 @@ func testCreatePullRequestPopulatesIDAndSupportsUpdate(t *testing.T, db *DB) {
 	if err := db.UpdatePRFeedbackCheck(pr.ID, 2); err != nil {
 		t.Fatalf("update PR feedback check: %v", err)
 	}
+	if err := db.UpdatePRBranchName(pr.ID, "fix/updated-head"); err != nil {
+		t.Fatalf("update PR branch name: %v", err)
+	}
 
 	stored, err := db.getPRByID(pr.ID)
 	if err != nil {
 		t.Fatalf("get PR by ID: %v", err)
+	}
+	if stored.BranchName != "fix/updated-head" {
+		t.Fatalf("stored branch = %q, want %q", stored.BranchName, "fix/updated-head")
 	}
 	if stored.Status != models.PRStatusOpen {
 		t.Fatalf("stored status = %q, want %q", stored.Status, models.PRStatusOpen)
@@ -174,6 +180,43 @@ func testCreatePullRequestPopulatesIDAndSupportsUpdate(t *testing.T, db *DB) {
 	}
 	if stored.LastFeedbackCheckAt == nil {
 		t.Fatal("stored last feedback check timestamp is nil")
+	}
+}
+
+func TestEnsurePRWithIssueUpdatesExistingBranchName(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	pr, err := db.EnsurePRWithIssue(
+		"owner/repo",
+		42,
+		"https://github.com/owner/repo/pull/42",
+		"",
+		"fix bug",
+		"body",
+	)
+	if err != nil {
+		t.Fatalf("EnsurePRWithIssue initial: %v", err)
+	}
+	if pr.BranchName != "" {
+		t.Fatalf("initial branch = %q, want empty", pr.BranchName)
+	}
+
+	updated, err := db.EnsurePRWithIssue(
+		"owner/repo",
+		42,
+		"https://github.com/owner/repo/pull/42",
+		"fix/bug-42",
+		"fix bug",
+		"body",
+	)
+	if err != nil {
+		t.Fatalf("EnsurePRWithIssue update: %v", err)
+	}
+	if updated.ID != pr.ID {
+		t.Fatalf("updated PR ID = %d, want %d", updated.ID, pr.ID)
+	}
+	if updated.BranchName != "fix/bug-42" {
+		t.Fatalf("updated branch = %q, want %q", updated.BranchName, "fix/bug-42")
 	}
 }
 

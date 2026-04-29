@@ -197,6 +197,30 @@ func TestRepoInfoStruct(t *testing.T) {
 	}
 }
 
+func TestParseUserOpenPRsPreservesHeadRefName(t *testing.T) {
+	data := []byte(`[
+		{
+			"repository": {"nameWithOwner": "owner/repo"},
+			"number": 42,
+			"title": "fix bug",
+			"body": "body",
+			"url": "https://github.com/owner/repo/pull/42",
+			"headRefName": "fix/bug-42"
+		}
+	]`)
+
+	prs, err := parseUserOpenPRs(data)
+	if err != nil {
+		t.Fatalf("parseUserOpenPRs: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("got %d PRs, want 1", len(prs))
+	}
+	if prs[0].BranchName != "fix/bug-42" {
+		t.Fatalf("BranchName = %q, want %q", prs[0].BranchName, "fix/bug-42")
+	}
+}
+
 func TestParseChecksOutput_MalformedJSON(t *testing.T) {
 	result := parseChecksOutput([]byte("not json at all"))
 	if result.Status != "unknown" {

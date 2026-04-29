@@ -36,38 +36,40 @@ type PRReviewComment struct {
 
 // PRInfo bundles state + reviews from a single gh call.
 type PRInfo struct {
-	State      string     `json:"state"`
-	IsDraft    bool       `json:"isDraft"`
-	LockReason string     `json:"lockReason"`
-	Reviews    []PRReview `json:"reviews"`
-	CreatedAt  string     `json:"createdAt"` // RFC3339, authoritative GitHub PR open time
-	MergedAt   string     `json:"mergedAt"`  // RFC3339, set when state=MERGED
-	ClosedAt   string     `json:"closedAt"`  // RFC3339, set when state=CLOSED or MERGED
+	State       string     `json:"state"`
+	IsDraft     bool       `json:"isDraft"`
+	HeadRefName string     `json:"headRefName"`
+	LockReason  string     `json:"lockReason"`
+	Reviews     []PRReview `json:"reviews"`
+	CreatedAt   string     `json:"createdAt"` // RFC3339, authoritative GitHub PR open time
+	MergedAt    string     `json:"mergedAt"`  // RFC3339, set when state=MERGED
+	ClosedAt    string     `json:"closedAt"`  // RFC3339, set when state=CLOSED or MERGED
 }
 
 // GetPRInfo fetches state and reviews in one gh call to avoid rate limiting.
 func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
-		fmt.Sprintf("%d", prNum),
-		"-R", repo,
-		"--json", "state,isDraft,lockReason,reviews,createdAt,mergedAt,closedAt")
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
+	output, stderr, err := c.prViewJSON(ctx, repo, prNum, "state,isDraft,headRefName,lockReason,reviews,createdAt,mergedAt,closedAt")
 	if err != nil {
-		return nil, fmt.Errorf("gh pr view %s#%d: %s", repo, prNum, stderr.String())
+		// gh currently does not expose lockReason in every version. Retry without it
+		// so feedback scanning does not fail entirely on a non-critical field.
+		if strings.Contains(stderr, `Unknown JSON field: "lockReason"`) {
+			output, stderr, err = c.prViewJSON(ctx, repo, prNum, "state,isDraft,headRefName,reviews,createdAt,mergedAt,closedAt")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gh pr view %s#%d: %s", repo, prNum, stderr)
+		}
 	}
 
 	// Parse with nested author object
 	var raw struct {
-		State      string `json:"state"`
-		IsDraft    bool   `json:"isDraft"`
-		LockReason string `json:"lockReason"`
-		CreatedAt  string `json:"createdAt"`
-		MergedAt   string `json:"mergedAt"`
-		ClosedAt   string `json:"closedAt"`
-		Reviews    []struct {
+		State       string `json:"state"`
+		IsDraft     bool   `json:"isDraft"`
+		HeadRefName string `json:"headRefName"`
+		LockReason  string `json:"lockReason"`
+		CreatedAt   string `json:"createdAt"`
+		MergedAt    string `json:"mergedAt"`
+		ClosedAt    string `json:"closedAt"`
+		Reviews     []struct {
 			Author struct {
 				Login string `json:"login"`
 			} `json:"author"`
@@ -81,12 +83,13 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 	}
 
 	info := &PRInfo{
-		State:      raw.State,
-		IsDraft:    raw.IsDraft,
-		LockReason: raw.LockReason,
-		CreatedAt:  raw.CreatedAt,
-		MergedAt:   raw.MergedAt,
-		ClosedAt:   raw.ClosedAt,
+		State:       raw.State,
+		IsDraft:     raw.IsDraft,
+		HeadRefName: raw.HeadRefName,
+		LockReason:  raw.LockReason,
+		CreatedAt:   raw.CreatedAt,
+		MergedAt:    raw.MergedAt,
+		ClosedAt:    raw.ClosedAt,
 	}
 	for _, r := range raw.Reviews {
 		info.Reviews = append(info.Reviews, PRReview{
@@ -97,6 +100,32 @@ func (c *Client) GetPRInfo(ctx context.Context, repo string, prNum int) (*PRInfo
 		})
 	}
 	return info, nil
+}
+
+func (c *Client) prViewJSON(ctx context.Context, repo string, prNum int, fields string) ([]byte, string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
+		fmt.Sprintf("%d", prNum),
+		"-R", repo,
+		"--json", fields)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	return output, stderr.String(), err
+}
+
+func (c *Client) GetPRHeadRefName(ctx context.Context, repo string, prNum int) (string, error) {
+	output, stderr, err := c.prViewJSON(ctx, repo, prNum, "headRefName")
+	if err != nil {
+		return "", fmt.Errorf("gh pr view %s#%d head ref: %s", repo, prNum, stderr)
+	}
+	var raw struct {
+		HeadRefName string `json:"headRefName"`
+	}
+	if err := json.Unmarshal(output, &raw); err != nil {
+		return "", fmt.Errorf("parse PR head ref: %w", err)
+	}
+	return strings.TrimSpace(raw.HeadRefName), nil
 }
 
 // GetPRStatus gets the CI status of a pull request
@@ -434,14 +463,31 @@ func (c *Client) ListUserOpenPRs(ctx context.Context) ([]GitHubPR, error) {
 		return nil, fmt.Errorf("search open PRs: %w", err)
 	}
 
+	prs, err := parseUserOpenPRs(output)
+	if err != nil {
+		return nil, err
+	}
+	for i := range prs {
+		headRef, err := c.GetPRHeadRefName(ctx, prs[i].Repo, prs[i].Number)
+		if err != nil {
+			log.Warn("failed to fetch PR head branch", "repo", prs[i].Repo, "pr", prs[i].Number, "error", err)
+			continue
+		}
+		prs[i].BranchName = headRef
+	}
+	return prs, nil
+}
+
+func parseUserOpenPRs(output []byte) ([]GitHubPR, error) {
 	var raw []struct {
 		Repository struct {
 			NameWithOwner string `json:"nameWithOwner"`
 		} `json:"repository"`
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		Body   string `json:"body"`
-		URL    string `json:"url"`
+		Number      int    `json:"number"`
+		Title       string `json:"title"`
+		Body        string `json:"body"`
+		URL         string `json:"url"`
+		HeadRefName string `json:"headRefName"`
 	}
 	if err := json.Unmarshal(output, &raw); err != nil {
 		return nil, fmt.Errorf("parse PR list: %w", err)
@@ -450,11 +496,12 @@ func (c *Client) ListUserOpenPRs(ctx context.Context) ([]GitHubPR, error) {
 	var prs []GitHubPR
 	for _, r := range raw {
 		prs = append(prs, GitHubPR{
-			Repo:   r.Repository.NameWithOwner,
-			Number: r.Number,
-			Title:  r.Title,
-			Body:   r.Body,
-			URL:    r.URL,
+			Repo:       r.Repository.NameWithOwner,
+			Number:     r.Number,
+			Title:      r.Title,
+			Body:       r.Body,
+			URL:        r.URL,
+			BranchName: r.HeadRefName,
 		})
 	}
 	return prs, nil
