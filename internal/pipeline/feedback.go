@@ -29,6 +29,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			return fmt.Errorf("get PR info: %w", err)
 		}
 	}
+	p.refreshPRBranchName(pr, prInfo)
 
 	// Terminal state transitions from GitHub
 	switch prInfo.State {
@@ -104,6 +105,18 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 // ProcessFeedback is an alias for ProcessPR for backward compatibility.
 func (p *Pipeline) ProcessFeedback(ctx context.Context, pr *models.PullRequest) error {
 	return p.ProcessPR(ctx, pr)
+}
+
+func (p *Pipeline) refreshPRBranchName(pr *models.PullRequest, prInfo *ghclient.PRInfo) {
+	headBranch := strings.TrimSpace(prInfo.HeadRefName)
+	if headBranch == "" || strings.TrimSpace(pr.BranchName) == headBranch {
+		return
+	}
+
+	pr.BranchName = headBranch
+	if err := p.db.UpdatePRBranchName(pr.ID, headBranch); err != nil {
+		log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to persist PR head branch")
+	}
 }
 
 // handleDraft manages draft PRs: check CI, promote to ready, or fix failures.
@@ -240,7 +253,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 				if err != nil {
 					break
 				}
-				workspace, err := p.createWorkspace(issue)
+				workspace, err := p.preparePRWorkspace(ctx, prRepo, pr, issue)
 				if err != nil {
 					break
 				}
@@ -354,9 +367,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	p.db.UpdatePRReviewStats(pr.ID, totalFeedback, &firstReview)
 
 	// Locate workspace
-	workspace, err := p.createWorkspace(issue)
+	workspace, err := p.preparePRWorkspace(ctx, prRepo, pr, issue)
 	if err != nil {
-		return fmt.Errorf("create workspace: %w", err)
+		return fmt.Errorf("prepare PR workspace: %w", err)
 	}
 
 	// Build context for responder agent (human feedback only)
@@ -417,9 +430,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 
 // attemptCIFix runs the engineer agent to fix code-level CI failures on a draft PR.
 func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prRepo string, issue *models.Issue, ci *ghclient.CIResult) {
-	workspace, err := p.createWorkspace(issue)
+	workspace, err := p.preparePRWorkspace(ctx, prRepo, pr, issue)
 	if err != nil {
-		log.WithError(err).Warn("cannot create workspace for CI fix")
+		log.WithError(err).Warn("cannot prepare workspace for CI fix")
 		return
 	}
 

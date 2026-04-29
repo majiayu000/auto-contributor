@@ -866,6 +866,16 @@ func (db *DB) UpdatePRFeedbackCheck(prID int64, round int) error {
 	return err
 }
 
+// UpdatePRBranchName stores the latest GitHub head branch for a tracked PR.
+func (db *DB) UpdatePRBranchName(prID int64, branchName string) error {
+	query := fmt.Sprintf(`
+		UPDATE pull_requests SET branch_name = %s, updated_at = CURRENT_TIMESTAMP
+		WHERE id = %s
+	`, db.placeholder(1), db.placeholder(2))
+	_, err := db.Exec(query, branchName, prID)
+	return err
+}
+
 // UpdatePRReviewStats updates review_comment_count and first_review_at.
 func (db *DB) UpdatePRReviewStats(prID int64, commentCount int, firstReviewAt *time.Time) error {
 	query := fmt.Sprintf(`
@@ -884,6 +894,11 @@ func (db *DB) EnsurePRWithIssue(repo string, prNumber int, prURL, branchName, ti
 	query := fmt.Sprintf(`SELECT id FROM pull_requests WHERE pr_url = %s`, db.placeholder(1))
 	err := db.QueryRow(query, prURL).Scan(&prID)
 	if err == nil {
+		if branchName != "" {
+			if err := db.UpdatePRBranchName(prID, branchName); err != nil {
+				return nil, fmt.Errorf("update PR branch name: %w", err)
+			}
+		}
 		return db.getPRByID(prID)
 	}
 
