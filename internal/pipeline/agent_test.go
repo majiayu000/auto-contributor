@@ -18,8 +18,9 @@ import (
 var _ runtime.Runtime = (*stubRuntime)(nil)
 
 type stubRuntime struct {
-	outputs []stubOutput
-	index   int
+	outputs  []stubOutput
+	index    int
+	policies []runtime.ExecutionPolicy
 }
 
 type stubOutput struct {
@@ -31,16 +32,18 @@ func (r *stubRuntime) Name() string {
 	return "stub"
 }
 
-func (r *stubRuntime) Execute(ctx context.Context, workDir string, prompt string) (string, error) {
+func (r *stubRuntime) Execute(ctx context.Context, workDir string, prompt string, policy runtime.ExecutionPolicy) (string, error) {
 	if r.index >= len(r.outputs) {
 		return "", errors.New("unexpected runtime call")
 	}
+	r.policies = append(r.policies, policy)
 	result := r.outputs[r.index]
 	r.index++
 	return result.output, result.err
 }
 
-func (r *stubRuntime) ExecuteStdin(ctx context.Context, prompt string) (string, error) {
+func (r *stubRuntime) ExecuteStdin(ctx context.Context, prompt string, policy runtime.ExecutionPolicy) (string, error) {
+	r.policies = append(r.policies, policy)
 	return "", errors.New("not implemented")
 }
 
