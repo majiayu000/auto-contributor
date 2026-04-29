@@ -294,3 +294,232 @@ var _ driver.Conn = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.QueryerContext = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.ExecerContext = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.Rows = (*createPullRequestPostgresStubRows)(nil)
+
+func TestListRepoProfilesNoFilterSQLite(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	mustUpsertRepoProfile(t, db, "owner/alpha", 0.75, false)
+	mustUpsertRepoProfile(t, db, "owner/beta", 0.50, true)
+
+	profiles, err := db.ListRepoProfiles("")
+	if err != nil {
+		t.Fatalf("list repo profiles: %v", err)
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("profile count = %d, want 2", len(profiles))
+	}
+	if profiles[0].Repo != "owner/alpha" || profiles[1].Repo != "owner/beta" {
+		t.Fatalf("profiles = %#v", []string{profiles[0].Repo, profiles[1].Repo})
+	}
+}
+
+func TestListRepoProfilesFilterSQLite(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	mustUpsertRepoProfile(t, db, "owner/alpha", 0.75, false)
+	mustUpsertRepoProfile(t, db, "other/project", 0.25, false)
+
+	profiles, err := db.ListRepoProfiles("%owner/alpha%")
+	if err != nil {
+		t.Fatalf("list repo profiles: %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("profile count = %d, want 1", len(profiles))
+	}
+	if profiles[0].Repo != "owner/alpha" {
+		t.Fatalf("repo = %q, want %q", profiles[0].Repo, "owner/alpha")
+	}
+}
+
+func TestGetBlacklistNoFilterSQLite(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	mustAddBlacklistEntry(t, db, "owner/alpha", "first")
+	mustAddBlacklistEntry(t, db, "owner/beta", "second")
+
+	entries, err := db.GetBlacklistFiltered("")
+	if err != nil {
+		t.Fatalf("get blacklist: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entry count = %d, want 2", len(entries))
+	}
+}
+
+func TestGetBlacklistFilterSQLite(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	mustAddBlacklistEntry(t, db, "owner/alpha", "first")
+	mustAddBlacklistEntry(t, db, "other/project", "second")
+
+	entries, err := db.GetBlacklistFiltered("%owner/alpha%")
+	if err != nil {
+		t.Fatalf("get blacklist: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entry count = %d, want 1", len(entries))
+	}
+	if entries[0].Repo != "owner/alpha" {
+		t.Fatalf("repo = %q, want %q", entries[0].Repo, "owner/alpha")
+	}
+}
+
+func TestListRepoProfilesUsesParameterizedLikePostgres(t *testing.T) {
+	stub := &filterQueryPostgresStub{
+		columns: []string{
+			"repo", "total_prs_submitted", "total_merged", "total_rejected", "merge_rate",
+			"avg_response_time_hours", "requires_cla", "requires_assignment", "preferred_pr_size",
+			"blacklisted", "blacklist_reason", "cooldown_until", "strategy_notes", "last_interaction",
+			"updated_at",
+		},
+		rows: [][]driver.Value{},
+	}
+	registerFilterQueryPostgresStub(t, stub)
+
+	sqlDB, err := sql.Open(filterQueryPostgresStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open stub postgres db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypePostgres}
+	payload := "foo%' OR 1=1 --"
+
+	profiles, err := db.ListRepoProfiles(payload)
+	if err != nil {
+		t.Fatalf("list repo profiles: %v", err)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("profile count = %d, want 0", len(profiles))
+	}
+	if stub.lastQuery != "SELECT repo, total_prs_submitted, total_merged, total_rejected, merge_rate, avg_response_time_hours, requires_cla, requires_assignment, preferred_pr_size, blacklisted, blacklist_reason, cooldown_until, strategy_notes, last_interaction, updated_at FROM repo_profiles WHERE repo LIKE $1 ORDER BY repo" {
+		t.Fatalf("query = %q", stub.lastQuery)
+	}
+	if len(stub.lastArgs) != 1 || stub.lastArgs[0] != payload {
+		t.Fatalf("args = %#v, want [%q]", stub.lastArgs, payload)
+	}
+}
+
+func TestGetBlacklistUsesParameterizedLikePostgres(t *testing.T) {
+	stub := &filterQueryPostgresStub{
+		columns: []string{"id", "repo", "reason", "added_at"},
+		rows:    [][]driver.Value{},
+	}
+	registerFilterQueryPostgresStub(t, stub)
+
+	sqlDB, err := sql.Open(filterQueryPostgresStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open stub postgres db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypePostgres}
+	payload := "foo%' OR 1=1 --"
+
+	entries, err := db.GetBlacklistFiltered(payload)
+	if err != nil {
+		t.Fatalf("get blacklist: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entry count = %d, want 0", len(entries))
+	}
+	if stub.lastQuery != "SELECT id, repo, reason, added_at FROM blacklist WHERE repo LIKE $1 ORDER BY added_at DESC" {
+		t.Fatalf("query = %q", stub.lastQuery)
+	}
+	if len(stub.lastArgs) != 1 || stub.lastArgs[0] != payload {
+		t.Fatalf("args = %#v, want [%q]", stub.lastArgs, payload)
+	}
+}
+
+func mustUpsertRepoProfile(t *testing.T, db *DB, repo string, mergeRate float64, blacklisted bool) {
+	t.Helper()
+	if err := db.UpsertRepoProfile(&models.RepoProfile{
+		Repo:              repo,
+		TotalPRsSubmitted: 4,
+		TotalMerged:       3,
+		TotalRejected:     1,
+		MergeRate:         mergeRate,
+		Blacklisted:       blacklisted,
+	}); err != nil {
+		t.Fatalf("upsert repo profile %q: %v", repo, err)
+	}
+}
+
+func mustAddBlacklistEntry(t *testing.T, db *DB, repo, reason string) {
+	t.Helper()
+	if err := db.AddToBlacklist(repo, reason); err != nil {
+		t.Fatalf("add blacklist entry %q: %v", repo, err)
+	}
+}
+
+const filterQueryPostgresStubDriverName = "filter_query_postgres_stub"
+
+var filterQueryPostgresStubValue atomic.Pointer[filterQueryPostgresStub]
+
+func init() {
+	sql.Register(filterQueryPostgresStubDriverName, filterQueryPostgresStubDriver{})
+}
+
+func registerFilterQueryPostgresStub(t *testing.T, stub *filterQueryPostgresStub) {
+	t.Helper()
+	filterQueryPostgresStubValue.Store(stub)
+	t.Cleanup(func() {
+		filterQueryPostgresStubValue.Store(nil)
+	})
+}
+
+type filterQueryPostgresStub struct {
+	columns    []string
+	rows       [][]driver.Value
+	queryCount int
+	lastQuery  string
+	lastArgs   []driver.Value
+}
+
+type filterQueryPostgresStubDriver struct{}
+
+func (filterQueryPostgresStubDriver) Open(string) (driver.Conn, error) {
+	stub := filterQueryPostgresStubValue.Load()
+	if stub == nil {
+		return nil, fmt.Errorf("filter query postgres stub not registered")
+	}
+	return &filterQueryPostgresStubConn{stub: stub}, nil
+}
+
+type filterQueryPostgresStubConn struct {
+	stub *filterQueryPostgresStub
+}
+
+func (c *filterQueryPostgresStubConn) Prepare(string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("prepare not implemented")
+}
+
+func (c *filterQueryPostgresStubConn) Close() error {
+	return nil
+}
+
+func (c *filterQueryPostgresStubConn) Begin() (driver.Tx, error) {
+	return nil, fmt.Errorf("transactions not implemented")
+}
+
+func (c *filterQueryPostgresStubConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.stub.queryCount++
+	c.stub.lastQuery = normalizeWhitespace(query)
+	c.stub.lastArgs = namedValuesToValues(args)
+	return &createPullRequestPostgresStubRows{
+		columns: c.stub.columns,
+		rows:    c.stub.rows,
+	}, nil
+}
+
+func (c *filterQueryPostgresStubConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	return nil, fmt.Errorf("unexpected ExecContext call")
+}
+
+var _ driver.Conn = (*filterQueryPostgresStubConn)(nil)
+var _ driver.QueryerContext = (*filterQueryPostgresStubConn)(nil)
+var _ driver.ExecerContext = (*filterQueryPostgresStubConn)(nil)
