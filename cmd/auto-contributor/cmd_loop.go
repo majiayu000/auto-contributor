@@ -201,10 +201,17 @@ func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 		log.Error("create runtime for discovery", "error", err)
 		return
 	}
-	discoverer := discovery.NewClaudeDiscoverer(rt, 24*time.Hour)
+	discoverer := discovery.NewClaudeDiscoverer(rt, cfg.ClaudeTimeout, cfg.ClaudeMaxRetries)
 	result, err := discoverer.Discover(ctx, req)
 	if err != nil {
-		log.Error("smart discovery failed", "error", err)
+		switch {
+		case runtime.IsClaudeQuotaBillingError(err):
+			log.Error("claude discovery stopped: quota or billing exhausted", "error", err)
+		case runtime.IsClaudeThrottleError(err):
+			log.Warn("claude discovery stopped after transient throttling retries exhausted", "error", err)
+		default:
+			log.Error("smart discovery failed", "error", err)
+		}
 		return
 	}
 
