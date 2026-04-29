@@ -91,6 +91,13 @@ func (db *DB) placeholders(count int) string {
 	return strings.Join(parts, ", ")
 }
 
+func (db *DB) repoLikeWhereClause(column, repoFilter string, placeholderIndex int) (string, []any) {
+	if repoFilter == "" {
+		return "", nil
+	}
+	return fmt.Sprintf(" WHERE %s LIKE %s", column, db.placeholder(placeholderIndex)), []any{repoFilter}
+}
+
 // Migrate creates the database schema
 func (db *DB) Migrate() error {
 	var schema string
@@ -1304,7 +1311,14 @@ func (db *DB) IsBlacklisted(repo string) (bool, error) {
 
 // GetBlacklist returns all blacklisted repositories
 func (db *DB) GetBlacklist() ([]*models.BlacklistEntry, error) {
-	rows, err := db.Query(`SELECT id, repo, reason, added_at FROM blacklist ORDER BY added_at DESC`)
+	return db.GetBlacklistFiltered("")
+}
+
+// GetBlacklistFiltered returns blacklisted repositories, optionally filtered by a LIKE pattern.
+func (db *DB) GetBlacklistFiltered(repoFilter string) ([]*models.BlacklistEntry, error) {
+	query := `SELECT id, repo, reason, added_at FROM blacklist`
+	whereClause, args := db.repoLikeWhereClause("repo", repoFilter, 1)
+	rows, err := db.Query(query+whereClause+` ORDER BY added_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
