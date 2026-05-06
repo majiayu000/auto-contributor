@@ -8,6 +8,10 @@ import (
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
 // MigrateRepoProfiles ensures the repo_profiles table exists for existing DBs.
 // Returns an error if the DDL fails (e.g. permissions or locked DB), so the
 // caller can abort startup rather than silently continuing without the table.
@@ -67,7 +71,48 @@ func (db *DB) GetRepoProfile(repo string) (*models.RepoProfile, error) {
 		FROM repo_profiles WHERE repo = %s
 	`, db.placeholder(1))
 
-	row := db.QueryRow(query, repo)
+	p, err := scanRepoProfile(db.QueryRow(query, repo))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ListRepoProfiles returns repo profiles, optionally filtered by a LIKE pattern.
+func (db *DB) ListRepoProfiles(repoFilter string) ([]*models.RepoProfile, error) {
+	query := `
+		SELECT repo, total_prs_submitted, total_merged, total_rejected, merge_rate,
+		       avg_response_time_hours, requires_cla, requires_assignment, preferred_pr_size,
+		       blacklisted, blacklist_reason, cooldown_until, strategy_notes, last_interaction,
+		       updated_at
+		FROM repo_profiles
+	`
+	whereClause, args := db.repoLikeWhereClause("repo", repoFilter, 1)
+	rows, err := db.Query(query+whereClause+` ORDER BY repo`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var profiles []*models.RepoProfile
+	for rows.Next() {
+		profile, err := scanRepoProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, profile)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return profiles, nil
+}
+
+func scanRepoProfile(row rowScanner) (*models.RepoProfile, error) {
 	p := &models.RepoProfile{}
 	var (
 		avgResp      sql.NullFloat64
@@ -83,9 +128,6 @@ func (db *DB) GetRepoProfile(repo string) (*models.RepoProfile, error) {
 		&p.Blacklisted, &blackReason, &cooldown, &stratNotes, &lastInteract,
 		&p.UpdatedAt,
 	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
