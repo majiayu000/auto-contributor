@@ -1,7 +1,11 @@
 package github
 
 import (
+	"context"
 	"encoding/base64"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/majiayu000/auto-contributor/internal/config"
@@ -194,6 +198,87 @@ func TestRepoInfoStruct(t *testing.T) {
 	}
 	if info.HasClaudeMD {
 		t.Error("RepoInfo.HasClaudeMD should be false")
+	}
+}
+
+func TestParseUserOpenPRsPreservesHeadRefName(t *testing.T) {
+	data := []byte(`[
+		{
+			"repository": {"nameWithOwner": "owner/repo"},
+			"number": 42,
+			"title": "fix bug",
+			"body": "body",
+			"url": "https://github.com/owner/repo/pull/42",
+			"headRefName": "fix/bug-42"
+		}
+	]`)
+
+	prs, err := parseUserOpenPRs(data)
+	if err != nil {
+		t.Fatalf("parseUserOpenPRs: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("got %d PRs, want 1", len(prs))
+	}
+	if prs[0].BranchName != "fix/bug-42" {
+		t.Fatalf("BranchName = %q, want %q", prs[0].BranchName, "fix/bug-42")
+	}
+}
+
+func TestGetPRInfoFallsBackWhenLockReasonUnsupported(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "gh.log")
+	scriptPath := filepath.Join(tempDir, "gh")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GH_TEST_LOG"
+case "$*" in
+  *"--json state,isDraft,headRefName,lockReason,reviews,createdAt,mergedAt,closedAt"*)
+    printf 'Unknown JSON field: "lockReason"\n' >&2
+    exit 1
+    ;;
+  *"--json state,isDraft,headRefName,reviews,createdAt,mergedAt,closedAt"*)
+    printf '%s' '{"state":"OPEN","isDraft":false,"headRefName":"fix/bug-42","createdAt":"2026-04-29T00:00:00Z","mergedAt":"","closedAt":"","reviews":[{"author":{"login":"reviewer"},"state":"COMMENTED","body":"please fix","submittedAt":"2026-04-29T01:00:00Z"}]}'
+    exit 0
+    ;;
+  *)
+    printf 'unexpected args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh script: %v", err)
+	}
+
+	t.Setenv("GH_TEST_LOG", logPath)
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := New(&config.Config{})
+	info, err := client.GetPRInfo(context.Background(), "owner/repo", 42)
+	if err != nil {
+		t.Fatalf("GetPRInfo: %v", err)
+	}
+	if info.HeadRefName != "fix/bug-42" {
+		t.Fatalf("HeadRefName = %q, want %q", info.HeadRefName, "fix/bug-42")
+	}
+	if len(info.Reviews) != 1 || info.Reviews[0].Author != "reviewer" {
+		t.Fatalf("Reviews = %+v, want reviewer entry", info.Reviews)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake gh log: %v", err)
+	}
+	logText := string(logData)
+	lines := strings.Split(strings.TrimSpace(logText), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 gh invocations, log=%q", logText)
+	}
+	if !strings.Contains(logText, "lockReason") {
+		t.Fatalf("expected initial gh call to request lockReason, log=%q", logText)
+	}
+	if !strings.Contains(logText, "--json state,isDraft,headRefName,reviews,createdAt,mergedAt,closedAt") {
+		t.Fatalf("expected fallback gh call without lockReason, log=%q", logText)
 	}
 }
 
