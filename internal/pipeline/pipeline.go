@@ -81,13 +81,14 @@ func New(cfg *config.Config, database *db.DB, gh *ghclient.Client, promptsDir st
 		log.WithFields(Fields{"count": len(rl.All())}).Info("loaded self-learning rules")
 	}
 
-	retriever, err := rules.NewRuleRetriever(cfg, database, rl)
-	if err != nil {
+	var retriever stageRuleRetriever
+	if r, err := rules.NewRuleRetriever(cfg, database, rl); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to initialize semantic rule retrieval, falling back to full prompt snapshots")
-		retriever = nil
-	} else if retriever != nil {
-		if err := retriever.Sync(); err != nil {
-			log.WithFields(Fields{"error": err}).Warn("failed to sync semantic rule index, falling back to full prompt snapshots")
+	} else if r != nil {
+		if syncErr := r.Sync(); syncErr != nil {
+			log.WithFields(Fields{"error": syncErr}).Warn("failed to sync semantic rule index, falling back to full prompt snapshots")
+		} else {
+			retriever = r
 		}
 	}
 
