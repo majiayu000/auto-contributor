@@ -361,7 +361,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	}
 
 	// Build context for responder agent (human feedback only)
-	responderRules, rulesFormatted := p.ruleLoader.PromptSnapshot("responder")
+	responderRules, rulesFormatted := p.getRulesForStageIssue("responder", issue)
 	tmplCtx := p.buildResponderCtx(issue, pr, humanReviews, humanComments, humanIssueComments, rulesFormatted)
 
 	log.WithFields(Fields{

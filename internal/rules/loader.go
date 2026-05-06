@@ -157,53 +157,49 @@ func (rl *RuleLoader) ForStage(stage string) []*Rule {
 	return matched
 }
 
-// IDsForPrompt returns the participation keys of rules actually included in the
-// prompt for a given stage, honouring the same MaxPromptChars budget as
-// FormatForPrompt. Keys are returned as "stage/ruleID" so that Q-value updates
-// can resolve rules unambiguously even when IDs are not unique across stages.
-func (rl *RuleLoader) IDsForPrompt(stage string) []string {
-	matched := rl.ForStage(stage)
-
-	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
-	total := len(header)
-
-	ids := make([]string, 0, len(matched))
-	for _, r := range matched {
-		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
-		if total+len(entry) > MaxPromptChars {
-			break
-		}
-		ids = append(ids, r.Stage+"/"+r.ID)
-		total += len(entry)
-	}
-	return ids
-}
-
-// FormatForPrompt returns concatenated rule bodies as Markdown for prompt injection.
-func (rl *RuleLoader) FormatForPrompt(stage string) string {
-	matched := rl.ForStage(stage)
+func promptSnapshotForRules(matched []*Rule) (ids []string, formatted string) {
 	if len(matched) == 0 {
-		return ""
+		return nil, ""
 	}
 
 	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
 	var sb strings.Builder
 	sb.WriteString(header)
-
-	// Start total at len(header) so the budget matches IDsForPrompt exactly;
-	// without this, FormatForPrompt could include more entries than IDsForPrompt
-	// reports, causing rules to be injected but not credited in experiences_used.
 	total := len(header)
+
 	for _, r := range matched {
 		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
 		if total+len(entry) > MaxPromptChars {
 			break
 		}
+		ids = append(ids, ruleParticipationKey(r.Stage, r.ID))
 		sb.WriteString(entry)
 		total += len(entry)
 	}
 
-	return sb.String()
+	if len(ids) > 0 {
+		formatted = sb.String()
+	}
+	return ids, formatted
+}
+
+func ruleParticipationKey(stage, id string) string {
+	return stage + "/" + id
+}
+
+// IDsForPrompt returns the participation keys of rules actually included in the
+// prompt for a given stage, honouring the same MaxPromptChars budget as
+// FormatForPrompt. Keys are returned as "stage/ruleID" so that Q-value updates
+// can resolve rules unambiguously even when IDs are not unique across stages.
+func (rl *RuleLoader) IDsForPrompt(stage string) []string {
+	ids, _ := promptSnapshotForRules(rl.ForStage(stage))
+	return ids
+}
+
+// FormatForPrompt returns concatenated rule bodies as Markdown for prompt injection.
+func (rl *RuleLoader) FormatForPrompt(stage string) string {
+	_, formatted := promptSnapshotForRules(rl.ForStage(stage))
+	return formatted
 }
 
 // InjectedRuleIDsForStage returns the set of rule IDs that would actually be
@@ -231,30 +227,7 @@ func (rl *RuleLoader) InjectedRuleIDsForStage(stage string) map[string]bool {
 // single ForStage call, so IDsForPrompt and FormatForPrompt cannot diverge due
 // to a concurrent Reload between two separate calls.
 func (rl *RuleLoader) PromptSnapshot(stage string) (ids []string, formatted string) {
-	matched := rl.ForStage(stage)
-	if len(matched) == 0 {
-		return nil, ""
-	}
-
-	const header = "## Self-Learning Rules\n\nFollow these rules based on past experience:\n\n"
-	var sb strings.Builder
-	sb.WriteString(header)
-	total := len(header)
-
-	for _, r := range matched {
-		entry := fmt.Sprintf("### %s (confidence: %.2f)\n\n%s\n\n---\n\n", r.ID, r.Confidence, r.Body)
-		if total+len(entry) > MaxPromptChars {
-			break
-		}
-		ids = append(ids, r.Stage+"/"+r.ID)
-		sb.WriteString(entry)
-		total += len(entry)
-	}
-
-	if len(ids) > 0 {
-		formatted = sb.String()
-	}
-	return ids, formatted
+	return promptSnapshotForRules(rl.ForStage(stage))
 }
 
 // ByID finds a rule by its ID. When multiple rules share an ID across stages,
