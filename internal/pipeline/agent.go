@@ -27,23 +27,36 @@ func NewAgentRunner(ps *prompt.Store, rt runtime.Runtime, timeout time.Duration)
 // Run renders the named prompt template with ctx, invokes Claude CLI in workDir,
 // and returns the raw output string.
 func (r *AgentRunner) Run(ctx context.Context, agentName string, workDir string, tmplCtx map[string]any) (string, error) {
+	return r.RunWithPolicy(ctx, agentName, workDir, tmplCtx, runtime.ExecutionPolicyTrusted)
+}
+
+// RunWithPolicy renders the named prompt template with ctx, invokes the runtime in workDir,
+// and returns the raw output string using the supplied execution policy.
+func (r *AgentRunner) RunWithPolicy(ctx context.Context, agentName string, workDir string, tmplCtx map[string]any, policy runtime.ExecutionPolicy) (string, error) {
 	rendered, err := r.prompts.Render(agentName, tmplCtx)
 	if err != nil {
 		return "", fmt.Errorf("render prompt %s: %w", agentName, err)
 	}
-	return r.runWithPrompt(ctx, agentName, workDir, rendered)
+	return r.runWithPrompt(ctx, agentName, workDir, rendered, policy)
 }
 
 // RunJSON is like Run but also extracts a JSON object from the output.
 // If extraction fails, it does a lightweight retry: passes the raw output to a
 // short Claude call that only converts it to JSON (avoids re-running the full agent).
 func (r *AgentRunner) RunJSON(ctx context.Context, agentName string, workDir string, tmplCtx map[string]any, dest any) (string, error) {
+	return r.RunJSONWithPolicy(ctx, agentName, workDir, tmplCtx, dest, runtime.ExecutionPolicyTrusted)
+}
+
+// RunJSONWithPolicy is like RunWithPolicy but also extracts a JSON object from the output.
+// If extraction fails, it does a lightweight retry using the same execution policy so
+// untrusted prompts never fall back to a more privileged runtime.
+func (r *AgentRunner) RunJSONWithPolicy(ctx context.Context, agentName string, workDir string, tmplCtx map[string]any, dest any, policy runtime.ExecutionPolicy) (string, error) {
 	rendered, err := r.prompts.Render(agentName, tmplCtx)
 	if err != nil {
 		return "", fmt.Errorf("render prompt %s: %w", agentName, err)
 	}
 
-	raw, err := r.runWithPrompt(ctx, agentName, workDir, rendered)
+	raw, err := r.runWithPrompt(ctx, agentName, workDir, rendered, policy)
 	if err != nil {
 		return raw, err
 	}
@@ -74,7 +87,7 @@ Extract or reconstruct the JSON result based on the analysis below. Output ONLY 
 
 Output the JSON now:`, tail)
 
-	recoveryRaw, err := r.runWithPrompt(ctx, agentName, workDir, recoveryPrompt)
+	recoveryRaw, err := r.runWithPrompt(ctx, agentName, workDir, recoveryPrompt, policy)
 	if err != nil {
 		return raw, fmt.Errorf("parse %s JSON output: recovery failed: %w", agentName, err)
 	}
@@ -86,7 +99,7 @@ Output the JSON now:`, tail)
 }
 
 // runWithPrompt invokes the configured runtime with an already-rendered prompt string.
-func (r *AgentRunner) runWithPrompt(ctx context.Context, agentName, workDir, rendered string) (string, error) {
+func (r *AgentRunner) runWithPrompt(ctx context.Context, agentName, workDir, rendered string, policy runtime.ExecutionPolicy) (string, error) {
 	timeout := r.timeout
 	if timeout == 0 {
 		timeout = 30 * time.Minute
@@ -96,10 +109,11 @@ func (r *AgentRunner) runWithPrompt(ctx context.Context, agentName, workDir, ren
 
 	log.WithFields(Fields{
 		"agent":   agentName,
+		"policy":  policy,
 		"workdir": workDir,
 	}).Info("running agent")
 
-	output, err := r.runtime.Execute(ctx, workDir, rendered)
+	output, err := r.runtime.Execute(ctx, workDir, rendered, policy)
 	if err != nil {
 		return output, fmt.Errorf("agent %s (%s) failed: %w", agentName, r.runtime.Name(), err)
 	}

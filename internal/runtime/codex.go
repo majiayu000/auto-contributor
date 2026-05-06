@@ -22,12 +22,13 @@ func NewCodex(cliPath string) *CodexRuntime {
 
 func (r *CodexRuntime) Name() string { return "codex" }
 
-func (r *CodexRuntime) Execute(ctx context.Context, workDir string, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.cliPath,
-		"exec",
-		"--dangerously-bypass-approvals-and-sandbox",
-		prompt,
-	)
+func (r *CodexRuntime) Execute(ctx context.Context, workDir string, prompt string, policy ExecutionPolicy) (string, error) {
+	args := []string{"exec"}
+	if policy.allowsPrivilegedExecution() {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	args = append(args, prompt)
+	cmd := exec.CommandContext(ctx, r.cliPath, args...)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer
@@ -40,13 +41,14 @@ func (r *CodexRuntime) Execute(ctx context.Context, workDir string, prompt strin
 	return stdout.String(), nil
 }
 
-func (r *CodexRuntime) ExecuteStdin(ctx context.Context, prompt string) (string, error) {
+func (r *CodexRuntime) ExecuteStdin(ctx context.Context, prompt string, policy ExecutionPolicy) (string, error) {
 	// Codex exec doesn't support stdin prompts, pass as argument
-	cmd := exec.CommandContext(ctx, r.cliPath,
-		"exec",
-		"--dangerously-bypass-approvals-and-sandbox",
-		prompt,
-	)
+	args := []string{"exec"}
+	if policy.allowsPrivilegedExecution() {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	args = append(args, prompt)
+	cmd := exec.CommandContext(ctx, r.cliPath, args...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

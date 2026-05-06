@@ -23,13 +23,13 @@ func NewClaude(cliPath string) *ClaudeRuntime {
 
 func (r *ClaudeRuntime) Name() string { return "claude" }
 
-func (r *ClaudeRuntime) Execute(ctx context.Context, workDir string, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.cliPath,
-		"--print",
-		"--dangerously-skip-permissions",
-		"-p", prompt,
-		"--output-format", "text",
-	)
+func (r *ClaudeRuntime) Execute(ctx context.Context, workDir string, prompt string, policy ExecutionPolicy) (string, error) {
+	args := []string{"--print"}
+	if policy.allowsPrivilegedExecution() {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args, "-p", prompt, "--output-format", "text")
+	cmd := exec.CommandContext(ctx, r.cliPath, args...)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer
@@ -54,14 +54,13 @@ func (r *ClaudeRuntime) Execute(ctx context.Context, workDir string, prompt stri
 // ExecuteJSON runs a prompt with a JSON schema constraint for reliable structured output.
 // Uses --output-format json --json-schema for constrained decoding (~99% reliability).
 // Returns the structured_output field from the JSON envelope, falling back to result.
-func (r *ClaudeRuntime) ExecuteJSON(ctx context.Context, workDir string, prompt string, jsonSchema string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.cliPath,
-		"--print",
-		"--dangerously-skip-permissions",
-		"-p", prompt,
-		"--output-format", "json",
-		"--json-schema", jsonSchema,
-	)
+func (r *ClaudeRuntime) ExecuteJSON(ctx context.Context, workDir string, prompt string, jsonSchema string, policy ExecutionPolicy) (string, error) {
+	args := []string{"--print"}
+	if policy.allowsPrivilegedExecution() {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args, "-p", prompt, "--output-format", "json", "--json-schema", jsonSchema)
+	cmd := exec.CommandContext(ctx, r.cliPath, args...)
 	cmd.Dir = workDir
 
 	var stdout, stderr bytes.Buffer
@@ -103,12 +102,13 @@ func (r *ClaudeRuntime) ExecuteJSON(ctx context.Context, workDir string, prompt 
 	return raw, nil
 }
 
-func (r *ClaudeRuntime) ExecuteStdin(ctx context.Context, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.cliPath,
-		"--print",
-		"--dangerously-skip-permissions",
-		"--output-format", "text",
-	)
+func (r *ClaudeRuntime) ExecuteStdin(ctx context.Context, prompt string, policy ExecutionPolicy) (string, error) {
+	args := []string{"--print"}
+	if policy.allowsPrivilegedExecution() {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args, "--output-format", "text")
+	cmd := exec.CommandContext(ctx, r.cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 
 	output, err := cmd.CombinedOutput()
