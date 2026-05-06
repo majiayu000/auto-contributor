@@ -77,7 +77,7 @@ func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComm
 }
 
 func isHostileLockReason(lockReason string) bool {
-	switch lockReason {
+	switch strings.ToUpper(lockReason) {
 	case "SPAM", "OFF_TOPIC":
 		return true
 	default:
