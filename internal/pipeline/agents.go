@@ -18,6 +18,7 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
+		"IssueTitle":  issue.Title,
 		"IssueData":   formatIssueForPrompt(issue),
 		"Rules":       rulesFormatted,
 	}
