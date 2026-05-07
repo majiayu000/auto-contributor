@@ -38,6 +38,14 @@ const (
 	// ReasonBlacklisted is emitted when database.IsBlacklisted returns true.
 	ReasonBlacklisted SkipReason = "blacklisted"
 
+	// ReasonBlacklistCheckFailed is emitted when the blacklist lookup
+	// itself errored. Distinct from ReasonBlacklisted so dashboards can
+	// tell "intentionally banned" apart from "DB degraded" — a sustained
+	// rise in this counter is an SRE signal, not a content signal.
+	// We fail closed (skip the issue) so that a degraded blacklist DB
+	// can never accidentally surface a banned repo.
+	ReasonBlacklistCheckFailed SkipReason = "blacklist_check_failed"
+
 	// ReasonExistingPR is emitted when ghClient.HasExistingPR returns true.
 	ReasonExistingPR SkipReason = "existing_pr"
 
@@ -209,7 +217,7 @@ func (f *Filter) applyOne(ctx context.Context, issue DiscoveredIssue) FilterResu
 	// we don't know the answer, and the existing pipeline policy is to
 	// skip rather than risk a duplicate PR.
 	if blacklisted, err := f.blacklist.IsBlacklisted(repoKey); err != nil {
-		return FilterResult{Issue: issue, Reason: ReasonBlacklisted, Detail: "lookup failed: " + err.Error()}
+		return FilterResult{Issue: issue, Reason: ReasonBlacklistCheckFailed, Detail: err.Error()}
 	} else if blacklisted {
 		return FilterResult{Issue: issue, Reason: ReasonBlacklisted, Detail: repoKey}
 	}

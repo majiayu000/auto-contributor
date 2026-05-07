@@ -141,6 +141,29 @@ func TestFilter_BlacklistRejects(t *testing.T) {
 	}
 }
 
+func TestFilter_BlacklistCheckErrorIsDistinct(t *testing.T) {
+	// A degraded blacklist DB must not be misreported as "intentionally
+	// banned" — operators tuning the blacklist need a separate signal.
+	t.Parallel()
+
+	bl := &fakeBlacklist{err: errors.New("db connection refused")}
+	pr := &fakePR{}
+	f := NewFilter(FilterConfig{}, pr, bl)
+	results := f.Apply(context.Background(), []DiscoveredIssue{candidate("owner/repo", 1, 0.9)})
+	if results[0].Reason != ReasonBlacklistCheckFailed {
+		t.Fatalf("got reason=%q want %q", results[0].Reason, ReasonBlacklistCheckFailed)
+	}
+	if results[0].Detail == "" {
+		t.Fatalf("expected the underlying DB error to surface in Detail")
+	}
+	// We must also fail closed: no PR check should run when the upstream
+	// blacklist gate is degraded, otherwise a banned repo could leak
+	// through if the blacklist DB started returning errors.
+	if pr.calls != 0 {
+		t.Fatalf("PR checker called %d times — must short-circuit on blacklist failure", pr.calls)
+	}
+}
+
 func TestFilter_PRExistsRejects(t *testing.T) {
 	t.Parallel()
 

@@ -157,7 +157,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 			MinStars:       cfg.MinRepoStars,
 			Languages:      cfg.Languages,
 			ExcludeRepos:   cfg.ExcludeRepos,
-		}, nil /* skip duplicate-PR check; smartDiscover already verified upstream */, database)
+		}, ghClient, database)
 
 		filterResults := filter.Apply(ctx, result.Issues)
 		stats := discovery.Summarize(filterResults)
