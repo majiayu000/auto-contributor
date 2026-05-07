@@ -220,43 +220,36 @@ func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 		"total_candidates", result.Metadata.TotalCandidates,
 	)
 
-	var queued, skipped int
-	for _, issue := range result.Issues {
-		if issue.SuitabilityScore < 0.4 {
-			skipped++
-			continue
-		}
+	filter := discovery.NewFilter(discovery.FilterConfig{
+		MinSuitability: minSuitabilityForLoop,
+		MinStars:       cfg.MinRepoStars,
+		Languages:      cfg.Languages,
+		ExcludeRepos:   excludeRepos,
+	}, ghClient, database)
 
-		// Double-check for existing PR; skip on error to avoid duplicate PRs.
-		hasPR, prErr := ghClient.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
-		if prErr != nil {
-			log.Warn("failed to check existing PR, skipping issue to avoid duplicate",
-				"repo", issue.Repo,
-				"issue", issue.IssueNumber,
-				"error", prErr,
+	filterResults := filter.Apply(ctx, result.Issues)
+	stats := discovery.Summarize(filterResults)
+
+	var queued int
+	for _, fr := range filterResults {
+		if !fr.Accepted() {
+			log.Debug("issue skipped",
+				"repo", fr.Issue.Repo,
+				"issue", fr.Issue.IssueNumber,
+				"reason", string(fr.Reason),
+				"detail", fr.Detail,
 			)
-			skipped++
-			continue
-		}
-		if hasPR {
-			skipped++
 			continue
 		}
 
-		// Check blacklist
-		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
-		if isBlacklisted {
-			skipped++
-			continue
-		}
-
+		issue := fr.Issue
 		dbIssue := &models.Issue{
 			Repo:            issue.Repo,
 			IssueNumber:     issue.IssueNumber,
 			Title:           issue.Title,
 			Body:            issue.Analysis.Recommendation,
-			Language:        cfg.Languages[0],
-			DifficultyScore: issue.SuitabilityScore,
+			Language:        primaryLanguage(cfg.Languages, issue.RepoContext.Language),
+			DifficultyScore: discovery.SuitabilityToDifficulty(issue.SuitabilityScore),
 			Status:          models.IssueStatusDiscovered,
 			DiscoveredAt:    time.Now(),
 			UpdatedAt:       time.Now(),
@@ -281,10 +274,42 @@ func runDiscovery(ctx context.Context, issueCh chan<- *models.Issue) {
 		queued++
 	}
 
-	log.Info("discovery cycle complete",
+	logSkipBreakdown("discovery cycle complete", queued, stats)
+}
+
+// minSuitabilityForLoop is the minimum SuitabilityScore (0..1) we are
+// willing to enqueue from the discovery loop. Lifted verbatim from the
+// previous inline 0.4 magic number so behavior is unchanged; the named
+// constant lets the threshold be tuned without code spelunking.
+const minSuitabilityForLoop = 0.4
+
+// primaryLanguage picks a sensible value for models.Issue.Language.
+// Prefers the repo-reported language when available; otherwise falls
+// back to the first configured allowlist entry, matching prior behavior.
+// Returns empty string when no information is available rather than
+// indexing into a nil slice (which would panic).
+func primaryLanguage(allowed []string, fromRepo string) string {
+	if fromRepo != "" {
+		return fromRepo
+	}
+	if len(allowed) > 0 {
+		return allowed[0]
+	}
+	return ""
+}
+
+// logSkipBreakdown emits a single structured line summarising one
+// discovery cycle. Skip reasons appear as `skip_<reason>` keys with the
+// raw count as value, so log analyzers can chart them over time.
+func logSkipBreakdown(msg string, queued int, stats discovery.FilterStats) {
+	fields := []interface{}{
 		"queued", queued,
-		"skipped", skipped,
-	)
+		"skipped", stats.Skipped,
+	}
+	for _, reason := range stats.SkipReasons() {
+		fields = append(fields, "skip_"+string(reason), stats.Counts[reason])
+	}
+	log.Info(msg, fields...)
 }
 
 func runFeedbackLoop(cmd *cobra.Command, args []string) error {
