@@ -447,6 +447,66 @@ func TestUpdateFunctions_UnsafeRuleIDReturnsError(t *testing.T) {
 	}
 }
 
+// TestValidateRuleID_Helper verifies the shared validation helper used by
+// every writer entry point and re-exported as IsSafeRuleID for the synthesizer.
+func TestValidateRuleID_Helper(t *testing.T) {
+	bad := []string{
+		"",
+		"..",
+		"../etc",
+		"a/b",
+		"a\\b",
+		"./local",
+		"/abs",
+	}
+	for _, id := range bad {
+		if err := validateRuleID(id); err == nil {
+			t.Errorf("validateRuleID(%q) should error", id)
+		}
+		if IsSafeRuleID(id) {
+			t.Errorf("IsSafeRuleID(%q) should be false", id)
+		}
+	}
+
+	good := []string{"safe-id", "rule-001", "abc.def", "with_underscore"}
+	for _, id := range good {
+		if err := validateRuleID(id); err != nil {
+			t.Errorf("validateRuleID(%q) unexpected error: %v", id, err)
+		}
+		if !IsSafeRuleID(id) {
+			t.Errorf("IsSafeRuleID(%q) should be true", id)
+		}
+	}
+}
+
+// TestValidateStage_Helper verifies the shared stage allowlist helper. allowEmpty
+// distinguishes WriteRule (must reject "") from update/delete helpers and the
+// loader walk (which use "" to mean "search every stage").
+func TestValidateStage_Helper(t *testing.T) {
+	for _, stage := range []string{"scout", "analyst", "engineer", "reviewer", "submitter", "responder", "global"} {
+		if err := validateStage(stage, false); err != nil {
+			t.Errorf("validateStage(%q, false) unexpected error: %v", stage, err)
+		}
+		if !IsAllowedStage(stage) {
+			t.Errorf("IsAllowedStage(%q) should be true", stage)
+		}
+	}
+	if err := validateStage("", true); err != nil {
+		t.Errorf("validateStage(\"\", allowEmpty=true) unexpected error: %v", err)
+	}
+	if err := validateStage("", false); err == nil {
+		t.Error("validateStage(\"\", allowEmpty=false) should error")
+	}
+	for _, stage := range []string{"..", "../etc", "scout/../..", "unknown", "/abs"} {
+		if err := validateStage(stage, true); err == nil {
+			t.Errorf("validateStage(%q, true) should error", stage)
+		}
+		if IsAllowedStage(stage) {
+			t.Errorf("IsAllowedStage(%q) should be false", stage)
+		}
+	}
+}
+
 func containsStr(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
