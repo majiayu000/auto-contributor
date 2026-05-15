@@ -20,9 +20,11 @@ func (f *fakePR) HasExistingPR(_ context.Context, _ string, _ int) (bool, error)
 type fakeBlacklist struct {
 	black bool
 	err   error
+	repos []string
 }
 
-func (f *fakeBlacklist) IsBlacklisted(_ string) (bool, error) {
+func (f *fakeBlacklist) IsBlacklisted(repo string) (bool, error) {
+	f.repos = append(f.repos, repo)
 	return f.black, f.err
 }
 
@@ -138,6 +140,23 @@ func TestFilter_BlacklistRejects(t *testing.T) {
 	results := f.Apply(context.Background(), []DiscoveredIssue{candidate("owner/repo", 1, 0.9)})
 	if results[0].Reason != ReasonBlacklisted {
 		t.Fatalf("got reason=%q want %q", results[0].Reason, ReasonBlacklisted)
+	}
+}
+
+func TestFilter_BlacklistLookupUsesTrimmedOriginalCasing(t *testing.T) {
+	t.Parallel()
+
+	bl := &fakeBlacklist{}
+	f := NewFilter(FilterConfig{}, &fakePR{}, bl)
+	results := f.Apply(context.Background(), []DiscoveredIssue{candidate(" Owner/Repo ", 1, 0.9)})
+	if !results[0].Accepted() {
+		t.Fatalf("expected accepted, got reason=%q detail=%q", results[0].Reason, results[0].Detail)
+	}
+	if len(bl.repos) != 1 {
+		t.Fatalf("blacklist lookups=%d want 1", len(bl.repos))
+	}
+	if bl.repos[0] != "Owner/Repo" {
+		t.Fatalf("blacklist lookup repo=%q want %q", bl.repos[0], "Owner/Repo")
 	}
 }
 

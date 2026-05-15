@@ -152,12 +152,7 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	// Save high-scoring issues to database
 	if database != nil && len(result.Issues) > 0 {
 		fmt.Println("Saving high-scoring issues to database...")
-		filter := discovery.NewFilter(discovery.FilterConfig{
-			MinSuitability: minSuitabilityForSave,
-			MinStars:       cfg.MinRepoStars,
-			Languages:      cfg.Languages,
-			ExcludeRepos:   cfg.ExcludeRepos,
-		}, ghClient, database)
+		filter := discovery.NewFilter(smartDiscoverSaveFilterConfig(minStars), ghClient, database)
 
 		filterResults := filter.Apply(ctx, result.Issues)
 		stats := discovery.Summarize(filterResults)
@@ -203,6 +198,15 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 // because this command is interactive and only the strongest
 // candidates should land in the table from a single human-driven run.
 const minSuitabilityForSave = 0.7
+
+func smartDiscoverSaveFilterConfig(minStars int) discovery.FilterConfig {
+	return discovery.FilterConfig{
+		MinSuitability: minSuitabilityForSave,
+		MinStars:       minStars,
+		Languages:      cfg.Languages,
+		ExcludeRepos:   cfg.ExcludeRepos,
+	}
+}
 
 func formatDetail(detail string) string {
 	if detail == "" {

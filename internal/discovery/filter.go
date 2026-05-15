@@ -177,8 +177,9 @@ func (f *Filter) Apply(ctx context.Context, issues []DiscoveredIssue) []FilterRe
 }
 
 func (f *Filter) applyOne(ctx context.Context, issue DiscoveredIssue) FilterResult {
-	repoKey := strings.ToLower(strings.TrimSpace(issue.Repo))
-	if repoKey == "" || issue.IssueNumber <= 0 {
+	repoName := strings.TrimSpace(issue.Repo)
+	repoKey := strings.ToLower(repoName)
+	if repoName == "" || issue.IssueNumber <= 0 {
 		return FilterResult{Issue: issue, Reason: ReasonInvalid, Detail: "missing repo or issue number"}
 	}
 
@@ -216,10 +217,10 @@ func (f *Filter) applyOne(ctx context.Context, issue DiscoveredIssue) FilterResu
 	// Network/database gates last. Both fail closed: an error here means
 	// we don't know the answer, and the existing pipeline policy is to
 	// skip rather than risk a duplicate PR.
-	if blacklisted, err := f.blacklist.IsBlacklisted(repoKey); err != nil {
+	if blacklisted, err := f.blacklist.IsBlacklisted(repoName); err != nil {
 		return FilterResult{Issue: issue, Reason: ReasonBlacklistCheckFailed, Detail: err.Error()}
 	} else if blacklisted {
-		return FilterResult{Issue: issue, Reason: ReasonBlacklisted, Detail: repoKey}
+		return FilterResult{Issue: issue, Reason: ReasonBlacklisted, Detail: repoName}
 	}
 
 	hasPR, err := f.pr.HasExistingPR(ctx, issue.Repo, issue.IssueNumber)
