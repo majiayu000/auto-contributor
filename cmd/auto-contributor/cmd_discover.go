@@ -152,33 +152,65 @@ func smartDiscover(cmd *cobra.Command, args []string) error {
 	// Save high-scoring issues to database
 	if database != nil && len(result.Issues) > 0 {
 		fmt.Println("Saving high-scoring issues to database...")
-		for _, issue := range result.Issues {
-			if issue.SuitabilityScore >= 0.7 {
-				isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
-				if isBlacklisted {
-					fmt.Printf("   Skipping blacklisted repo: %s\n", issue.Repo)
-					continue
-				}
+		filter := discovery.NewFilter(smartDiscoverSaveFilterConfig(minStars), ghClient, database)
 
-				dbIssue := &models.Issue{
-					Repo:            issue.Repo,
-					IssueNumber:     issue.IssueNumber,
-					Title:           issue.Title,
-					Body:            issue.Analysis.Recommendation,
-					Language:        cfg.Languages[0],
-					DifficultyScore: 1.0 - issue.SuitabilityScore,
-					Status:          models.IssueStatusDiscovered,
-					DiscoveredAt:    time.Now(),
-					UpdatedAt:       time.Now(),
-				}
-				if err := database.CreateIssue(dbIssue); err != nil {
-					fmt.Printf("   Failed to save %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
-				} else {
-					fmt.Printf("   Saved %s#%d\n", issue.Repo, issue.IssueNumber)
-				}
+		filterResults := filter.Apply(ctx, result.Issues)
+		stats := discovery.Summarize(filterResults)
+
+		for _, fr := range filterResults {
+			if !fr.Accepted() {
+				fmt.Printf("   Skipping %s#%d: %s%s\n",
+					fr.Issue.Repo, fr.Issue.IssueNumber, fr.Reason, formatDetail(fr.Detail))
+				continue
+			}
+
+			issue := fr.Issue
+			dbIssue := &models.Issue{
+				Repo:            issue.Repo,
+				IssueNumber:     issue.IssueNumber,
+				Title:           issue.Title,
+				Body:            issue.Analysis.Recommendation,
+				Language:        primaryLanguage(cfg.Languages, issue.RepoContext.Language),
+				DifficultyScore: discovery.SuitabilityToDifficulty(issue.SuitabilityScore),
+				Status:          models.IssueStatusDiscovered,
+				DiscoveredAt:    time.Now(),
+				UpdatedAt:       time.Now(),
+			}
+			if err := database.CreateIssue(dbIssue); err != nil {
+				fmt.Printf("   Failed to save %s#%d: %v\n", issue.Repo, issue.IssueNumber, err)
+			} else {
+				fmt.Printf("   Saved %s#%d\n", issue.Repo, issue.IssueNumber)
 			}
 		}
+
+		fmt.Printf("\nFilter summary: accepted=%d skipped=%d", stats.Accepted, stats.Skipped)
+		for _, reason := range stats.SkipReasons() {
+			fmt.Printf(" %s=%d", reason, stats.Counts[reason])
+		}
+		fmt.Println()
 	}
 
 	return nil
+}
+
+// minSuitabilityForSave is the gate used by smart-discover before it
+// persists. It is intentionally stricter than the loop-mode gate
+// because this command is interactive and only the strongest
+// candidates should land in the table from a single human-driven run.
+const minSuitabilityForSave = 0.7
+
+func smartDiscoverSaveFilterConfig(minStars int) discovery.FilterConfig {
+	return discovery.FilterConfig{
+		MinSuitability: minSuitabilityForSave,
+		MinStars:       minStars,
+		Languages:      cfg.Languages,
+		ExcludeRepos:   cfg.ExcludeRepos,
+	}
+}
+
+func formatDetail(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	return " (" + detail + ")"
 }

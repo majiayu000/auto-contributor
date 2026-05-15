@@ -45,6 +45,10 @@ type RepoContext struct {
 	HasClaudeMD     bool   `json:"has_claude_md"`
 	TestFramework   string `json:"test_framework"`
 	CISystem        string `json:"ci_system"`
+	// Language is the repository's primary language as reported by the
+	// agent. Optional: empty string means "unknown", and downstream
+	// gates that depend on language must fail-open in that case.
+	Language string `json:"language,omitempty"`
 }
 
 // DiscoveredIssue represents a discovered and analyzed issue
