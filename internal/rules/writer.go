@@ -28,17 +28,46 @@ var allowedStages = map[string]bool{
 	"global":    true,
 }
 
+// IsAllowedStage reports whether stage is a known rule stage directory.
+// Exported so callers outside this package (e.g. the synthesizer) can apply
+// the same allowlist before passing values to WriteRule/UpdateRule*/DeleteRule.
+func IsAllowedStage(stage string) bool { return allowedStages[stage] }
+
+// IsSafeRuleID reports whether id is safe to use as a rule filename component.
+// Exported so callers outside this package can pre-filter LLM-emitted IDs before
+// reaching the writer helpers.
+func IsSafeRuleID(id string) bool { return validateRuleID(id) == nil }
+
+// validateRuleID rejects rule IDs that could escape the rules/{stage} directory
+// via path traversal (SEC-07). Empty IDs, path separators, dot-dot segments,
+// and any value whose filepath.Base differs from itself are all rejected.
+func validateRuleID(id string) error {
+	if id == "" || strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") || filepath.Base(id) != id {
+		return fmt.Errorf("unsafe rule ID %q", id)
+	}
+	return nil
+}
+
+// validateStage rejects stage values outside the known-good allowlist (SEC-07).
+// allowEmpty=true permits "" for callers that walk every stage directory and
+// only need to filter LLM-supplied values.
+func validateStage(stage string, allowEmpty bool) error {
+	if stage == "" && allowEmpty {
+		return nil
+	}
+	if !allowedStages[stage] {
+		return fmt.Errorf("unsafe rule stage %q", stage)
+	}
+	return nil
+}
+
 // WriteRule writes a Rule to a YAML file in rules/{stage}/ directory.
 func WriteRule(rulesDir string, rule *Rule) error {
-	// Defense-in-depth: reject IDs that could escape the rules/{stage} directory
-	// via path traversal (e.g. "../../../etc/passwd" or absolute paths).
-	if rule.ID == "" || strings.ContainsAny(rule.ID, "/\\") || strings.Contains(rule.ID, "..") || filepath.Base(rule.ID) != rule.ID {
-		return fmt.Errorf("unsafe rule ID %q", rule.ID)
+	if err := validateRuleID(rule.ID); err != nil {
+		return err
 	}
-	// Validate Stage against the known-good allowlist to prevent LLM-generated
-	// values like "../../../etc/cron.d" from escaping the rules directory (SEC-07).
-	if !allowedStages[rule.Stage] {
-		return fmt.Errorf("unsafe rule stage %q", rule.Stage)
+	if err := validateStage(rule.Stage, false); err != nil {
+		return err
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -59,8 +88,11 @@ func WriteRule(rulesDir string, rule *Rule) error {
 
 // UpdateRuleConfidence updates only the confidence field of an existing rule file.
 func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfidence float64) error {
-	if stage != "" && !allowedStages[stage] {
-		return fmt.Errorf("unsafe rule stage %q", stage)
+	if err := validateRuleID(ruleID); err != nil {
+		return err
+	}
+	if err := validateStage(stage, true); err != nil {
+		return err
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -91,8 +123,11 @@ func UpdateRuleConfidence(rulesDir string, ruleID string, stage string, newConfi
 
 // UpdateRuleLastValidatedAt updates the last_validated_at field of an existing rule file.
 func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, validatedAt string) error {
-	if stage != "" && !allowedStages[stage] {
-		return fmt.Errorf("unsafe rule stage %q", stage)
+	if err := validateRuleID(ruleID); err != nil {
+		return err
+	}
+	if err := validateStage(stage, true); err != nil {
+		return err
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -123,8 +158,11 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 
 // UpdateRuleQValue updates the q_value, retrieval_count, and success_count fields of an existing rule file.
 func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float64, retrievalCount int, successCount int) error {
-	if stage != "" && !allowedStages[stage] {
-		return fmt.Errorf("unsafe rule stage %q", stage)
+	if err := validateRuleID(ruleID); err != nil {
+		return err
+	}
+	if err := validateStage(stage, true); err != nil {
+		return err
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -158,18 +196,14 @@ func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float
 // DeleteRule removes a rule file from disk.
 // Holds writeMu to prevent races with UpdateRuleQValue and Reload.
 func DeleteRule(rulesDir string, ruleID string, stage string) error {
-	// Validate stage against the allowlist to prevent path traversal (SEC-07).
-	// Without this guard, an invalid stage causes findRuleFile to return ""
-	// which this function would treat as "already gone", silently leaving
-	// attacker-controlled rule files on disk and active in later runs.
-	if stage != "" && !allowedStages[stage] {
-		return fmt.Errorf("unsafe rule stage %q", stage)
+	// An invalid stage would otherwise cause findRuleFile to return "" which
+	// this function treats as "already gone", silently leaving attacker-controlled
+	// rule files on disk and active in later runs.
+	if err := validateStage(stage, true); err != nil {
+		return err
 	}
-	// Validate ruleID to prevent path traversal (SEC-07).
-	// A poisoned rule with id: ../../../etc/cron.d/pwn and a valid stage would
-	// otherwise reach filepath.Join in findRuleFile and delete an external file.
-	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
-		return fmt.Errorf("unsafe rule ID %q", ruleID)
+	if err := validateRuleID(ruleID); err != nil {
+		return err
 	}
 
 	writeMu.Lock()
@@ -187,8 +221,11 @@ func DeleteRule(rulesDir string, ruleID string, stage string) error {
 // (floored at minConf). The entire read-check-write runs under writeMu, which prevents
 // a concurrent stampRuleValidation write from racing with the applyDecay decision.
 func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float64, staleDays int) error {
-	if stage != "" && !allowedStages[stage] {
-		return fmt.Errorf("unsafe rule stage %q", stage)
+	if err := validateRuleID(ruleID); err != nil {
+		return err
+	}
+	if err := validateStage(stage, true); err != nil {
+		return err
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -239,14 +276,13 @@ func DecayRuleIfStale(rulesDir, ruleID, stage string, decayFactor, minConf float
 // so that applyDecay cannot observe a stale last_validated_at between the two writes.
 // It is called when a candidate rule is merged into an existing rule during dedup.
 func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error {
-	if stage != "" && !allowedStages[stage] {
-		return fmt.Errorf("unsafe rule stage %q", stage)
-	}
-	// Reject IDs that could escape the rules directory via path traversal.
 	// ruleID originates from dedup.MatchedRuleID which is loaded from rule YAML
 	// and may be attacker-controlled; apply the same guard used in WriteRule.
-	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
-		return fmt.Errorf("unsafe rule ID %q", ruleID)
+	if err := validateRuleID(ruleID); err != nil {
+		return err
+	}
+	if err := validateStage(stage, true); err != nil {
+		return err
 	}
 
 	writeMu.Lock()
@@ -281,16 +317,13 @@ func IncrementEvidenceCount(rulesDir string, ruleID string, stage string) error 
 // Symlinks are rejected: a poisoned symlink (e.g. rules/engineer/id.yaml -> /etc/cron.d/pwn)
 // would otherwise become an out-of-tree write primitive via the Update*/Decay helpers (SEC-07).
 func findRuleFile(rulesDir, ruleID, stage string) string {
-	// Validate stage against the allowlist to prevent path traversal (SEC-07).
-	// All callers pass stage values that originate from rule YAML (r.Stage), which
-	// may be attacker-controlled; reject any value not in the known-good set.
-	if stage != "" && !allowedStages[stage] {
+	// All callers pass stage and ruleID values that may originate from rule YAML
+	// (loaded verbatim from disk) or LLM output; both must be filtered through
+	// the same guards used by WriteRule before they are joined into a path.
+	if validateStage(stage, true) != nil {
 		return ""
 	}
-	// Validate ruleID to prevent path traversal via attacker-controlled rule IDs (SEC-07).
-	// RuleLoader.Load reads id: fields verbatim from disk; a poisoned rule with
-	// id: ../../../etc/cron.d/pwn would otherwise escape rulesDir via filepath.Join.
-	if ruleID == "" || strings.ContainsAny(ruleID, "/\\") || strings.Contains(ruleID, "..") || filepath.Base(ruleID) != ruleID {
+	if validateRuleID(ruleID) != nil {
 		return ""
 	}
 
