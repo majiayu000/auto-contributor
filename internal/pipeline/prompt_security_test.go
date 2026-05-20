@@ -91,7 +91,7 @@ func TestBuildResponderCtx_IsolatesGitHubFeedbackPayloads(t *testing.T) {
 	}
 }
 
-func TestRunJSONWithPolicy_RecoveryKeepsRequestedPolicy(t *testing.T) {
+func TestRunJSONWithPolicy_RecoveryDoesNotEscalateUntrustedPolicy(t *testing.T) {
 	promptsDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(promptsDir, "scout.md"), []byte(`{{.Input}}`), 0644); err != nil {
 		t.Fatalf("write prompt: %v", err)
@@ -120,6 +120,53 @@ func TestRunJSONWithPolicy_RecoveryKeepsRequestedPolicy(t *testing.T) {
 		if policy != runtime.ExecutionPolicyUntrusted {
 			t.Fatalf("call %d policy = %q, want %q", i, policy, runtime.ExecutionPolicyUntrusted)
 		}
+	}
+}
+
+func TestRunJSONWithPolicy_RecoveryIsIsolatedFromSideEffectAgentWorkspace(t *testing.T) {
+	promptsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(promptsDir, "submitter.md"), []byte(`submit {{.Input}}`), 0644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	ps := prompt.NewStore(promptsDir)
+	if err := ps.Load(); err != nil {
+		t.Fatalf("load prompts: %v", err)
+	}
+
+	rt := &stubRuntime{outputs: []stubOutput{
+		{output: "side effect already happened, but no json"},
+		{output: `{"pr_url":"https://github.com/owner/repo/pull/1"}`},
+	}}
+	runner := NewAgentRunner(ps, rt, 0)
+
+	workDir := t.TempDir()
+	var dest map[string]any
+	if _, err := runner.RunJSONWithPolicy(context.Background(), "submitter", workDir, map[string]any{"Input": "owner/repo"}, &dest, runtime.ExecutionPolicyTrusted); err != nil {
+		t.Fatalf("RunJSONWithPolicy: %v", err)
+	}
+
+	if len(rt.prompts) != 2 {
+		t.Fatalf("runtime call count = %d, want 2", len(rt.prompts))
+	}
+	if rt.prompts[0] != "submit owner/repo" {
+		t.Fatalf("first prompt = %q, want rendered submitter prompt", rt.prompts[0])
+	}
+	if rt.prompts[1] == rt.prompts[0] {
+		t.Fatal("recovery reran the original submitter prompt")
+	}
+	if !strings.Contains(rt.prompts[1], "side effect already happened") {
+		t.Fatalf("recovery prompt should preserve original raw output, got: %s", rt.prompts[1])
+	}
+
+	if got := rt.policies; len(got) != 2 || got[0] != runtime.ExecutionPolicyTrusted || got[1] != runtime.ExecutionPolicyUntrusted {
+		t.Fatalf("policies = %v, want [trusted untrusted]", got)
+	}
+	if got := rt.workDirs; len(got) != 2 || got[0] != workDir || got[1] == workDir {
+		t.Fatalf("workDirs = %v, want original workspace then isolated recovery workspace", got)
+	}
+	if _, err := os.Stat(rt.workDirs[1]); !os.IsNotExist(err) {
+		t.Fatalf("recovery workspace should be removed after parsing, stat err=%v", err)
 	}
 }
 
