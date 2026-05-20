@@ -282,6 +282,53 @@ esac
 	}
 }
 
+func TestGetCIResult_MalformedChecksOutputIsUnknown(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "gh.log")
+	scriptPath := filepath.Join(tempDir, "gh")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GH_TEST_LOG"
+case "$*" in
+  *"pr checks 42 --repo owner/repo --json name,state"*)
+    printf '%s' 'not json at all'
+    printf 'gh returned an unexpected error format\n' >&2
+    exit 1
+    ;;
+  *)
+    printf 'unexpected args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh script: %v", err)
+	}
+
+	t.Setenv("GH_TEST_LOG", logPath)
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := New(&config.Config{})
+	result := client.GetCIResult(context.Background(), "owner/repo", 42)
+	if result.Status != "unknown" {
+		t.Fatalf("Status = %q, want unknown", result.Status)
+	}
+	if result.CodeFailures {
+		t.Fatalf("CodeFailures = true, want false for unreadable CI output")
+	}
+	if len(result.FailedChecks) != 0 {
+		t.Fatalf("FailedChecks = %v, want none for unreadable CI output", result.FailedChecks)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake gh log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "pr checks 42 --repo owner/repo --json name,state") {
+		t.Fatalf("expected gh pr checks invocation, log=%q", logText)
+	}
+}
+
 func TestParseChecksOutput_MalformedJSON(t *testing.T) {
 	result := parseChecksOutput([]byte("not json at all"))
 	if result.Status != "unknown" {
