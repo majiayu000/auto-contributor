@@ -11,6 +11,7 @@ import (
 
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
+	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/internal/runtime"
@@ -56,6 +57,22 @@ func writePromptTemplate(t *testing.T, dir, name, body string) {
 	if err := os.WriteFile(filepath.Join(dir, name+".md"), []byte(body), 0644); err != nil {
 		t.Fatalf("write %s prompt: %v", name, err)
 	}
+}
+
+func installFailingGH(t *testing.T, stderr string) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	scriptPath := filepath.Join(tempDir, "gh")
+	script := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(stderr) + " >&2\nexit 1\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh script: %v", err)
+	}
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func newLoopTestPipeline(t *testing.T, rt runtime.Runtime) (*Pipeline, *db.DB) {
@@ -350,6 +367,77 @@ func TestRunScoutUsesSemanticRetrieverRuleSelection(t *testing.T) {
 	want := []string{"scout/semantic-one", "global/semantic-two"}
 	if strings.Join(recorded, ",") != strings.Join(want, ",") {
 		t.Fatalf("recorded rule IDs = %v, want %v", recorded, want)
+	}
+}
+
+func TestRunScoutFailsBeforeRuntimeWhenPrecollectionFails(t *testing.T) {
+	installFailingGH(t, "rate limit exceeded")
+
+	rt := &stubRuntime{outputs: []stubOutput{
+		{output: `{"verdict":"PROCEED","reason":"","difficulty":1,"has_competing_pr":false,"suggested_approach":"minimal fix"}`},
+	}}
+	database, err := db.New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = database.Close()
+	})
+
+	promptsDir := t.TempDir()
+	writePromptTemplate(t, promptsDir, "scout", `scout {{.ScoutData}}`)
+
+	ps := prompt.NewStore(promptsDir)
+	if err := ps.Load(); err != nil {
+		t.Fatalf("load prompts: %v", err)
+	}
+
+	rl := rules.NewRuleLoader(t.TempDir())
+	if err := rl.Load(); err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	p := &Pipeline{
+		cfg:        &config.Config{WorkspaceDir: t.TempDir()},
+		db:         database,
+		gh:         ghclient.New(&config.Config{}),
+		prompts:    ps,
+		runner:     NewAgentRunner(ps, rt, 0),
+		ruleLoader: rl,
+	}
+
+	issue := &models.Issue{
+		Repo:        "owner/repo",
+		IssueNumber: 7,
+		Title:       "panic in parser",
+	}
+	if err := database.CreateIssue(issue); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	_, err = p.runScout(context.Background(), issue)
+	if err == nil {
+		t.Fatal("runScout() error = nil, want scout data collection failure")
+	}
+	if !strings.Contains(err.Error(), "collect scout data") || !strings.Contains(err.Error(), "rate limit exceeded") {
+		t.Fatalf("runScout() error = %q, want precollection rate-limit failure", err.Error())
+	}
+	if rt.index != 0 {
+		t.Fatalf("runtime calls = %d, want 0", rt.index)
+	}
+
+	events, err := database.GetEventsByIssue(issue.ID)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("event count = %d, want 1", len(events))
+	}
+	if events[0].Stage != "scout" || events[0].Success || events[0].Verdict != "error" {
+		t.Fatalf("event = %+v, want failed scout error", events[0])
+	}
+	if !strings.Contains(events[0].ErrorMessage, "collect scout data") {
+		t.Fatalf("event error = %q, want collection failure", events[0].ErrorMessage)
 	}
 }
 
