@@ -261,6 +261,83 @@ func TestApplySynthesisResult_UpdatedRuleSetsLastValidatedAt(t *testing.T) {
 	}
 }
 
+func TestSynthesisStagesIncludesCritic(t *testing.T) {
+	for _, stage := range synthesisStages {
+		if stage == "critic" {
+			return
+		}
+	}
+	t.Fatalf("synthesisStages = %v, want critic included", synthesisStages)
+}
+
+func TestApplySynthesisResult_CriticStageCreatesAndUpdatesRules(t *testing.T) {
+	dir := t.TempDir()
+
+	existing := &rules.Rule{
+		ID:              "critic-existing-rule",
+		Stage:           "critic",
+		Severity:        "medium",
+		Confidence:      0.5,
+		Source:          "synthesized",
+		CreatedAt:       "2024-01-01",
+		LastValidatedAt: "2024-01-01",
+		Body:            "Check maintainer-facing risk before submit.",
+	}
+	writeRule(t, dir, existing)
+
+	p := newTestPipeline(t, dir)
+	result := &SynthesizerResult{
+		NewRules: []SynthesizedRule{
+			{
+				ID:            "critic-new-rule",
+				Stage:         "engineer",
+				Severity:      "high",
+				Confidence:    0.65,
+				EvidenceCount: 5,
+				Condition:     "critic finds hidden compatibility risk",
+				Body:          "Treat critic compatibility findings as blocking until rework resolves them.",
+			},
+		},
+		UpdatedRules: []RuleUpdate{
+			{
+				ID:            existing.ID,
+				NewConfidence: 0.75,
+				Reason:        "critic evidence repeated",
+			},
+		},
+	}
+
+	applied := p.applySynthesisResult("critic", result)
+	if applied.newCount != 1 {
+		t.Fatalf("expected 1 new critic rule, got %d", applied.newCount)
+	}
+	if applied.updatedCount != 1 {
+		t.Fatalf("expected 1 updated critic rule, got %d", applied.updatedCount)
+	}
+
+	if err := p.ruleLoader.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	created := p.ruleLoader.ByStageAndID("critic", "critic-new-rule")
+	if created == nil {
+		t.Fatal("new critic rule was not written under critic stage")
+	}
+	if created.Stage != "critic" {
+		t.Errorf("created rule stage = %q, want critic", created.Stage)
+	}
+	updated := p.ruleLoader.ByStageAndID("critic", existing.ID)
+	if updated == nil {
+		t.Fatal("updated critic rule was not found")
+	}
+	if updated.Confidence != 0.75 {
+		t.Errorf("updated confidence = %.2f, want 0.75", updated.Confidence)
+	}
+	today := time.Now().Format("2006-01-02")
+	if updated.LastValidatedAt != today {
+		t.Errorf("updated last_validated_at = %q, want %q", updated.LastValidatedAt, today)
+	}
+}
+
 // TestMergedRuleIsNotDecayedInSameCycle verifies that when a candidate is merged
 // into an existing stale rule, last_validated_at is stamped so that applyDecay
 // running in the same synthesis cycle does not decay the just-reinforced rule.

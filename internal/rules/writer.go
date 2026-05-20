@@ -23,6 +23,7 @@ var allowedStages = map[string]bool{
 	"analyst":   true,
 	"engineer":  true,
 	"reviewer":  true,
+	"critic":    true,
 	"submitter": true,
 	"responder": true,
 	"global":    true,

@@ -238,7 +238,7 @@ func TestWriteRule_UnsafeStage(t *testing.T) {
 // TestWriteRule_AllowedStages verifies that WriteRule accepts all valid stage names.
 func TestWriteRule_AllowedStages(t *testing.T) {
 	dir := t.TempDir()
-	stages := []string{"scout", "analyst", "engineer", "reviewer", "submitter", "responder", "global"}
+	stages := []string{"scout", "analyst", "engineer", "reviewer", "critic", "submitter", "responder", "global"}
 	for _, stage := range stages {
 		rule := &Rule{
 			ID:    "test-stage-rule",
@@ -483,7 +483,7 @@ func TestValidateRuleID_Helper(t *testing.T) {
 // distinguishes WriteRule (must reject "") from update/delete helpers and the
 // loader walk (which use "" to mean "search every stage").
 func TestValidateStage_Helper(t *testing.T) {
-	for _, stage := range []string{"scout", "analyst", "engineer", "reviewer", "submitter", "responder", "global"} {
+	for _, stage := range []string{"scout", "analyst", "engineer", "reviewer", "critic", "submitter", "responder", "global"} {
 		if err := validateStage(stage, false); err != nil {
 			t.Errorf("validateStage(%q, false) unexpected error: %v", stage, err)
 		}

@@ -167,6 +167,40 @@ func TestQuarantineInvalidStage(t *testing.T) {
 	}
 }
 
+func TestCriticStageRuleSurvivesReload(t *testing.T) {
+	dir := t.TempDir()
+
+	critic := writeRuleYAML(t, dir, "critic", "critic-rule.yaml",
+		"id: critic-rule\nstage: critic\nbody: keep critic-specific checks\nconfidence: 0.8\n")
+	global := writeRuleYAML(t, dir, "global", "global-rule.yaml",
+		"id: global-rule\nstage: global\nbody: keep global checks\nconfidence: 0.9\n")
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if err := rl.Reload(); err != nil {
+		t.Fatalf("Reload() failed: %v", err)
+	}
+
+	criticRules := rl.ForStage("critic")
+	if len(criticRules) != 2 {
+		t.Fatalf("ForStage(\"critic\") loaded %d rules, want critic + global", len(criticRules))
+	}
+	if got := rl.ByStageAndID("critic", "critic-rule"); got == nil {
+		t.Fatal("critic-stage rule was not loaded after reload")
+	}
+	prompt := rl.FormatForPrompt("critic")
+	if !strings.Contains(prompt, "keep critic-specific checks") || !strings.Contains(prompt, "keep global checks") {
+		t.Fatalf("critic prompt missing critic/global rules:\n%s", prompt)
+	}
+	for _, path := range []string{critic, global} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("valid rule file should remain on disk: %s: %v", path, err)
+		}
+	}
+}
+
 // TestQuarantineUnsafeID verifies that readFromDisk deletes rule files whose
 // ID field contains path traversal characters and does not load them into memory.
 // A rule with stage: engineer but id: ../../../etc/cron.d/pwn would otherwise
