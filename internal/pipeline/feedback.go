@@ -411,12 +411,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		p.resolveAddressedThreads(ctx, prRepo, pr.PRNumber, repliedIDs)
 	}
 
-	// Update DB
 	newRound := pr.FeedbackRound + 1
-	p.db.UpdatePRFeedbackCheck(pr.ID, newRound)
-
-	if result.Action == "close" {
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+	if err := p.finalizeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+		return err
 	}
 
 	log.WithFields(Fields{
@@ -426,6 +423,30 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		"round":   newRound,
 	}).Info("feedback processed")
 
+	return nil
+}
+
+func (p *Pipeline) finalizeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
+	if result.Action == "close" {
+		if err := p.closePRFromResponder(ctx, pr, prRepo); err != nil {
+			return err
+		}
+	}
+
+	if err := p.db.UpdatePRFeedbackCheck(pr.ID, newRound); err != nil {
+		return fmt.Errorf("update PR feedback check: %w", err)
+	}
+	return nil
+}
+
+func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string) error {
+	comment := "Closing because maintainer feedback explicitly asked to close or abandon this PR."
+	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, comment); err != nil {
+		return fmt.Errorf("close PR remotely: %w", err)
+	}
+	if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+		return fmt.Errorf("update PR status to closed after remote close: %w", err)
+	}
 	return nil
 }
 
