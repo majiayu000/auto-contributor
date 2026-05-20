@@ -476,12 +476,18 @@ func (c *Client) ListUserOpenPRs(ctx context.Context) ([]GitHubPR, error) {
 		return nil, err
 	}
 	for i := range prs {
-		headRef, err := c.GetPRHeadRefName(ctx, prs[i].Repo, prs[i].Number)
-		if err != nil {
-			log.Warn("failed to fetch PR head branch", "repo", prs[i].Repo, "pr", prs[i].Number, "error", err)
-			continue
+		if strings.TrimSpace(prs[i].BranchName) == "" {
+			headRef, err := c.GetPRHeadRefName(ctx, prs[i].Repo, prs[i].Number)
+			if err != nil {
+				return nil, fmt.Errorf("fetch PR head branch for %s#%d: %w", prs[i].Repo, prs[i].Number, err)
+			}
+			prs[i].BranchName = headRef
+		} else {
+			prs[i].BranchName = strings.TrimSpace(prs[i].BranchName)
 		}
-		prs[i].BranchName = headRef
+		if prs[i].BranchName == "" {
+			return nil, fmt.Errorf("fetch PR head branch for %s#%d: empty headRefName", prs[i].Repo, prs[i].Number)
+		}
 	}
 	return prs, nil
 }

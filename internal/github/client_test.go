@@ -225,6 +225,94 @@ func TestParseUserOpenPRsPreservesHeadRefName(t *testing.T) {
 	}
 }
 
+func TestListUserOpenPRsFetchesHeadRefName(t *testing.T) {
+	tempDir := t.TempDir()
+	logPath := filepath.Join(tempDir, "gh.log")
+	scriptPath := filepath.Join(tempDir, "gh")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$GH_TEST_LOG"
+case "$*" in
+  "search prs --author majiayu000 --state open --limit 50 --json repository,number,title,body,url")
+    printf '%s' '[{"repository":{"nameWithOwner":"owner/repo"},"number":42,"title":"fix bug","body":"body","url":"https://github.com/owner/repo/pull/42"}]'
+    exit 0
+    ;;
+  "pr view 42 -R owner/repo --json headRefName")
+    printf '%s' '{"headRefName":"fix/bug-42"}'
+    exit 0
+    ;;
+  *)
+    printf 'unexpected args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh script: %v", err)
+	}
+
+	t.Setenv("GH_TEST_LOG", logPath)
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := New(&config.Config{GitHubUsername: "majiayu000"})
+	prs, err := client.ListUserOpenPRs(context.Background())
+	if err != nil {
+		t.Fatalf("ListUserOpenPRs: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("got %d PRs, want 1", len(prs))
+	}
+	if prs[0].BranchName != "fix/bug-42" {
+		t.Fatalf("BranchName = %q, want %q", prs[0].BranchName, "fix/bug-42")
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake gh log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "search prs --author majiayu000") {
+		t.Fatalf("expected gh search call, log=%q", logText)
+	}
+	if !strings.Contains(logText, "pr view 42 -R owner/repo --json headRefName") {
+		t.Fatalf("expected gh pr view headRefName call, log=%q", logText)
+	}
+}
+
+func TestListUserOpenPRsRejectsEmptyHeadRefName(t *testing.T) {
+	tempDir := t.TempDir()
+	scriptPath := filepath.Join(tempDir, "gh")
+	script := `#!/bin/sh
+case "$*" in
+  "search prs --author majiayu000 --state open --limit 50 --json repository,number,title,body,url")
+    printf '%s' '[{"repository":{"nameWithOwner":"owner/repo"},"number":42,"title":"fix bug","body":"body","url":"https://github.com/owner/repo/pull/42"}]'
+    exit 0
+    ;;
+  "pr view 42 -R owner/repo --json headRefName")
+    printf '%s' '{"headRefName":""}'
+    exit 0
+    ;;
+  *)
+    printf 'unexpected args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh script: %v", err)
+	}
+
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	client := New(&config.Config{GitHubUsername: "majiayu000"})
+	_, err := client.ListUserOpenPRs(context.Background())
+	if err == nil {
+		t.Fatal("ListUserOpenPRs error = nil, want empty headRefName error")
+	}
+	if !strings.Contains(err.Error(), "empty headRefName") {
+		t.Fatalf("ListUserOpenPRs error = %q, want empty headRefName", err)
+	}
+}
+
 func TestGetPRInfoFallsBackWhenLockReasonUnsupported(t *testing.T) {
 	tempDir := t.TempDir()
 	logPath := filepath.Join(tempDir, "gh.log")
