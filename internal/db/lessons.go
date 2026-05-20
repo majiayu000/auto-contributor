@@ -7,10 +7,9 @@ import (
 )
 
 // MigrateLessons creates the review_lessons table if it doesn't exist.
-// Called from runMigrations.
-func (db *DB) MigrateLessons() {
+func (db *DB) MigrateLessons() error {
 	if db.IsPostgres() {
-		db.Exec(`
+		if _, err := db.Exec(`
 			CREATE TABLE IF NOT EXISTS review_lessons (
 				id SERIAL PRIMARY KEY,
 				pr_id INTEGER NOT NULL REFERENCES pull_requests(id),
@@ -20,25 +19,31 @@ func (db *DB) MigrateLessons() {
 				source_comment TEXT,
 				reviewer TEXT,
 				created_at TIMESTAMP DEFAULT NOW()
-			)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_lessons_repo ON review_lessons(repo)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_lessons_category ON review_lessons(category)`)
-	} else {
-		db.Exec(`
-			CREATE TABLE IF NOT EXISTS review_lessons (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				pr_id INTEGER NOT NULL,
-				repo TEXT NOT NULL,
-				category TEXT NOT NULL,
-				lesson TEXT NOT NULL,
-				source_comment TEXT,
-				reviewer TEXT,
-				created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-				FOREIGN KEY (pr_id) REFERENCES pull_requests(id)
-			)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_lessons_repo ON review_lessons(repo)`)
-		db.Exec(`CREATE INDEX IF NOT EXISTS idx_lessons_category ON review_lessons(category)`)
+			)`); err != nil {
+			return fmt.Errorf("create review_lessons table: %w", err)
+		}
+	} else if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS review_lessons (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			pr_id INTEGER NOT NULL,
+			repo TEXT NOT NULL,
+			category TEXT NOT NULL,
+			lesson TEXT NOT NULL,
+			source_comment TEXT,
+			reviewer TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (pr_id) REFERENCES pull_requests(id)
+		)`); err != nil {
+		return fmt.Errorf("create review_lessons table: %w", err)
 	}
+
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_lessons_repo ON review_lessons(repo)`); err != nil {
+		return fmt.Errorf("create idx_lessons_repo: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_lessons_category ON review_lessons(category)`); err != nil {
+		return fmt.Errorf("create idx_lessons_category: %w", err)
+	}
+	return nil
 }
 
 // SaveReviewLesson inserts a new review lesson.
