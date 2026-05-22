@@ -899,15 +899,18 @@ func (db *DB) UpdatePRReviewStats(prID int64, commentCount int, firstReviewAt *t
 // EnsurePRWithIssue creates Issue + PR records if they don't already exist in the DB.
 // Used by feedback-loop to sync GitHub-discovered PRs into the local database.
 func (db *DB) EnsurePRWithIssue(repo string, prNumber int, prURL, branchName, title, body string) (*models.PullRequest, error) {
+	branchName = strings.TrimSpace(branchName)
+	if branchName == "" {
+		return nil, fmt.Errorf("branch name is required for synced PR %s#%d", repo, prNumber)
+	}
+
 	// Check if PR already exists by URL
 	var prID int64
 	query := fmt.Sprintf(`SELECT id FROM pull_requests WHERE pr_url = %s`, db.placeholder(1))
 	err := db.QueryRow(query, prURL).Scan(&prID)
 	if err == nil {
-		if branchName != "" {
-			if err := db.UpdatePRBranchName(prID, branchName); err != nil {
-				return nil, fmt.Errorf("update PR branch name: %w", err)
-			}
+		if err := db.UpdatePRBranchName(prID, branchName); err != nil {
+			return nil, fmt.Errorf("update PR branch name: %w", err)
 		}
 		return db.getPRByID(prID)
 	}

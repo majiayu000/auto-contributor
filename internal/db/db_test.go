@@ -249,15 +249,15 @@ func TestEnsurePRWithIssueUpdatesExistingBranchName(t *testing.T) {
 		"owner/repo",
 		42,
 		"https://github.com/owner/repo/pull/42",
-		"",
+		"fix/old-branch",
 		"fix bug",
 		"body",
 	)
 	if err != nil {
 		t.Fatalf("EnsurePRWithIssue initial: %v", err)
 	}
-	if pr.BranchName != "" {
-		t.Fatalf("initial branch = %q, want empty", pr.BranchName)
+	if pr.BranchName != "fix/old-branch" {
+		t.Fatalf("initial branch = %q, want %q", pr.BranchName, "fix/old-branch")
 	}
 
 	updated, err := db.EnsurePRWithIssue(
@@ -276,6 +276,25 @@ func TestEnsurePRWithIssueUpdatesExistingBranchName(t *testing.T) {
 	}
 	if updated.BranchName != "fix/bug-42" {
 		t.Fatalf("updated branch = %q, want %q", updated.BranchName, "fix/bug-42")
+	}
+}
+
+func TestEnsurePRWithIssueRequiresBranchName(t *testing.T) {
+	db := newSQLiteTestDB(t)
+
+	_, err := db.EnsurePRWithIssue(
+		"owner/repo",
+		42,
+		"https://github.com/owner/repo/pull/42",
+		" ",
+		"fix bug",
+		"body",
+	)
+	if err == nil {
+		t.Fatal("EnsurePRWithIssue error = nil, want branch name required error")
+	}
+	if !strings.Contains(err.Error(), "branch name is required") {
+		t.Fatalf("EnsurePRWithIssue error = %q, want branch name required", err)
 	}
 }
 
