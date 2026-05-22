@@ -2,6 +2,8 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,5 +96,68 @@ esac
 	}
 	if strings.Contains(formatted, "### Open PRs Matching This Issue\nNo data found.") {
 		t.Fatalf("failed PR query was rendered as no data:\n%s", formatted)
+	}
+}
+
+func TestCollectContributingExcerptDecodesLargeBase64BeforeTruncating(t *testing.T) {
+	content := strings.Repeat("general contribution guidance\n", 500) +
+		"Please request assignment before opening a PR.\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+	if len(encoded) <= maxScoutFieldBytes {
+		t.Fatalf("test fixture base64 length = %d, want > %d", len(encoded), maxScoutFieldBytes)
+	}
+
+	installFakeGH(t, fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  "api repos/owner/repo/contents/CONTRIBUTING.md"*) printf '%%s' '%s'; exit 0 ;;
+  *) printf 'unexpected args: %%s\n' "$*" >&2; exit 1 ;;
+esac
+`, encoded))
+
+	field := collectContributingExcerpt(context.Background(), "owner/repo")
+	if field.Failure != "" {
+		t.Fatalf("collectContributingExcerpt failure = %q", field.Failure)
+	}
+	if !strings.Contains(field.Data, "Please request assignment before opening a PR.") {
+		t.Fatalf("contributing excerpt = %q, want assignment line from large base64 payload", field.Data)
+	}
+	if strings.Contains(field.Data, "... (truncated)") {
+		t.Fatalf("contributing excerpt = %q, want decoded assignment excerpt without base64 truncation marker", field.Data)
+	}
+}
+
+func TestExtractClosedPRAssignmentCommentsSupportsCommentShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "gh array comments",
+			data: `[{"comments":[{"body":"Must be assigned before opening a PR."},{"body":"Thanks."}]}]`,
+			want: "Must be assigned before opening a PR.",
+		},
+		{
+			name: "connection comments",
+			data: `[{"comments":{"nodes":[{"body":"This requires maintainer assignment before PRs."}]}}]`,
+			want: "requires maintainer assignment",
+		},
+		{
+			name: "empty comments",
+			data: `[{"comments":[]}]`,
+			want: "[]",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractClosedPRAssignmentComments(tc.data)
+			if err != nil {
+				t.Fatalf("extractClosedPRAssignmentComments: %v", err)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("extractClosedPRAssignmentComments() = %q, want substring %q", got, tc.want)
+			}
+		})
 	}
 }

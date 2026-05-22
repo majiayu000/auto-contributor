@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
 const maxScoutFieldBytes = 8000
+
+var assignmentCommentPattern = regexp.MustCompile(`(?i)not assigned|must be assigned|require.*assign`)
 
 // ScoutData holds pre-collected data for the Scout agent to avoid tool calls.
 type ScoutData struct {
@@ -87,13 +91,10 @@ func (c *Client) CollectScoutData(ctx context.Context, repo string, issueNum int
 		failures = append(failures, fmt.Errorf("CONTRIBUTING.md: %s", d.ContributingExcerpt.Failure))
 	}
 
-	collect("Closed PR Assignment Enforcement", &d.ClosedPRComments,
-		"pr", "list",
-		"-R", repo,
-		"--state", "closed",
-		"--limit", "5",
-		"--json", "number,comments",
-		"--jq", `[.[] | .comments[] | select(.body | test("not assigned|must be assigned|require.*assign"; "i")) | {body: .body[:200]}]`)
+	d.ClosedPRComments = collectClosedPRAssignmentComments(ctx, repo)
+	if d.ClosedPRComments.Failure != "" {
+		failures = append(failures, fmt.Errorf("Closed PR Assignment Enforcement: %s", d.ClosedPRComments.Failure))
+	}
 
 	collectAllowNotFound("GitHub Workflow Files", &d.WorkflowNames,
 		"api",
@@ -191,7 +192,7 @@ func collectContributingExcerpt(ctx context.Context, repo string) ScoutDataField
 	}
 	var failures []string
 	for _, path := range paths {
-		content, err := runGH(ctx, "api", fmt.Sprintf("repos/%s/contents/%s", repo, path), "--jq", ".content")
+		content, err := runGHRaw(ctx, "api", fmt.Sprintf("repos/%s/contents/%s", repo, path), "--jq", ".content")
 		if err != nil {
 			if isNotFoundError(err) {
 				continue
@@ -214,6 +215,91 @@ func collectContributingExcerpt(ctx context.Context, repo string) ScoutDataField
 		return ScoutDataField{Failure: strings.Join(failures, "; ")}
 	}
 	return ScoutDataField{}
+}
+
+func collectClosedPRAssignmentComments(ctx context.Context, repo string) ScoutDataField {
+	data, err := runGHRaw(ctx,
+		"pr", "list",
+		"-R", repo,
+		"--state", "closed",
+		"--limit", "5",
+		"--json", "number,comments")
+	if err != nil {
+		return ScoutDataField{Failure: err.Error()}
+	}
+
+	filtered, err := extractClosedPRAssignmentComments(data)
+	if err != nil {
+		return ScoutDataField{Failure: err.Error()}
+	}
+	return ScoutDataField{Data: filtered}
+}
+
+func extractClosedPRAssignmentComments(data string) (string, error) {
+	if isEmptyScoutData(data) {
+		return "[]", nil
+	}
+
+	var prs []struct {
+		Comments json.RawMessage `json:"comments"`
+	}
+	if err := json.Unmarshal([]byte(data), &prs); err != nil {
+		return "", fmt.Errorf("parse closed PR comments: %w", err)
+	}
+
+	matches := make([]struct {
+		Body string `json:"body"`
+	}, 0)
+	for _, pr := range prs {
+		comments, err := parseScoutPRComments(pr.Comments)
+		if err != nil {
+			return "", err
+		}
+		for _, comment := range comments {
+			if !assignmentCommentPattern.MatchString(comment.Body) {
+				continue
+			}
+			body := comment.Body
+			if len(body) > 200 {
+				body = body[:200]
+			}
+			matches = append(matches, struct {
+				Body string `json:"body"`
+			}{Body: body})
+		}
+	}
+
+	output, err := json.Marshal(matches)
+	if err != nil {
+		return "", fmt.Errorf("encode closed PR comments: %w", err)
+	}
+	return truncateScoutData(string(output)), nil
+}
+
+type scoutPRComment struct {
+	Body string `json:"body"`
+}
+
+func parseScoutPRComments(raw json.RawMessage) ([]scoutPRComment, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var comments []scoutPRComment
+	if raw[0] == '[' {
+		if err := json.Unmarshal(raw, &comments); err != nil {
+			return nil, fmt.Errorf("parse comments array: %w", err)
+		}
+		return comments, nil
+	}
+
+	var connection struct {
+		Nodes []scoutPRComment `json:"nodes"`
+	}
+	if err := json.Unmarshal(raw, &connection); err != nil {
+		return nil, fmt.Errorf("parse comments connection: %w", err)
+	}
+	return connection.Nodes, nil
 }
 
 func extractAssignmentLines(content string) string {
@@ -249,6 +335,14 @@ func collectScoutCommandAllowNotFound(ctx context.Context, args ...string) Scout
 }
 
 func runGH(ctx context.Context, args ...string) (string, error) {
+	data, err := runGHRaw(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	return truncateScoutData(data), nil
+}
+
+func runGHRaw(ctx context.Context, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Stdout = &stdout
@@ -260,7 +354,7 @@ func runGH(ctx context.Context, args ...string) (string, error) {
 		}
 		return "", fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, msg)
 	}
-	return truncateScoutData(strings.TrimSpace(stdout.String())), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 func decodeScoutBase64(content string) (string, error) {
