@@ -24,6 +24,7 @@ type stubRuntime struct {
 	index    int
 	policies []runtime.ExecutionPolicy
 	prompts  []string
+	workDirs []string
 }
 
 type stubOutput struct {
@@ -41,6 +42,7 @@ func (r *stubRuntime) Execute(ctx context.Context, workDir string, prompt string
 	}
 	r.policies = append(r.policies, policy)
 	r.prompts = append(r.prompts, prompt)
+	r.workDirs = append(r.workDirs, workDir)
 	result := r.outputs[r.index]
 	r.index++
 	return result.output, result.err

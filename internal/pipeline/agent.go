@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -48,8 +49,8 @@ func (r *AgentRunner) RunJSON(ctx context.Context, agentName string, workDir str
 }
 
 // RunJSONWithPolicy is like RunWithPolicy but also extracts a JSON object from the output.
-// If extraction fails, it does a lightweight retry using the same execution policy so
-// untrusted prompts never fall back to a more privileged runtime.
+// If extraction fails, it does a lightweight recovery in an isolated temp workspace
+// with untrusted execution so the original agent prompt is not re-run.
 func (r *AgentRunner) RunJSONWithPolicy(ctx context.Context, agentName string, workDir string, tmplCtx map[string]any, dest any, policy runtime.ExecutionPolicy) (string, error) {
 	rendered, err := r.prompts.Render(agentName, tmplCtx)
 	if err != nil {
@@ -72,12 +73,24 @@ func (r *AgentRunner) RunJSONWithPolicy(ctx context.Context, agentName string, w
 		"output_tail": truncate(raw[max(0, len(raw)-500):], 500),
 	}).Warn("JSON extraction failed, attempting lightweight recovery")
 
-	// Lightweight retry: ask Claude to extract JSON from the existing output
-	// instead of re-running the entire agent (which costs 3-7 min)
 	tail := raw
 	if len(tail) > 3000 {
 		tail = tail[len(tail)-3000:]
 	}
+
+	recoveryWorkDir, err := os.MkdirTemp("", "auto-contributor-json-recovery-*")
+	if err != nil {
+		return raw, fmt.Errorf("parse %s JSON output: prepare recovery workspace: %w", agentName, err)
+	}
+	defer func() {
+		if err := os.RemoveAll(recoveryWorkDir); err != nil {
+			log.WithError(err).WithField("workdir", recoveryWorkDir).Warn("failed to remove JSON recovery workspace")
+		}
+	}()
+
+	// Lightweight recovery asks the runtime to extract JSON from existing text
+	// in an empty temp directory with untrusted execution, so parse failures do
+	// not re-run side-effect agent prompts in the repository workspace.
 	recoveryPrompt := fmt.Sprintf(`The following is output from an agent that was supposed to return JSON but the JSON is missing or malformed.
 Extract or reconstruct the JSON result based on the analysis below. Output ONLY a valid JSON object, nothing else.
 
@@ -87,7 +100,7 @@ Extract or reconstruct the JSON result based on the analysis below. Output ONLY 
 
 Output the JSON now:`, tail)
 
-	recoveryRaw, err := r.runWithPrompt(ctx, agentName, workDir, recoveryPrompt, policy)
+	recoveryRaw, err := r.runWithPrompt(ctx, "json-recovery", recoveryWorkDir, recoveryPrompt, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
 		return raw, fmt.Errorf("parse %s JSON output: recovery failed: %w", agentName, err)
 	}
