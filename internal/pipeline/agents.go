@@ -15,6 +15,7 @@ import (
 
 func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutResult, error) {
 	stageRules, rulesFormatted := p.getRulesForStageIssue("scout", issue)
+	start := time.Now()
 	tmplCtx := map[string]any{
 		"Repo":        issue.Repo,
 		"IssueNumber": issue.IssueNumber,
@@ -23,12 +24,21 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 		"Rules":       rulesFormatted,
 	}
 
+	if p.gh != nil {
+		scoutData, err := p.gh.CollectScoutData(ctx, issue.Repo, issue.IssueNumber, issue.Title)
+		if err != nil {
+			err = fmt.Errorf("collect scout data: %w", err)
+			p.recordEvent(issue, nil, "scout", 1, start, "error", false, "", err.Error(), stageRules)
+			return nil, err
+		}
+		tmplCtx["ScoutData"] = scoutData.Format()
+	}
+
 	// Inject repo_structure lessons so scout can detect wrong-repo patterns
 	if lessons, err := p.db.GetRecentLessons(10); err == nil && len(lessons) > 0 {
 		tmplCtx["PastLessons"] = formatLessonsForPrompt(lessons)
 	}
 
-	start := time.Now()
 	var result ScoutResult
 	if _, err := p.runner.RunJSONWithPolicy(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error(), stageRules)

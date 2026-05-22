@@ -20,11 +20,24 @@ If any `repo_structure` lesson indicates that changes for **{{ .Repo }}** belong
 output VERDICT: SKIP with reason referencing that lesson.
 
 {{ end }}
-## Checks (execute ALL before making a decision)
+{{ if .ScoutData }}
+## Pre-Collected GitHub Data
+
+The pipeline already fetched GitHub context for this issue. Use this data for the checks below. Successful empty sections mean the query returned no matching data; UNKNOWN sections are fetch failures and must not be treated as verified absence of risk.
+
+{{ .ScoutData }}
+{{ end }}
+## Checks
+
+{{ if .ScoutData }}
+Review the pre-collected data before making a decision. Do not re-run commands for sections that are already present.
+{{ else }}
+Execute ALL checks before making a decision.
+{{ end }}
 
 ### 1. Upstream Redirection Check
 
-Read all issue comments carefully. Look for maintainer signals:
+Read all issue comments carefully{{ if .ScoutData }} from the "Issue Comments" pre-collected section{{ end }}. Look for maintainer signals:
 - "upstream", "other repo", "separate repo", "belongs in X"
 - Links to issues in other repositories
 - Suggestions to fix elsewhere
@@ -36,15 +49,23 @@ If ANY upstream redirection is found, output VERDICT: SKIP with reason.
 Search for existing PRs that address this issue using ALL three methods:
 
 **2a. Search by issue number and title:**
+{{ if .ScoutData }}
+Use the "Open PRs Matching This Issue" pre-collected section.
+{{ else }}
 ```
 gh pr list -R {{ .Repo }} --state open --search "{{ .IssueNumber }} in:title,body"
 gh pr list -R {{ .Repo }} --state open --search "{{ .IssueTitle }}"
 ```
+{{ end }}
 
 **2b. Check issue timeline for linked PRs and referenced commits:**
+{{ if .ScoutData }}
+Use the "Issue Timeline (Cross-references)" pre-collected section.
+{{ else }}
 ```
 gh api repos/{{ .Repo }}/issues/{{ .IssueNumber }}/timeline --jq '.[] | select(.event == "cross-referenced" or .event == "referenced") | {event, source: .source.issue.pull_request.html_url}'
 ```
+{{ end }}
 
 **2c. Read issue comments for mentions of existing PRs or commits:**
 Look for patterns like "#1234", "PR", "pull request", "commit", "fix in", "already fixed", "merged".
@@ -66,10 +87,14 @@ Check if anyone has claimed this issue:
 ### 4b. Target Branch Check
 
 Check if the repo has a `dev` or `develop` branch and whether PRs should go there:
+{{ if .ScoutData }}
+Use the "Repo Metadata", "Dev/Develop Branches", "CONTRIBUTING.md", and "Recent Merged PRs" pre-collected sections.
+{{ else }}
 ```
 gh api repos/{{ .Repo }} --jq '.default_branch'
 gh api repos/{{ .Repo }}/branches --jq '.[].name' | grep -E '^(dev|develop|next|staging)$'
 ```
+{{ end }}
 Also check CONTRIBUTING.md or open merged PRs to see which base branch maintainers expect.
 Record the correct base branch in your output field `target_branch`.
 
