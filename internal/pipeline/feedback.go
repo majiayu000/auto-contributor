@@ -396,27 +396,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
 	}
 
-	// Post replies and collect replied comment IDs
-	repliedIDs := make(map[int64]bool)
-	for _, reply := range result.Replies {
-		if err := p.gh.ReplyToPRComment(ctx, prRepo, pr.PRNumber, reply.CommentID, reply.Body); err != nil {
-			log.WithError(err).Warn("failed to post reply")
-			continue
-		}
-		repliedIDs[reply.CommentID] = true
-	}
-
-	// Resolve review threads for addressed comments
-	if result.Action == "addressed" && len(repliedIDs) > 0 {
-		p.resolveAddressedThreads(ctx, prRepo, pr.PRNumber, repliedIDs)
-	}
-
-	// Update DB
 	newRound := pr.FeedbackRound + 1
-	p.db.UpdatePRFeedbackCheck(pr.ID, newRound)
-
-	if result.Action == "close" {
-		p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed)
+	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+		return err
 	}
 
 	log.WithFields(Fields{
@@ -426,6 +408,55 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		"round":   newRound,
 	}).Info("feedback processed")
 
+	return nil
+}
+
+func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
+	if result.Action == "close" {
+		if err := p.closePRFromResponder(ctx, pr, prRepo); err != nil {
+			return err
+		}
+	}
+
+	repliedIDs := p.postResponderReplies(ctx, pr, prRepo, result.Replies)
+
+	if result.Action == "addressed" && len(repliedIDs) > 0 {
+		p.resolveAddressedThreads(ctx, prRepo, pr.PRNumber, repliedIDs)
+	}
+
+	if err := p.db.UpdatePRFeedbackCheck(pr.ID, newRound); err != nil {
+		return fmt.Errorf("update PR feedback check: %w", err)
+	}
+	return nil
+}
+
+func (p *Pipeline) finalizeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
+	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Pipeline) postResponderReplies(ctx context.Context, pr *models.PullRequest, prRepo string, replies []FeedbackReply) map[int64]bool {
+	repliedIDs := make(map[int64]bool)
+	for _, reply := range replies {
+		if err := p.gh.ReplyToPRComment(ctx, prRepo, pr.PRNumber, reply.CommentID, reply.Body); err != nil {
+			log.WithError(err).Warn("failed to post reply")
+			continue
+		}
+		repliedIDs[reply.CommentID] = true
+	}
+	return repliedIDs
+}
+
+func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string) error {
+	comment := "Closing because maintainer feedback explicitly asked to close or abandon this PR."
+	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, comment); err != nil {
+		return fmt.Errorf("close PR remotely: %w", err)
+	}
+	if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+		return fmt.Errorf("update PR status to closed after remote close: %w", err)
+	}
 	return nil
 }
 
