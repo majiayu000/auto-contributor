@@ -115,7 +115,9 @@ func (db *DB) Migrate() error {
 
 	// Column-level migrations intentionally ignore errors (column may already exist).
 	db.runMigrations()
-	db.MigrateLessons()
+	if err := db.MigrateLessons(); err != nil {
+		return fmt.Errorf("migrate lessons: %w", err)
+	}
 	if err := db.MigrateEvents(); err != nil {
 		return fmt.Errorf("migrate events: %w", err)
 	}

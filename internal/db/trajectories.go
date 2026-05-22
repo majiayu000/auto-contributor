@@ -87,7 +87,9 @@ func (db *DB) MigrateTrajectories() error {
 			return fmt.Errorf("create idx_trajectories_success: %w", err)
 		}
 		// Drop the old named unique index if it exists (created by earlier schema versions).
-		db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`)
+		if _, err := db.Exec(`DROP INDEX IF EXISTS idx_trajectories_issue_unique`); err != nil {
+			return fmt.Errorf("drop idx_trajectories_issue_unique: %w", err)
+		}
 		// Add pr_number column to existing SQLite tables; "duplicate column name" means already present.
 		if _, err := db.Exec(`ALTER TABLE trajectories ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0`); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column name") {
@@ -100,11 +102,12 @@ func (db *DB) MigrateTrajectories() error {
 		var oldSQL string
 		if err := db.QueryRow(
 			`SELECT sql FROM sqlite_master WHERE type='table' AND name='trajectories'`,
-		).Scan(&oldSQL); err == nil {
-			if regexp.MustCompile(`(?i)\bissue_id\b[^,\n)]*\bUNIQUE\b`).MatchString(oldSQL) {
-				if err := db.rebuildTrajectoriesTable(); err != nil {
-					return fmt.Errorf("rebuild trajectories table: %w", err)
-				}
+		).Scan(&oldSQL); err != nil {
+			return fmt.Errorf("inspect trajectories schema: %w", err)
+		}
+		if regexp.MustCompile(`(?i)\bissue_id\b[^,\n)]*\bUNIQUE\b`).MatchString(oldSQL) {
+			if err := db.rebuildTrajectoriesTable(); err != nil {
+				return fmt.Errorf("rebuild trajectories table: %w", err)
 			}
 		}
 	}
@@ -168,10 +171,19 @@ func (db *DB) rebuildTrajectoriesTable() error {
 		return fmt.Errorf("commit trajectories rebuild: %w", err)
 	}
 
-	// Rebuild indexes after table recreation (outside transaction; non-fatal if they already exist).
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`)
+	indexes := []struct {
+		name  string
+		query string
+	}{
+		{name: "idx_trajectories_issue", query: `CREATE INDEX IF NOT EXISTS idx_trajectories_issue ON trajectories(issue_id)`},
+		{name: "idx_trajectories_outcome", query: `CREATE INDEX IF NOT EXISTS idx_trajectories_outcome ON trajectories(outcome_label)`},
+		{name: "idx_trajectories_success", query: `CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success)`},
+	}
+	for _, index := range indexes {
+		if _, err := db.Exec(index.query); err != nil {
+			return fmt.Errorf("create %s: %w", index.name, err)
+		}
+	}
 	return nil
 }
 

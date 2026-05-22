@@ -160,6 +160,56 @@ func TestMigrateRuleEmbeddingsPostgresCreatesVectorSchema(t *testing.T) {
 	}
 }
 
+func TestMigratePropagatesLessonsDDLFailure(t *testing.T) {
+	stub := &migrationExecStub{
+		failOn:  "CREATE TABLE IF NOT EXISTS review_lessons",
+		failErr: fmt.Errorf("permission denied"),
+	}
+	registerMigrationExecStub(t, stub)
+
+	sqlDB, err := sql.Open(migrationExecStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open migration exec stub db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypePostgres}
+	err = db.Migrate()
+	if err == nil {
+		t.Fatal("Migrate() error = nil, want lessons DDL failure")
+	}
+	if !strings.Contains(err.Error(), "migrate lessons: create review_lessons table: permission denied") {
+		t.Fatalf("Migrate() error = %q", err)
+	}
+}
+
+func TestMigrateTrajectoriesPropagatesSQLiteDropIndexFailure(t *testing.T) {
+	stub := &migrationExecStub{
+		failOn:  "DROP INDEX IF EXISTS idx_trajectories_issue_unique",
+		failErr: fmt.Errorf("database is locked"),
+	}
+	registerMigrationExecStub(t, stub)
+
+	sqlDB, err := sql.Open(migrationExecStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open migration exec stub db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypeSQLite}
+	err = db.MigrateTrajectories()
+	if err == nil {
+		t.Fatal("MigrateTrajectories() error = nil, want drop-index failure")
+	}
+	if !strings.Contains(err.Error(), "drop idx_trajectories_issue_unique: database is locked") {
+		t.Fatalf("MigrateTrajectories() error = %q", err)
+	}
+}
+
 func testCreatePullRequestPopulatesIDAndSupportsUpdate(t *testing.T, db *DB) {
 
 	uniqueSuffix := time.Now().UnixNano()
@@ -313,13 +363,16 @@ func newSQLiteTestDB(t *testing.T) *DB {
 
 const createPullRequestPostgresStubDriverName = "create_pull_request_postgres_stub"
 const ruleEmbeddingsPostgresStubDriverName = "rule_embeddings_postgres_stub"
+const migrationExecStubDriverName = "migration_exec_stub"
 
 var createPullRequestPostgresStubValue atomic.Pointer[createPullRequestPostgresStub]
 var ruleEmbeddingsPostgresStubValue atomic.Pointer[ruleEmbeddingsPostgresStub]
+var migrationExecStubValue atomic.Pointer[migrationExecStub]
 
 func init() {
 	sql.Register(createPullRequestPostgresStubDriverName, createPullRequestPostgresStubDriver{})
 	sql.Register(ruleEmbeddingsPostgresStubDriverName, ruleEmbeddingsPostgresStubDriver{})
+	sql.Register(migrationExecStubDriverName, migrationExecStubDriver{})
 }
 
 func registerCreatePullRequestPostgresStub(t *testing.T, stub *createPullRequestPostgresStub) {
@@ -338,6 +391,14 @@ func registerRuleEmbeddingsPostgresStub(t *testing.T, stub *ruleEmbeddingsPostgr
 	})
 }
 
+func registerMigrationExecStub(t *testing.T, stub *migrationExecStub) {
+	t.Helper()
+	migrationExecStubValue.Store(stub)
+	t.Cleanup(func() {
+		migrationExecStubValue.Store(nil)
+	})
+}
+
 type createPullRequestPostgresStub struct {
 	nextID     int64
 	queryCount int
@@ -348,6 +409,7 @@ type createPullRequestPostgresStub struct {
 
 type createPullRequestPostgresStubDriver struct{}
 type ruleEmbeddingsPostgresStubDriver struct{}
+type migrationExecStubDriver struct{}
 
 func (createPullRequestPostgresStubDriver) Open(string) (driver.Conn, error) {
 	stub := createPullRequestPostgresStubValue.Load()
@@ -365,6 +427,14 @@ func (ruleEmbeddingsPostgresStubDriver) Open(string) (driver.Conn, error) {
 	return &ruleEmbeddingsPostgresStubConn{stub: stub}, nil
 }
 
+func (migrationExecStubDriver) Open(string) (driver.Conn, error) {
+	stub := migrationExecStubValue.Load()
+	if stub == nil {
+		return nil, fmt.Errorf("migration exec stub not registered")
+	}
+	return &migrationExecStubConn{stub: stub}, nil
+}
+
 type createPullRequestPostgresStubConn struct {
 	stub *createPullRequestPostgresStub
 }
@@ -375,6 +445,16 @@ type ruleEmbeddingsPostgresStub struct {
 
 type ruleEmbeddingsPostgresStubConn struct {
 	stub *ruleEmbeddingsPostgresStub
+}
+
+type migrationExecStub struct {
+	failOn      string
+	failErr     error
+	execQueries []string
+}
+
+type migrationExecStubConn struct {
+	stub *migrationExecStub
 }
 
 func (c *createPullRequestPostgresStubConn) Prepare(string) (driver.Stmt, error) {
@@ -417,6 +497,34 @@ func (c *ruleEmbeddingsPostgresStubConn) QueryContext(_ context.Context, _ strin
 
 func (c *ruleEmbeddingsPostgresStubConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	c.stub.execQueries = append(c.stub.execQueries, normalizeWhitespace(query))
+	return driver.RowsAffected(0), nil
+}
+
+func (c *migrationExecStubConn) Prepare(string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("prepare not implemented")
+}
+
+func (c *migrationExecStubConn) Close() error {
+	return nil
+}
+
+func (c *migrationExecStubConn) Begin() (driver.Tx, error) {
+	return nil, fmt.Errorf("transactions not implemented")
+}
+
+func (c *migrationExecStubConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	return nil, fmt.Errorf("unexpected QueryContext call")
+}
+
+func (c *migrationExecStubConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	normalized := normalizeWhitespace(query)
+	c.stub.execQueries = append(c.stub.execQueries, normalized)
+	if c.stub.failOn != "" && strings.Contains(normalized, c.stub.failOn) {
+		if c.stub.failErr != nil {
+			return nil, c.stub.failErr
+		}
+		return nil, fmt.Errorf("forced migration exec failure")
+	}
 	return driver.RowsAffected(0), nil
 }
 
@@ -463,6 +571,9 @@ func namedValuesToValues(args []driver.NamedValue) []driver.Value {
 var _ driver.Conn = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.QueryerContext = (*createPullRequestPostgresStubConn)(nil)
 var _ driver.ExecerContext = (*createPullRequestPostgresStubConn)(nil)
+var _ driver.Conn = (*migrationExecStubConn)(nil)
+var _ driver.QueryerContext = (*migrationExecStubConn)(nil)
+var _ driver.ExecerContext = (*migrationExecStubConn)(nil)
 var _ driver.Rows = (*createPullRequestPostgresStubRows)(nil)
 
 func TestListRepoProfilesNoFilterSQLite(t *testing.T) {
