@@ -156,6 +156,55 @@ func TestFinalizeResponderActionCloseFailureLeavesPRRetryable(t *testing.T) {
 	}
 }
 
+func TestExecuteResponderActionCloseFailureSkipsReplies(t *testing.T) {
+	logPath := installFakeGH(t, true)
+	database := newFeedbackTestDB(t)
+	_, pr := createFeedbackTestPR(t, database)
+	p := &Pipeline{
+		db: database,
+		gh: ghclient.New(&config.Config{}),
+	}
+
+	err := p.executeResponderAction(
+		context.Background(),
+		pr,
+		"owner/repo",
+		FeedbackResult{
+			Action: "close",
+			Replies: []FeedbackReply{
+				{CommentID: 123, Body: "Acknowledged; closing as requested."},
+			},
+		},
+		pr.FeedbackRound+1,
+	)
+	if err == nil {
+		t.Fatal("executeResponderAction error = nil, want remote close failure")
+	}
+
+	status, round, checked := getFeedbackPRState(t, database, pr.ID)
+	if status != string(models.PRStatusOpen) {
+		t.Fatalf("status = %q, want %q after remote close failure", status, models.PRStatusOpen)
+	}
+	if round != 0 {
+		t.Fatalf("feedback_round = %d, want 0 after remote close failure", round)
+	}
+	if checked.Valid {
+		t.Fatalf("last_feedback_check_at = %q, want NULL after remote close failure", checked.String)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read fake gh log: %v", err)
+	}
+	logText := string(logData)
+	if !strings.Contains(logText, "pr close 42 -R owner/repo") {
+		t.Fatalf("fake gh log = %q, want remote close attempt", logText)
+	}
+	if strings.Contains(logText, "comments/123/replies") {
+		t.Fatalf("fake gh log = %q, reply was posted before remote close succeeded", logText)
+	}
+}
+
 func TestPRResponseHours_BothTimestamps(t *testing.T) {
 	created := "2024-01-01T00:00:00Z"
 	terminal := "2024-01-01T02:00:00Z"
