@@ -11,7 +11,7 @@ import (
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
-var synthesisStages = []string{"scout", "analyst", "engineer", "reviewer", "submitter", "responder"}
+var synthesisStages = []string{"scout", "analyst", "engineer", "reviewer", "critic", "submitter", "responder"}
 
 // RunSynthesis runs the rule synthesis cycle for all stages.
 func (p *Pipeline) RunSynthesis(ctx context.Context) error {
