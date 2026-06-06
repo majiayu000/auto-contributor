@@ -235,6 +235,7 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 		{output: "FIX_COMPLETE"},
 		{output: "not json at all"},
 		{output: "still not json"},
+		{output: `{"verdict":"approve","confidence":1,"issues_found":[],"summary":"must not be reached"}`},
 	}}
 	p, database := newLoopTestPipeline(t, rt)
 
@@ -269,6 +270,9 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "parse reviewer JSON output") {
 		t.Fatalf("got error %q, want reviewer parse failure", err)
+	}
+	if rt.index != 3 {
+		t.Fatalf("runtime calls = %d, want 3 (engineer, reviewer, json recovery only)", rt.index)
 	}
 
 	stored, err := database.GetIssueByID(issue.ID)
@@ -461,6 +465,7 @@ func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing
 	rt := &stubRuntime{outputs: []stubOutput{
 		{output: "FIX_COMPLETE"},
 		{err: errors.New("reviewer runtime exploded")},
+		{output: `{"verdict":"approve","confidence":1,"issues_found":[],"summary":"must not be reached"}`},
 	}}
 	p, database := newLoopTestPipeline(t, rt)
 
@@ -495,6 +500,9 @@ func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing
 	}
 	if !strings.Contains(err.Error(), "reviewer runtime exploded") {
 		t.Fatalf("got error %q, want reviewer runtime failure", err)
+	}
+	if rt.index != 2 {
+		t.Fatalf("runtime calls = %d, want 2 (engineer and failing reviewer only)", rt.index)
 	}
 
 	stored, err := database.GetIssueByID(issue.ID)
