@@ -88,7 +88,8 @@ git push fork {{ .BranchName }}
 
 - For EVERY inline comment (id:NNN), include a reply in the `replies` array with the matching `comment_id`
 - Reply text should confirm the fix ("Done, fixed in this commit") or explain why not
-- Do NOT skip comments — the system will automatically resolve threads you reply to
+- Do NOT skip comments; replies are required for audit trail and maintainer communication
+- Thread resolution is a separate gated pipeline action after code changes are addressed and replies are successfully posted
 
 {{ if .Rules }}
 {{ .Rules }}
