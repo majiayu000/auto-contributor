@@ -251,6 +251,25 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 	today := time.Now().Format("2006-01-02")
 	rulesDir := p.ruleLoader.RulesDir()
 	seenRules := make(map[string]bool)
+	stamped := 0
+
+	stampRule := func(stage, ruleID, originalKey string) {
+		normalizedKey := stage + "/" + ruleID
+		if seenRules[normalizedKey] {
+			return
+		}
+		seenRules[normalizedKey] = true
+
+		rule := p.ruleLoader.ByStageAndID(stage, ruleID)
+		if rule == nil || rule.Source != "synthesized" {
+			return
+		}
+		if err := rules.UpdateRuleLastValidatedAt(rulesDir, ruleID, stage, today); err != nil {
+			log.WithFields(Fields{"rule": originalKey, "error": err}).Warn("failed to stamp rule last_validated_at")
+			return
+		}
+		stamped++
+	}
 
 	for _, e := range events {
 		if e.ExperiencesUsed == "" {
@@ -264,24 +283,16 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 		}
 
 		for _, key := range ruleKeys {
-			stage := e.Stage
-			ruleID := key
 			if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
-				stage = parts[0]
-				ruleID = parts[1]
-			}
-			normalizedKey := stage + "/" + ruleID
-			if seenRules[normalizedKey] {
+				stampRule(parts[0], parts[1], key)
 				continue
 			}
-			seenRules[normalizedKey] = true
 
-			rule := p.ruleLoader.ByStageAndID(stage, ruleID)
-			if rule == nil || rule.Source != "synthesized" {
-				continue
-			}
-			if err := rules.UpdateRuleLastValidatedAt(rulesDir, ruleID, stage, today); err != nil {
-				log.WithFields(Fields{"rule": key, "error": err}).Warn("failed to stamp rule last_validated_at")
+			// Legacy records stored bare rule IDs. Those IDs came from rules injected
+			// for the event stage, which includes stage-specific and global rules.
+			stampRule(e.Stage, key, key)
+			if e.Stage != "global" {
+				stampRule("global", key, key)
 			}
 		}
 	}
@@ -294,7 +305,7 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 
 	log.WithFields(Fields{
 		"pr":    pr.PRURL,
-		"rules": len(seenRules),
+		"rules": stamped,
 	}).Info("stamped last_validated_at on synthesized rules for merged PR")
 }
 
