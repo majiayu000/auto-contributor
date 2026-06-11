@@ -2,7 +2,6 @@ package db
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
@@ -21,7 +20,7 @@ func (db *DB) migrateEventsV2() error {
 		stmt = `ALTER TABLE pipeline_events ADD COLUMN experiences_used TEXT`
 	}
 	_, err := db.Exec(stmt)
-	if err != nil && strings.Contains(err.Error(), "duplicate column") {
+	if !db.IsPostgres() && isSQLiteDuplicateColumnError(err) {
 		return nil // column already exists — idempotent, not an error
 	}
 	return err

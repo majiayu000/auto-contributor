@@ -3,7 +3,6 @@ package db
 import (
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/pkg/models"
@@ -92,7 +91,7 @@ func (db *DB) MigrateTrajectories() error {
 		}
 		// Add pr_number column to existing SQLite tables; "duplicate column name" means already present.
 		if _, err := db.Exec(`ALTER TABLE trajectories ADD COLUMN pr_number INTEGER NOT NULL DEFAULT 0`); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column name") {
+			if !isSQLiteDuplicateColumnError(err) {
 				return fmt.Errorf("add pr_number column: %w", err)
 			}
 		}

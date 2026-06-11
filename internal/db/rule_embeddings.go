@@ -7,10 +7,7 @@ import (
 	"strings"
 
 	"github.com/lib/pq"
-	"github.com/majiayu000/auto-contributor/pkg/logger"
 )
-
-var log = logger.GetLogger()
 
 const RuleEmbeddingDimensions = 64
 
@@ -24,20 +21,16 @@ type RuleEmbeddingCandidate struct {
 // MigrateRuleEmbeddings creates the derived rule embedding index on PostgreSQL.
 // SQLite remains a no-op so the existing YAML full-load path keeps working.
 //
-// pgvector is treated as optional: if the `vector` extension cannot be created
-// (extension not installed, or the connecting role lacks privileges), the
-// migration logs a warning and returns nil so deployments that do not opt into
-// semantic retrieval are not forced to install pgvector. The retriever path
-// detects the missing index at sync time and falls back to full prompt
-// snapshots; see pipeline.New.
+// pgvector is required for PostgreSQL rule embeddings. If the extension cannot
+// be created, return an error so DB.Migrate fails closed instead of starting
+// with an incomplete rule_embeddings schema.
 func (db *DB) MigrateRuleEmbeddings() error {
 	if !db.IsPostgres() {
 		return nil
 	}
 
 	if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
-		log.WithField("error", err).Warn("pgvector extension unavailable, skipping rule embeddings migration")
-		return nil
+		return fmt.Errorf("create pgvector extension: %w", err)
 	}
 
 	statements := []string{

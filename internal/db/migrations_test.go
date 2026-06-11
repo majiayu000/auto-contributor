@@ -77,3 +77,46 @@ func TestRunMigrationsPropagatesSQLiteNonDuplicateError(t *testing.T) {
 		t.Fatalf("runMigrations() error = %q", err)
 	}
 }
+
+func TestMigrateEventsV2IgnoresSQLiteDuplicateColumnError(t *testing.T) {
+	stub := &migrationExecStub{
+		failOn:  "ALTER TABLE pipeline_events ADD COLUMN experiences_used",
+		failErr: fmt.Errorf("Duplicate Column Name: experiences_used"),
+	}
+	registerMigrationExecStub(t, stub)
+
+	sqlDB, err := sql.Open(migrationExecStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open migration exec stub db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypeSQLite}
+	if err := db.migrateEventsV2(); err != nil {
+		t.Fatalf("migrateEventsV2() error = %v, want nil duplicate-column error", err)
+	}
+}
+
+func TestMigrateTrajectoriesIgnoresSQLiteDuplicateColumnError(t *testing.T) {
+	stub := &migrationExecStub{
+		failOn:          "ALTER TABLE trajectories ADD COLUMN pr_number",
+		failErr:         fmt.Errorf("Duplicate Column Name: pr_number"),
+		sqliteMasterSQL: `CREATE TABLE trajectories (id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id INTEGER NOT NULL, pr_number INTEGER NOT NULL DEFAULT 0)`,
+	}
+	registerMigrationExecStub(t, stub)
+
+	sqlDB, err := sql.Open(migrationExecStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open migration exec stub db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypeSQLite}
+	if err := db.MigrateTrajectories(); err != nil {
+		t.Fatalf("MigrateTrajectories() error = %v, want nil duplicate-column error", err)
+	}
+}
