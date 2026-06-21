@@ -160,6 +160,34 @@ func TestMigrateRuleEmbeddingsPostgresCreatesVectorSchema(t *testing.T) {
 	}
 }
 
+func TestMigrateRuleEmbeddingsPostgresPropagatesVectorExtensionFailure(t *testing.T) {
+	stub := &ruleEmbeddingsPostgresStub{
+		failOn:  "CREATE EXTENSION IF NOT EXISTS vector",
+		failErr: fmt.Errorf("permission denied to create extension"),
+	}
+	registerRuleEmbeddingsPostgresStub(t, stub)
+
+	sqlDB, err := sql.Open(ruleEmbeddingsPostgresStubDriverName, "")
+	if err != nil {
+		t.Fatalf("open stub postgres db: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	db := &DB{DB: sqlDB, dbType: DBTypePostgres}
+	err = db.MigrateRuleEmbeddings()
+	if err == nil {
+		t.Fatal("MigrateRuleEmbeddings() error = nil, want pgvector extension failure")
+	}
+	if !strings.Contains(err.Error(), "create pgvector extension: permission denied to create extension") {
+		t.Fatalf("MigrateRuleEmbeddings() error = %q", err)
+	}
+	if len(stub.execQueries) != 1 {
+		t.Fatalf("exec count = %d, want 1", len(stub.execQueries))
+	}
+}
+
 func TestMigratePropagatesLessonsDDLFailure(t *testing.T) {
 	stub := &migrationExecStub{
 		failOn:  "CREATE TABLE IF NOT EXISTS review_lessons",
@@ -440,6 +468,8 @@ type createPullRequestPostgresStubConn struct {
 }
 
 type ruleEmbeddingsPostgresStub struct {
+	failOn      string
+	failErr     error
 	execQueries []string
 }
 
@@ -448,9 +478,10 @@ type ruleEmbeddingsPostgresStubConn struct {
 }
 
 type migrationExecStub struct {
-	failOn      string
-	failErr     error
-	execQueries []string
+	failOn          string
+	failErr         error
+	sqliteMasterSQL string
+	execQueries     []string
 }
 
 type migrationExecStubConn struct {
@@ -496,7 +527,14 @@ func (c *ruleEmbeddingsPostgresStubConn) QueryContext(_ context.Context, _ strin
 }
 
 func (c *ruleEmbeddingsPostgresStubConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	c.stub.execQueries = append(c.stub.execQueries, normalizeWhitespace(query))
+	normalized := normalizeWhitespace(query)
+	c.stub.execQueries = append(c.stub.execQueries, normalized)
+	if c.stub.failOn != "" && strings.Contains(normalized, c.stub.failOn) {
+		if c.stub.failErr != nil {
+			return nil, c.stub.failErr
+		}
+		return nil, fmt.Errorf("forced rule embeddings exec failure")
+	}
 	return driver.RowsAffected(0), nil
 }
 
@@ -512,7 +550,13 @@ func (c *migrationExecStubConn) Begin() (driver.Tx, error) {
 	return nil, fmt.Errorf("transactions not implemented")
 }
 
-func (c *migrationExecStubConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+func (c *migrationExecStubConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if c.stub.sqliteMasterSQL != "" && strings.Contains(normalizeWhitespace(query), "FROM sqlite_master") {
+		return &createPullRequestPostgresStubRows{
+			columns: []string{"sql"},
+			rows:    [][]driver.Value{{c.stub.sqliteMasterSQL}},
+		}, nil
+	}
 	return nil, fmt.Errorf("unexpected QueryContext call")
 }
 
@@ -736,74 +780,3 @@ func mustAddBlacklistEntry(t *testing.T, db *DB, repo, reason string) {
 		t.Fatalf("add blacklist entry %q: %v", repo, err)
 	}
 }
-
-const filterQueryPostgresStubDriverName = "filter_query_postgres_stub"
-
-var filterQueryPostgresStubValue atomic.Pointer[filterQueryPostgresStub]
-
-func init() {
-	sql.Register(filterQueryPostgresStubDriverName, filterQueryPostgresStubDriver{})
-}
-
-func registerFilterQueryPostgresStub(t *testing.T, stub *filterQueryPostgresStub) {
-	t.Helper()
-	filterQueryPostgresStubValue.Store(stub)
-	t.Cleanup(func() {
-		filterQueryPostgresStubValue.Store(nil)
-	})
-}
-
-type filterQueryPostgresStub struct {
-	columns    []string
-	rows       [][]driver.Value
-	queryCount int
-	lastQuery  string
-	lastArgs   []driver.Value
-}
-
-type filterQueryPostgresStubDriver struct{}
-
-func (filterQueryPostgresStubDriver) Open(string) (driver.Conn, error) {
-	stub := filterQueryPostgresStubValue.Load()
-	if stub == nil {
-		return nil, fmt.Errorf("filter query postgres stub not registered")
-	}
-	return &filterQueryPostgresStubConn{stub: stub}, nil
-}
-
-type filterQueryPostgresStubConn struct {
-	stub *filterQueryPostgresStub
-}
-
-func (c *filterQueryPostgresStubConn) Prepare(string) (driver.Stmt, error) {
-	return nil, fmt.Errorf("prepare not implemented")
-}
-
-func (c *filterQueryPostgresStubConn) Close() error {
-	return nil
-}
-
-func (c *filterQueryPostgresStubConn) Begin() (driver.Tx, error) {
-	return nil, fmt.Errorf("transactions not implemented")
-}
-
-func (c *filterQueryPostgresStubConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	c.stub.queryCount++
-	c.stub.lastQuery = normalizeWhitespace(query)
-	c.stub.lastArgs = namedValuesToValues(args)
-	return &createPullRequestPostgresStubRows{
-		columns: c.stub.columns,
-		rows:    c.stub.rows,
-	}, nil
-}
-
-func (c *filterQueryPostgresStubConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
-	return nil, fmt.Errorf("unexpected ExecContext call")
-}
-
-var _ driver.Conn = (*filterQueryPostgresStubConn)(nil)
-var _ driver.QueryerContext = (*filterQueryPostgresStubConn)(nil)
-var _ driver.ExecerContext = (*filterQueryPostgresStubConn)(nil)
-var _ driver.Conn = (*ruleEmbeddingsPostgresStubConn)(nil)
-var _ driver.QueryerContext = (*ruleEmbeddingsPostgresStubConn)(nil)
-var _ driver.ExecerContext = (*ruleEmbeddingsPostgresStubConn)(nil)
