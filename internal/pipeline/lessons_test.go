@@ -108,3 +108,98 @@ func TestStampRuleValidation_LegacyRuleIDsRemainDistinctPerStage(t *testing.T) {
 		}
 	}
 }
+
+func TestStampRuleValidation_LegacyRuleIDsStampOnlyMatchingStageAndGlobal(t *testing.T) {
+	dir := t.TempDir()
+	today := time.Now().Format("2006-01-02")
+
+	for _, rule := range []*rules.Rule{
+		{
+			ID:         "legacy-shared-rule",
+			Stage:      "engineer",
+			Severity:   "medium",
+			Confidence: 0.8,
+			Source:     "synthesized",
+			CreatedAt:  "2024-01-01",
+			Body:       "Engineer-stage synthesized rule.",
+		},
+		{
+			ID:         "legacy-shared-rule",
+			Stage:      "reviewer",
+			Severity:   "medium",
+			Confidence: 0.8,
+			Source:     "synthesized",
+			CreatedAt:  "2024-01-01",
+			Body:       "Reviewer-stage synthesized rule.",
+		},
+		{
+			ID:         "legacy-shared-rule",
+			Stage:      "global",
+			Severity:   "medium",
+			Confidence: 0.8,
+			Source:     "synthesized",
+			CreatedAt:  "2024-01-01",
+			Body:       "Global synthesized rule.",
+		},
+	} {
+		writeRule(t, dir, rule)
+	}
+
+	database, err := db.New(filepath.Join(dir, "pipeline.db"))
+	if err != nil {
+		t.Fatalf("db.New: %v", err)
+	}
+	defer database.Close()
+
+	now := time.Now()
+	if err := database.RecordEvent(&models.PipelineEvent{
+		IssueID:         1,
+		Repo:            "majiayu000/auto-contributor",
+		IssueNumber:     41,
+		Stage:           "engineer",
+		Round:           1,
+		StartedAt:       now,
+		CompletedAt:     &now,
+		DurationSeconds: 1,
+		Verdict:         "PROCEED",
+		Success:         true,
+		ExperiencesUsed: `["legacy-shared-rule"]`,
+	}); err != nil {
+		t.Fatalf("RecordEvent: %v", err)
+	}
+
+	p := &Pipeline{
+		db:         database,
+		ruleLoader: rules.NewRuleLoader(dir),
+	}
+	if err := p.ruleLoader.Load(); err != nil {
+		t.Fatalf("RuleLoader.Load: %v", err)
+	}
+
+	p.stampRuleValidation(&models.PullRequest{
+		IssueID: 1,
+		PRURL:   "https://github.com/majiayu000/auto-contributor/pull/41",
+	})
+
+	if err := p.ruleLoader.Reload(); err != nil {
+		t.Fatalf("RuleLoader.Reload: %v", err)
+	}
+
+	for _, stage := range []string{"engineer", "global"} {
+		got := p.ruleLoader.ByStageAndID(stage, "legacy-shared-rule")
+		if got == nil {
+			t.Fatalf("rule %s/legacy-shared-rule not found after stamp", stage)
+		}
+		if got.LastValidatedAt != today {
+			t.Errorf("%s last_validated_at = %q, want %q", stage, got.LastValidatedAt, today)
+		}
+	}
+
+	reviewer := p.ruleLoader.ByStageAndID("reviewer", "legacy-shared-rule")
+	if reviewer == nil {
+		t.Fatal("rule reviewer/legacy-shared-rule not found after stamp")
+	}
+	if reviewer.LastValidatedAt != "" {
+		t.Errorf("reviewer last_validated_at = %q, want empty", reviewer.LastValidatedAt)
+	}
+}
