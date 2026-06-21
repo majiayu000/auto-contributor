@@ -91,6 +91,24 @@ func TestBuildResponderCtx_IsolatesGitHubFeedbackPayloads(t *testing.T) {
 	}
 }
 
+func TestResponderPromptDescribesGatedThreadResolution(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "prompts", "responder.md"))
+	if err != nil {
+		t.Fatalf("read responder prompt: %v", err)
+	}
+
+	rendered := string(data)
+	lower := strings.ToLower(rendered)
+	if strings.Contains(lower, "automatically resolve threads you reply to") ||
+		strings.Contains(lower, "automatically resolved") {
+		t.Fatalf("responder prompt must not promise unconditional automatic thread resolution: %s", rendered)
+	}
+
+	if !strings.Contains(rendered, "Thread resolution is a separate gated pipeline action") {
+		t.Fatalf("responder prompt should describe gated thread resolution, got: %s", rendered)
+	}
+}
+
 func TestRunJSONWithPolicy_RecoveryDoesNotEscalateUntrustedPolicy(t *testing.T) {
 	promptsDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(promptsDir, "scout.md"), []byte(`{{.Input}}`), 0644); err != nil {
