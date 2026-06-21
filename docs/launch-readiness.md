@@ -18,7 +18,7 @@ Auto-Contributor performs high-trust actions:
 
 - reads GitHub issues, pull requests, repository metadata, and CI state through
   the authenticated `gh` session;
-- creates local branches, generated commits, and pull requests when `solve` or
+- creates local branches, generated commits, and pull requests when `pipeline` or
   `loop` is run;
 - signs commits with the configured Git identity for DCO compliance;
 - stores local runtime state in `~/.auto-contributor/data.db`.
@@ -37,7 +37,7 @@ go vet ./...
 go build ./...
 go test ./...
 ./auto-contributor discover-smart --topic golang --limit 3 --output issues.json
-./auto-contributor solve --repo owner/repo --issue 123
+./auto-contributor pipeline --repo owner/repo --issue 123
 git status --short
 gh pr view --repo owner/repo --web
 ```

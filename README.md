@@ -44,10 +44,8 @@ github_email: "your-email@example.com"
 claude_timeout: 999m
 claude_max_retries: 2
 
-# Worker settings
-worker_count: 1              # Sequential processing recommended
-worker_queue_size: 5
-issue_check_interval: 60m
+# Pipeline settings
+max_concurrent_pipelines: 1  # Sequential processing recommended for launch proof
 
 # Language filter
 languages:
@@ -92,8 +90,8 @@ log_level: info
 ### Single Issue
 
 ```bash
-# Solve a specific issue
-./auto-contributor solve --repo owner/repo --issue 123
+# Process a specific issue through the pipeline
+./auto-contributor pipeline --repo owner/repo --issue 123
 ```
 
 ### Smart Discovery Only
@@ -111,7 +109,7 @@ log_level: info
 | Command | Description |
 |---------|-------------|
 | `loop` | Continuous discovery and solving (~1 issue/hour) |
-| `solve` | Solve a single specific issue |
+| `pipeline` | Process a single specific issue through the agent pipeline |
 | `discover` | Basic issue discovery |
 | `discover-smart` | Claude-powered intelligent discovery |
 | `stats` | Show statistics |
@@ -199,7 +197,7 @@ you are willing to let create branches, commits, and pull requests.
 
 - It uses the authenticated `gh` session for GitHub API reads and writes.
 - It creates commits and pull requests only through explicit CLI commands such
-  as `solve` or `loop`.
+  as `pipeline` or `loop`.
 - It checks for existing pull requests before starting work on an issue.
 - It signs generated commits with the configured Git identity for DCO workflows.
 - It stores runtime state in the local SQLite database under
@@ -209,7 +207,7 @@ you are willing to let create branches, commits, and pull requests.
 
 Recommended operating limits:
 
-- Start with `worker_count: 1` and one target repository or issue.
+- Start with `max_concurrent_pipelines: 1` and one target repository or issue.
 - Run a dry discovery pass before enabling PR creation.
 - Review generated diffs and PR bodies before broadening repository scope.
 - Use a GitHub token with the narrowest permissions that still allow the
@@ -229,7 +227,7 @@ gh auth status
 ./auto-contributor discover-smart --topic golang --limit 3 --output issues.json
 
 # 3. Run one bounded issue after manually selecting it.
-./auto-contributor solve --repo owner/repo --issue 123
+./auto-contributor pipeline --repo owner/repo --issue 123
 
 # 4. Review local state and the created pull request before continuing.
 git status --short
@@ -267,7 +265,7 @@ Default configuration targets ~1 issue per hour:
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
-| `worker_count` | 1 | Sequential processing |
+| `max_concurrent_pipelines` | 1 | Sequential processing |
 | `interval` | 60min | Discovery cycle interval |
 | `Limit` | 2 | Issues per discovery cycle |
 | `claude_timeout` | 999m | No timeout, let Claude work |
