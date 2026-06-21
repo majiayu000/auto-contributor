@@ -44,10 +44,8 @@ github_email: "your-email@example.com"
 claude_timeout: 999m
 claude_max_retries: 2
 
-# Worker settings
-worker_count: 1              # Sequential processing recommended
-worker_queue_size: 5
-issue_check_interval: 60m
+# Pipeline settings
+max_concurrent_pipelines: 1  # Sequential processing recommended for launch proof
 
 # Language filter
 languages:
@@ -92,8 +90,8 @@ log_level: info
 ### Single Issue
 
 ```bash
-# Solve a specific issue
-./auto-contributor solve --repo owner/repo --issue 123
+# Process a specific issue through the pipeline
+./auto-contributor pipeline --repo owner/repo --issue 123
 ```
 
 ### Smart Discovery Only
@@ -111,7 +109,7 @@ log_level: info
 | Command | Description |
 |---------|-------------|
 | `loop` | Continuous discovery and solving (~1 issue/hour) |
-| `solve` | Solve a single specific issue |
+| `pipeline` | Process a single specific issue through the agent pipeline |
 | `discover` | Basic issue discovery |
 | `discover-smart` | Claude-powered intelligent discovery |
 | `stats` | Show statistics |
@@ -191,13 +189,83 @@ Features:
 - Issue queue
 - PR history
 
+## Safety Boundaries
+
+Auto-Contributor is designed for controlled contribution workflows, not
+unsupervised repository maintenance. Run it from an account and token scope that
+you are willing to let create branches, commits, and pull requests.
+
+- It uses the authenticated `gh` session for GitHub API reads and writes.
+- It creates commits and pull requests only through explicit CLI commands such
+  as `pipeline` or `loop`.
+- It checks for existing pull requests before starting work on an issue.
+- It signs generated commits with the configured Git identity for DCO workflows.
+- It stores runtime state in the local SQLite database under
+  `~/.auto-contributor/`.
+- It does not require GitHub or Claude credentials to be stored in this
+  repository.
+
+Recommended operating limits:
+
+- Start with `max_concurrent_pipelines: 1` and one target repository or issue.
+- Run a dry discovery pass before enabling PR creation.
+- Review generated diffs and PR bodies before broadening repository scope.
+- Use a GitHub token with the narrowest permissions that still allow the
+  intended repositories and pull request actions.
+
+More launch-readiness detail is tracked in `docs/launch-readiness.md`.
+
+## Controlled Single-Issue Flow
+
+This controlled single-issue flow shows the intended reviewable path:
+
+```bash
+# 1. Confirm authentication and repository access.
+gh auth status
+
+# 2. Discover candidates without creating branches or pull requests.
+./auto-contributor discover-smart --topic golang --limit 3 --output issues.json
+
+# 3. Run one bounded issue after manually selecting it.
+./auto-contributor pipeline --repo owner/repo --issue 123
+
+# 4. Review local state and the created pull request before continuing.
+git status --short
+gh pr view --repo owner/repo --web
+```
+
+The CI baseline for this repository is `go vet ./...`, `go build ./...`, and
+`go test ./...`, as defined in `.github/workflows/ci.yml`.
+
+## Limitations and Non-Goals
+
+- It cannot determine whether a maintainer wants a contribution beyond the
+  signals available in issues, labels, existing pull requests, and repository
+  history.
+- It does not bypass branch protections, required reviews, DCO checks, or CI.
+- It does not guarantee that generated pull requests will be accepted.
+- It is not a secrets manager and should not receive GitHub or Claude
+  credentials through committed files.
+- It is not intended for high-risk repositories without human review of issue
+  choice, generated code, and PR content.
+
+## Launch Metadata
+
+- License: MIT, see `LICENSE`.
+- Release notes: see `CHANGELOG.md`.
+- Launch readiness: see `docs/launch-readiness.md`.
+- Suggested GitHub topics: `automation`, `github`, `claude-code`, `pull-requests`,
+  `go`.
+- Initial release recommendation: create a `v0.1.0` GitHub release from a
+  reviewed main branch after the launch-readiness PR merges.
+
 ## Rate Limiting
 
 Default configuration targets ~1 issue per hour:
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
-| `worker_count` | 1 | Sequential processing |
+| `max_concurrent_pipelines` | 1 | Sequential processing |
 | `interval` | 60min | Discovery cycle interval |
 | `Limit` | 2 | Issues per discovery cycle |
 | `claude_timeout` | 999m | No timeout, let Claude work |
