@@ -32,6 +32,21 @@ go build -o auto-contributor ./cmd/auto-contributor
 ./auto-contributor version
 ```
 
+### Contributor Skill
+
+This repository also ships the manual `contributor` Skill that informed the
+automated pipeline safeguards. Install it for Mirasim-compatible agents:
+
+```bash
+mkdir -p ~/.mirasim/skills
+cp -R skills/contributor ~/.mirasim/skills/
+```
+
+The Skill guides an agent through issue reconnaissance, maintainer
+pre-communication, repository setup, implementation, verification, and pull
+request submission. It complements the `auto-contributor` binary; installing
+it is optional and does not change the binary's behavior.
+
 ## Configuration
 
 Create `~/.auto-contributor/config.yaml`:
