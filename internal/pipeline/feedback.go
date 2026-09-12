@@ -384,17 +384,18 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		"round":    pr.FeedbackRound + 1,
 	}).Info("processing feedback")
 
-	// Run responder agent
+	// Run responder agent. Fail closed on parse/run errors: do not stamp
+	// UpdatePRFeedbackCheck or advance feedback_round, or hasNew will treat the
+	// same human reviews/comments as already seen and silently drop them.
 	start := time.Now()
 	var result FeedbackResult
 	raw, err := p.runner.RunJSONWithPolicy(ctx, "responder", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
-		log.WithError(err).Warn("responder parse error, treating as no_action")
+		log.WithError(err).Warn("responder parse error, failing closed without stamping feedback check")
 		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, "", false, "", err.Error(), responderRules)
-		result.Action = "no_action"
-	} else {
-		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
+		return fmt.Errorf("responder parse error at feedback round %d for %s: %w", pr.FeedbackRound+1, pr.PRURL, err)
 	}
+	p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
 
 	newRound := pr.FeedbackRound + 1
 	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
