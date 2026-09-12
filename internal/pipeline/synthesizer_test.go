@@ -1,10 +1,18 @@
 package pipeline
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/majiayu000/auto-contributor/internal/config"
+	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/internal/rules"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
+	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
 // newTestPipeline returns a Pipeline wired to a temp rules directory.
@@ -36,6 +44,68 @@ func loadRule(t *testing.T, rl *rules.RuleLoader, id string) *rules.Rule {
 		t.Fatalf("rule %q not found after reload", id)
 	}
 	return r
+}
+
+// TestSynthesizeForStage_UsesUntrustedIsolatedWorkDir ensures the synthesizer does not
+// inherit RunJSON's trusted default or share the WorkspaceDir blast radius (SEC-07).
+func TestSynthesizeForStage_UsesUntrustedIsolatedWorkDir(t *testing.T) {
+	promptsDir := t.TempDir()
+	writePromptTemplate(t, promptsDir, "synthesizer", `synthesize {{.Stage}}`)
+
+	ps := prompt.NewStore(promptsDir)
+	if err := ps.Load(); err != nil {
+		t.Fatalf("load prompts: %v", err)
+	}
+
+	rt := &stubRuntime{outputs: []stubOutput{
+		{output: `{"new_rules":[],"updated_rules":[],"retired_rules":[],"summary":"ok"}`},
+	}}
+	workspaceDir := t.TempDir()
+	rl := rules.NewRuleLoader(t.TempDir())
+	if err := rl.Load(); err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	p := &Pipeline{
+		cfg:        &config.Config{WorkspaceDir: workspaceDir},
+		runner:     NewAgentRunner(ps, rt, 0),
+		ruleLoader: rl,
+	}
+
+	events := []*models.PipelineEvent{{
+		Stage:         "scout",
+		Repo:          "owner/repo",
+		IssueNumber:   96,
+		Verdict:       "PROCEED",
+		OutcomeLabel:  "merged",
+		OutputSummary: "untrusted prior agent summary",
+	}}
+	if _, err := p.synthesizeForStage(context.Background(), "scout", events); err != nil {
+		t.Fatalf("synthesizeForStage: %v", err)
+	}
+
+	if len(rt.policies) != 1 {
+		t.Fatalf("runtime calls = %d, want 1; policies=%v", len(rt.policies), rt.policies)
+	}
+	if rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+		t.Fatalf("policy = %q, want %q", rt.policies[0], runtime.ExecutionPolicyUntrusted)
+	}
+	if len(rt.workDirs) != 1 {
+		t.Fatalf("workDirs = %v, want 1 entry", rt.workDirs)
+	}
+	workDir := rt.workDirs[0]
+	if workDir == workspaceDir {
+		t.Fatalf("workDir == WorkspaceDir (%q); want isolated temp dir", workspaceDir)
+	}
+	if workDir == "" || strings.HasPrefix(workDir, workspaceDir+string(os.PathSeparator)) {
+		t.Fatalf("workDir %q must not be under WorkspaceDir %q", workDir, workspaceDir)
+	}
+	if filepath.Dir(workDir) == workspaceDir {
+		t.Fatalf("workDir %q is a child of WorkspaceDir %q", workDir, workspaceDir)
+	}
+	if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+		t.Fatalf("synthesizer workdir should be removed after call, stat err=%v", err)
+	}
 }
 
 // TestApplyDecay_ReducesConfidenceWithoutValidation verifies that a synthesized rule

@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/majiayu000/auto-contributor/internal/rules"
+	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -119,8 +121,18 @@ func (p *Pipeline) synthesizeForStage(ctx context.Context, stage string, events 
 		"SuccessRate":     fmt.Sprintf("%.1f", successRate),
 	}
 
+	// Synthesis prompts embed OutputSummary/ErrorMessage from earlier agents that
+	// processed untrusted GitHub content. Run untrusted and in an isolated temp
+	// workdir — not WorkspaceDir — so privileged CLI flags stay off and the blast
+	// radius stays narrower than the shared workspace parent of cloned repos.
+	workDir, err := os.MkdirTemp("", "auto-contributor-synthesizer-*")
+	if err != nil {
+		return nil, fmt.Errorf("create synthesizer workdir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
 	var result SynthesizerResult
-	if _, err := p.runner.RunJSON(ctx, "synthesizer", p.cfg.WorkspaceDir, tmplCtx, &result); err != nil {
+	if _, err := p.runner.RunJSONWithPolicy(ctx, "synthesizer", workDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		return nil, fmt.Errorf("synthesizer agent failed: %w", err)
 	}
 
