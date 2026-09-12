@@ -317,6 +317,121 @@ func TestRuleRetrieverRetrieveFiltersStagesAndReranks(t *testing.T) {
 	}
 }
 
+func TestRuleRetrieverRetrieveEmptyCandidatesFailsClosedWhenInjectableRulesExist(t *testing.T) {
+	dir := t.TempDir()
+	writeRuleYAML(t, dir, "engineer", "injectable.yaml",
+		"id: injectable\nstage: engineer\nconfidence: 0.9\nbody: should fall back via PromptSnapshot\n")
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.SemanticRetrievalEnabled = true
+	cfg.SemanticRetrievalProvider = "local"
+	cfg.SemanticRetrievalModel = "hash-v1"
+
+	retriever, err := NewRuleRetriever(cfg, &fakeRuleEmbeddingStore{isPostgres: true}, rl)
+	if err != nil {
+		t.Fatalf("NewRuleRetriever() failed: %v", err)
+	}
+
+	ids, promptText, err := retriever.Retrieve("engineer", &models.Issue{
+		Repo:        "owner/repo",
+		Title:       "panic in parser",
+		IssueNumber: 12,
+	})
+	if err == nil {
+		t.Fatal("Retrieve() error = nil, want empty-candidate fail-closed error")
+	}
+	if !strings.Contains(err.Error(), "no embedding candidates") {
+		t.Fatalf("Retrieve() error = %q, want no embedding candidates", err.Error())
+	}
+	if ids != nil || promptText != "" {
+		t.Fatalf("Retrieve() = (%v, %q), want empty selection with error", ids, promptText)
+	}
+}
+
+func TestRuleRetrieverRetrieveEmptyAfterFilterFailsClosedWhenInjectableRulesExist(t *testing.T) {
+	dir := t.TempDir()
+	writeRuleYAML(t, dir, "engineer", "injectable.yaml",
+		"id: injectable\nstage: engineer\nconfidence: 0.9\nbody: should fall back via PromptSnapshot\n")
+	writeRuleYAML(t, dir, "engineer", "low-conf.yaml",
+		"id: low-conf\nstage: engineer\nconfidence: 0.1\nbody: below injection threshold\n")
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	store := &fakeRuleEmbeddingStore{
+		isPostgres: true,
+		candidates: []db.RuleEmbeddingCandidate{
+			{RuleKey: "engineer/low-conf", Stage: "engineer", Similarity: 0.99},
+			{RuleKey: "reviewer/offstage", Stage: "reviewer", Similarity: 0.98},
+		},
+	}
+
+	cfg := config.Default()
+	cfg.SemanticRetrievalEnabled = true
+	cfg.SemanticRetrievalProvider = "local"
+	cfg.SemanticRetrievalModel = "hash-v1"
+
+	retriever, err := NewRuleRetriever(cfg, store, rl)
+	if err != nil {
+		t.Fatalf("NewRuleRetriever() failed: %v", err)
+	}
+
+	ids, promptText, err := retriever.Retrieve("engineer", &models.Issue{
+		Repo:        "owner/repo",
+		Title:       "panic in parser",
+		IssueNumber: 12,
+	})
+	if err == nil {
+		t.Fatal("Retrieve() error = nil, want empty-after-filter fail-closed error")
+	}
+	if !strings.Contains(err.Error(), "no injectable rules after filtering") {
+		t.Fatalf("Retrieve() error = %q, want empty-after-filter reason", err.Error())
+	}
+	if ids != nil || promptText != "" {
+		t.Fatalf("Retrieve() = (%v, %q), want empty selection with error", ids, promptText)
+	}
+}
+
+func TestRuleRetrieverRetrieveEmptyOKWhenNoInjectableRules(t *testing.T) {
+	dir := t.TempDir()
+	writeRuleYAML(t, dir, "engineer", "low-conf.yaml",
+		"id: low-conf\nstage: engineer\nconfidence: 0.1\nbody: below injection threshold\n")
+
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.SemanticRetrievalEnabled = true
+	cfg.SemanticRetrievalProvider = "local"
+	cfg.SemanticRetrievalModel = "hash-v1"
+
+	retriever, err := NewRuleRetriever(cfg, &fakeRuleEmbeddingStore{isPostgres: true}, rl)
+	if err != nil {
+		t.Fatalf("NewRuleRetriever() failed: %v", err)
+	}
+
+	ids, promptText, err := retriever.Retrieve("engineer", &models.Issue{
+		Repo:        "owner/repo",
+		Title:       "panic in parser",
+		IssueNumber: 12,
+	})
+	if err != nil {
+		t.Fatalf("Retrieve() failed: %v", err)
+	}
+	if ids != nil || promptText != "" {
+		t.Fatalf("Retrieve() = (%v, %q), want empty success when loader has nothing injectable", ids, promptText)
+	}
+}
+
 func TestRuleRetrieverSyncUpsertsChangedAndDeletesMissing(t *testing.T) {
 	dir := t.TempDir()
 	writeRuleYAML(t, dir, "global", "keep.yaml",

@@ -132,7 +132,10 @@ func (p *Pipeline) syncRuleRetriever(reason string) {
 		return
 	}
 	if err := p.ruleRetriever.Sync(); err != nil {
-		log.WithFields(Fields{"reason": reason, "error": err}).Warn("failed to sync semantic rule index")
+		// Match init degradation: disable the retriever so agents fall back to
+		// full PromptSnapshot instead of continuing with a stale/empty index.
+		log.WithFields(Fields{"reason": reason, "error": err}).Warn("failed to sync semantic rule index, falling back to full prompt snapshots")
+		p.ruleRetriever = nil
 	}
 }
 

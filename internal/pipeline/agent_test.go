@@ -448,9 +448,10 @@ func TestRunScoutFailsBeforeRuntimeWhenPrecollectionFails(t *testing.T) {
 }
 
 type stubStageRuleRetriever struct {
-	ids    []string
-	prompt string
-	err    error
+	ids     []string
+	prompt  string
+	err     error
+	syncErr error
 }
 
 func (s stubStageRuleRetriever) Retrieve(stage string, issue *models.Issue) ([]string, string, error) {
@@ -458,7 +459,79 @@ func (s stubStageRuleRetriever) Retrieve(stage string, issue *models.Issue) ([]s
 }
 
 func (s stubStageRuleRetriever) Sync() error {
-	return nil
+	return s.syncErr
+}
+
+func TestSyncRuleRetrieverDisablesOnError(t *testing.T) {
+	p := &Pipeline{
+		ruleRetriever: stubStageRuleRetriever{syncErr: errors.New("sync boom")},
+	}
+	p.syncRuleRetriever("post_synthesis_reload")
+	if p.ruleRetriever != nil {
+		t.Fatal("ruleRetriever still set after Sync failure; want nil fallback like init")
+	}
+}
+
+func TestGetRulesForStageIssueFallsBackOnRetrieveError(t *testing.T) {
+	rulesDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rulesDir, "scout"), 0755); err != nil {
+		t.Fatalf("mkdir rules dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "scout", "full-load.yaml"), []byte(
+		"id: full-load\nstage: scout\nconfidence: 0.9\nbody: full load fallback text\n",
+	), 0644); err != nil {
+		t.Fatalf("write rule: %v", err)
+	}
+
+	rl := rules.NewRuleLoader(rulesDir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	p := &Pipeline{
+		ruleLoader:    rl,
+		ruleRetriever: stubStageRuleRetriever{err: errors.New("empty index")},
+	}
+
+	ids, promptText := p.getRulesForStageIssue("scout", &models.Issue{Repo: "owner/repo", IssueNumber: 1})
+	if len(ids) == 0 || !strings.Contains(promptText, "full load fallback text") {
+		t.Fatalf("got ids=%v prompt=%q, want PromptSnapshot fallback", ids, promptText)
+	}
+}
+
+func TestGetRulesForStageIssueUsesPromptSnapshotAfterSyncDisabled(t *testing.T) {
+	rulesDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rulesDir, "scout"), 0755); err != nil {
+		t.Fatalf("mkdir rules dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "scout", "full-load.yaml"), []byte(
+		"id: full-load\nstage: scout\nconfidence: 0.9\nbody: full load fallback text\n",
+	), 0644); err != nil {
+		t.Fatalf("write rule: %v", err)
+	}
+
+	rl := rules.NewRuleLoader(rulesDir)
+	if err := rl.Load(); err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+
+	p := &Pipeline{
+		ruleLoader: rl,
+		ruleRetriever: stubStageRuleRetriever{
+			ids:     []string{"scout/stale"},
+			prompt:  "stale semantic text",
+			syncErr: errors.New("sync boom"),
+		},
+	}
+	p.syncRuleRetriever("post_decay_reload")
+
+	ids, promptText := p.getRulesForStageIssue("scout", &models.Issue{Repo: "owner/repo", IssueNumber: 2})
+	if strings.Contains(promptText, "stale semantic text") {
+		t.Fatalf("still using semantic retriever after Sync failure:\n%s", promptText)
+	}
+	if len(ids) == 0 || !strings.Contains(promptText, "full load fallback text") {
+		t.Fatalf("got ids=%v prompt=%q, want PromptSnapshot after Sync disable", ids, promptText)
+	}
 }
 
 func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing.T) {

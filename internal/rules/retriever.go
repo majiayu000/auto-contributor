@@ -144,7 +144,7 @@ func (rr *RuleRetriever) Retrieve(stage string, issue *models.Issue) ([]string, 
 		return nil, "", err
 	}
 	if len(candidates) == 0 {
-		return nil, "", nil
+		return rr.emptySemanticSelection(stage, "no embedding candidates")
 	}
 
 	type rankedRule struct {
@@ -203,7 +203,21 @@ func (rr *RuleRetriever) Retrieve(stage string, issue *models.Issue) ([]string, 
 	}
 
 	ids, promptText := promptSnapshotForRules(selected)
+	if len(ids) == 0 {
+		return rr.emptySemanticSelection(stage, "no injectable rules after filtering")
+	}
 	return ids, promptText, nil
+}
+
+// emptySemanticSelection fails closed when YAML rules would otherwise be
+// injectable via PromptSnapshot, so callers fall back instead of injecting
+// an empty rules section.
+func (rr *RuleRetriever) emptySemanticSelection(stage, reason string) ([]string, string, error) {
+	fallbackIDs, _ := rr.loader.PromptSnapshot(stage)
+	if len(fallbackIDs) > 0 {
+		return nil, "", fmt.Errorf("semantic retrieval empty for stage %q (%s) while loader has %d injectable rule(s)", stage, reason, len(fallbackIDs))
+	}
+	return nil, "", nil
 }
 
 func buildRuleEmbeddingText(rule *Rule) string {
