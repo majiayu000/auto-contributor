@@ -21,11 +21,12 @@ import (
 var _ runtime.Runtime = (*stubRuntime)(nil)
 
 type stubRuntime struct {
-	outputs  []stubOutput
-	index    int
-	policies []runtime.ExecutionPolicy
-	prompts  []string
-	workDirs []string
+	outputs   []stubOutput
+	index     int
+	policies  []runtime.ExecutionPolicy
+	prompts   []string
+	workDirs  []string
+	onExecute func(workDir string)
 }
 
 type stubOutput struct {
@@ -44,6 +45,9 @@ func (r *stubRuntime) Execute(ctx context.Context, workDir string, prompt string
 	r.policies = append(r.policies, policy)
 	r.prompts = append(r.prompts, prompt)
 	r.workDirs = append(r.workDirs, workDir)
+	if r.onExecute != nil {
+		r.onExecute(workDir)
+	}
 	result := r.outputs[r.index]
 	r.index++
 	return result.output, result.err
@@ -287,6 +291,92 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 	}
 
 	assertReviewerFailureEvent(t, database, issue.ID, "parse reviewer JSON output")
+}
+
+func TestRunScoutUsesIsolatedWorkDir(t *testing.T) {
+	runtimeErr := errors.New("scout runtime failed")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "runtime failure", err: runtimeErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceDir := t.TempDir()
+			rt := &stubRuntime{
+				outputs: []stubOutput{{output: `{"verdict":"PROCEED"}`, err: tc.err}},
+				onExecute: func(workDir string) {
+					if workDir == "" || workDir == workspaceDir || strings.HasPrefix(workDir, workspaceDir+string(os.PathSeparator)) {
+						t.Fatalf("scout workdir %q must be outside WorkspaceDir %q", workDir, workspaceDir)
+					}
+					entries, err := os.ReadDir(workDir)
+					if err != nil {
+						t.Fatalf("read scout workdir during execution: %v", err)
+					}
+					if len(entries) != 0 {
+						t.Fatalf("scout workdir contains %d entries, want empty", len(entries))
+					}
+				},
+			}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{WorkspaceDir: workspaceDir}
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatalf("load scout prompt: %v", err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "untrusted issue"}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+
+			result, err := p.runScout(context.Background(), issue)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("runScout error = %v, want %v", err, tc.err)
+			}
+			if tc.err == nil && (result == nil || result.Verdict != "PROCEED") {
+				t.Fatalf("runScout result = %+v, want PROCEED", result)
+			}
+			if tc.err != nil && result != nil {
+				t.Fatalf("runScout result = %+v, want nil on failure", result)
+			}
+			if len(rt.workDirs) != 1 || len(rt.policies) != 1 || rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+				t.Fatalf("runtime calls = %v, policies = %v, want one untrusted call", rt.workDirs, rt.policies)
+			}
+			if _, err := os.Stat(rt.workDirs[0]); !os.IsNotExist(err) {
+				t.Fatalf("scout workdir should be removed after return, stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRunScoutFailsBeforeRuntimeWhenWorkDirCreationFails(t *testing.T) {
+	rt := &stubRuntime{}
+	p, database := newLoopTestPipeline(t, rt)
+	p.cfg = &config.Config{WorkspaceDir: t.TempDir()}
+	issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "untrusted issue"}
+	if err := database.CreateIssue(issue); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+
+	result, err := p.runScout(context.Background(), issue)
+	if result != nil || err == nil || !strings.Contains(err.Error(), "create scout workdir") {
+		t.Fatalf("runScout = (%+v, %v), want workdir creation failure", result, err)
+	}
+	if rt.index != 0 {
+		t.Fatalf("runtime calls = %d, want 0", rt.index)
+	}
+	events, err := database.GetEventsByIssue(issue.ID)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	if len(events) != 1 || events[0].Stage != "scout" || events[0].Success || events[0].Verdict != "error" || !strings.Contains(events[0].ErrorMessage, "create scout workdir") {
+		t.Fatalf("events = %+v, want recorded scout workdir creation failure", events)
+	}
 }
 
 func TestRunScoutUsesSemanticRetrieverRuleSelection(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -39,8 +40,22 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 		tmplCtx["PastLessons"] = formatLessonsForPrompt(lessons)
 	}
 
+	// Scout consumes untrusted GitHub data before any clone is needed. Keep its
+	// working directory outside the shared parent of issue workspaces.
+	workDir, err := os.MkdirTemp("", "auto-contributor-scout-*")
+	if err != nil {
+		err = fmt.Errorf("create scout workdir: %w", err)
+		p.recordEvent(issue, nil, "scout", 1, start, "error", false, "", err.Error(), stageRules)
+		return nil, err
+	}
+	defer func() {
+		if err := os.RemoveAll(workDir); err != nil {
+			log.WithError(err).WithField("workdir", workDir).Warn("failed to remove scout workspace")
+		}
+	}()
+
 	var result ScoutResult
-	if _, err := p.runner.RunJSONWithPolicy(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
+	if _, err := p.runner.RunJSONWithPolicy(ctx, "scout", workDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
