@@ -61,6 +61,80 @@ exit "$GH_TEST_EXIT"
 	}
 }
 
+func TestGetPRIssueCommentsPagination(t *testing.T) {
+	firstPage := `[{"id":1,"body":"Please sign the CLA.","created_at":"2026-09-29T00:00:00Z","user":{"login":"cla-assistant[bot]"}}]`
+	for _, tc := range []struct {
+		name  string
+		pages string
+		want  []IssueComment
+	}{
+		{"empty", `[[]]`, nil},
+		{"single page", `[` + firstPage + `]`, []IssueComment{{ID: 1, Author: "cla-assistant[bot]", Body: "Please sign the CLA.", CreatedAt: "2026-09-29T00:00:00Z"}}},
+		{"multiple pages", `[` + firstPage + `,[{"id":2,"body":"Maintainer feedback","created_at":"2026-09-30T00:00:00Z","user":{"login":"maintainer"}}],[{"id":3,"body":"All contributors have signed the CLA.","created_at":"2026-09-30T01:00:00Z","user":{"login":"cla-assistant[bot]"}}]]`, []IssueComment{
+			{ID: 1, Author: "cla-assistant[bot]", Body: "Please sign the CLA.", CreatedAt: "2026-09-29T00:00:00Z"},
+			{ID: 2, Author: "maintainer", Body: "Maintainer feedback", CreatedAt: "2026-09-30T00:00:00Z"},
+			{ID: 3, Author: "cla-assistant[bot]", Body: "All contributors have signed the CLA.", CreatedAt: "2026-09-30T01:00:00Z"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeGH(t, `#!/bin/sh
+case "$*" in
+  "api repos/owner/repo/issues/42/comments") printf '%s' "$GH_TEST_FIRST_PAGE" ;;
+  "api repos/owner/repo/issues/42/comments --paginate --slurp") printf '%s' "$GH_TEST_COMMENT_PAGES" ;;
+  *) printf 'unexpected args: %s\n' "$*" >&2; exit 1 ;;
+esac
+`)
+			t.Setenv("GH_TEST_FIRST_PAGE", firstPage)
+			if tc.name == "empty" {
+				t.Setenv("GH_TEST_FIRST_PAGE", "[]")
+			}
+			t.Setenv("GH_TEST_COMMENT_PAGES", tc.pages)
+			comments, err := (&Client{}).GetPRIssueComments(context.Background(), "owner/repo", 42)
+			if err != nil {
+				t.Fatalf("GetPRIssueComments: %v", err)
+			}
+			if !reflect.DeepEqual(comments, tc.want) {
+				t.Fatalf("comments = %+v, want %+v", comments, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetPRIssueCommentsPaginationErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		output    string
+		fail      string
+		wantError string
+	}{
+		{"later page fetch failure", `[[{"id":1}]]`, "1", "get issue comments"},
+		{"invalid later page", `[[{"id":1}],{"message":"unexpected response"}]`, "0", "parse issue comments"},
+		{"truncated later page", `[[{"id":1}],[`, "0", "parse issue comments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeGH(t, `#!/bin/sh
+printf '%s' "$GH_TEST_COMMENT_PAGES"
+if [ "$GH_TEST_COMMENT_FAIL" = "1" ]; then
+  printf 'later page fetch failed\n' >&2
+  exit 1
+fi
+`)
+			t.Setenv("GH_TEST_COMMENT_PAGES", tc.output)
+			t.Setenv("GH_TEST_COMMENT_FAIL", tc.fail)
+			comments, err := (&Client{}).GetPRIssueComments(context.Background(), "owner/repo", 42)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) || comments != nil {
+				t.Fatalf("comments/error = %+v/%v, want nil/%q", comments, err, tc.wantError)
+			}
+			if tc.fail == "1" {
+				var exitError *exec.ExitError
+				if !errors.As(err, &exitError) || !strings.Contains(err.Error(), "later page fetch failed") {
+					t.Fatalf("fetch error lost CLI cause or stderr: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestParsePRInfoOutput_PopulatesLockReason(t *testing.T) {
 	data := []byte(`{
 		"state":"CLOSED",

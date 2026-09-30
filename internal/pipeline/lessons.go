@@ -47,6 +47,7 @@ func extractLessons(
 	repo string,
 	reviews []ghclient.PRReview,
 	comments []ghclient.PRReviewComment,
+	contributor string,
 ) []*models.ReviewLesson {
 	var lessons []*models.ReviewLesson
 
@@ -78,7 +79,7 @@ func extractLessons(
 		if c.Body == "" || len(c.Body) < 10 {
 			continue
 		}
-		if isBot(c.Author) {
+		if isBot(c.Author) || (contributor != "" && strings.EqualFold(c.Author, contributor)) {
 			continue
 		}
 
@@ -106,13 +107,14 @@ func extractLessonsFromIssueComments(
 	pr *models.PullRequest,
 	repo string,
 	comments []ghclient.IssueComment,
+	contributor string,
 ) []*models.ReviewLesson {
 	var lessons []*models.ReviewLesson
 	for _, c := range comments {
 		if c.Body == "" || len(c.Body) < 20 {
 			continue
 		}
-		if isBot(c.Author) || c.Body == responderCloseComment {
+		if isBot(c.Author) || c.Body == responderCloseComment || (contributor != "" && strings.EqualFold(c.Author, contributor)) {
 			continue
 		}
 		category := categorizeComment(c.Body)
@@ -216,11 +218,11 @@ func (p *Pipeline) storeLessons(pr *models.PullRequest, prRepo string, prInfo *g
 		return nil
 	}
 
-	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments)
+	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments, p.cfg.GitHubUsername)
 
 	// Also extract from issue comments when PR was closed without merge
 	if prInfo.State == "CLOSED" {
-		lessons = append(lessons, extractLessonsFromIssueComments(pr, prRepo, issueComments)...)
+		lessons = append(lessons, extractLessonsFromIssueComments(pr, prRepo, issueComments, p.cfg.GitHubUsername)...)
 	}
 
 	if len(lessons) > 0 {

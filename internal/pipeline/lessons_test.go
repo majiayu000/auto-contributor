@@ -18,6 +18,43 @@ import (
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
+func TestStoreLessonsExcludesContributorReplies(t *testing.T) {
+	for _, author := range []string{"contributor", "CONTRIBUTOR", "contributor-bot"} {
+		t.Run(author, func(t *testing.T) {
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, _ := newResponderLearningTestPipeline(t, database, issue, pr)
+			p.cfg.GitHubUsername = strings.ToLower(author)
+			inline := []ghclient.PRReviewComment{
+				{Author: "maintainer", Body: "Please add a regression test for the close path."},
+				{Author: author, Body: "fixed the incorrect logic and added tests"},
+			}
+			comments := []ghclient.IssueComment{
+				{Author: "maintainer", Body: "Please keep this fix within the requested scope."},
+				{Author: author, Body: "fixed the incorrect logic and added tests"},
+			}
+			if err := p.storeLessons(pr, issue.Repo, &ghclient.PRInfo{State: "CLOSED"}, inline, comments); err != nil {
+				t.Fatal(err)
+			}
+			lessons, err := database.GetRecentLessons(10)
+			if err != nil || len(lessons) != 2 {
+				t.Fatalf("lessons = %+v, %v, want two maintainer lessons", lessons, err)
+			}
+			for _, lesson := range lessons {
+				if lesson.Reviewer != "maintainer" || strings.Contains(lesson.Lesson, "incorrect logic") {
+					t.Errorf("contributor reply was learned: %+v", lesson)
+				}
+			}
+			if err := p.storeLessons(pr, issue.Repo, &ghclient.PRInfo{State: "CLOSED"}, inline, comments); err != nil {
+				t.Fatal(err)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 2 {
+				t.Errorf("lesson retry = %d, %v, want two unchanged lessons", count, err)
+			}
+		})
+	}
+}
+
 func TestProcessPRCommentFetchFailureRemainsRetryable(t *testing.T) {
 	for _, tc := range []struct {
 		name, state, author, body, label string
@@ -48,7 +85,10 @@ case "$*" in
       printf 'temporary comment fetch failure\n' >&2
       exit 1
     fi
-    printf '%s' "$GH_TEST_ISSUE_COMMENTS"
+    case "$*" in
+      *"--paginate --slurp"*) printf '%s' "[$GH_TEST_ISSUE_COMMENTS]" ;;
+      *) printf '%s' "$GH_TEST_ISSUE_COMMENTS" ;;
+    esac
     ;;
   "api repos/owner/repo/pulls/42/comments"*)
     if [ "$GH_TEST_FAIL_REVIEW_COMMENTS" = "1" ]; then
