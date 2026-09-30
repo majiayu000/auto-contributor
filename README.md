@@ -2,6 +2,8 @@
 
 Automated GitHub contribution bot powered by Claude Code CLI. Discovers issues, creates fixes, and submits PRs automatically.
 
+[Installation](#installation) · [Controlled quick start](#controlled-single-issue-flow) · [Launch-readiness notes](docs/launch-readiness.md)
+
 ## Features
 
 - **Claude-Powered Discovery**: Uses Claude Code to intelligently find and analyze GitHub issues
@@ -14,7 +16,7 @@ Automated GitHub contribution bot powered by Claude Code CLI. Discovers issues, 
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.24+ (the repository selects Go 1.24.11 in `go.mod`)
 - [Claude Code CLI](https://claude.ai/code) - `claude` command available in PATH
 - [GitHub CLI](https://cli.github.com/) - `gh` command authenticated
 
