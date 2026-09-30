@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
+	"github.com/majiayu000/auto-contributor/internal/prompt"
+	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -156,6 +159,151 @@ func TestFinalizeResponderActionCloseFailureLeavesPRRetryable(t *testing.T) {
 	}
 }
 
+func TestHandleOpenResponderFailureKeepsFeedbackRetryable(t *testing.T) {
+	runtimeErr := errors.New("responder runtime failed")
+	cases := []struct {
+		name    string
+		outputs []stubOutput
+		wantErr error
+	}{
+		{name: "parse failure", outputs: []stubOutput{{output: "not json at all"}, {output: "still not json"}}},
+		{name: "runtime failure", outputs: []stubOutput{{err: runtimeErr}}, wantErr: runtimeErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeGHForFeedbackHandleOpen(t)
+
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			lastCheck := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+			pr.FeedbackRound = 2
+			pr.LastFeedbackCheckAt = &lastCheck
+			if _, err := database.Exec("UPDATE pull_requests SET feedback_round = ?, last_feedback_check_at = ? WHERE id = ?", pr.FeedbackRound, lastCheck, pr.ID); err != nil {
+				t.Fatalf("seed feedback checkpoint: %v", err)
+			}
+			_, initialRound, initialCheck := getFeedbackPRState(t, database, pr.ID)
+
+			workspaceRoot := t.TempDir()
+			cfg := &config.Config{
+				WorkspaceDir:   workspaceRoot,
+				GitHubUsername: "tester",
+			}
+
+			// Pre-seed the PR workspace so preparePRWorkspace does not need to clone.
+			remoteDir := createBareRepo(t)
+			seedDir := filepath.Join(t.TempDir(), "seed")
+			runGitCommand(t, "", "init", "--initial-branch=main", seedDir)
+			runGitCommand(t, seedDir, "config", "user.name", "Test User")
+			runGitCommand(t, seedDir, "config", "user.email", "test@example.com")
+			writeFile(t, filepath.Join(seedDir, "tracked.txt"), "main\n")
+			runGitCommand(t, seedDir, "add", "tracked.txt")
+			runGitCommand(t, seedDir, "commit", "-m", "main")
+			runGitCommand(t, seedDir, "remote", "add", "origin", remoteDir)
+			runGitCommand(t, seedDir, "push", "origin", "main")
+			runGitCommand(t, seedDir, "checkout", "-b", pr.BranchName)
+			writeFile(t, filepath.Join(seedDir, "tracked.txt"), "branch\n")
+			runGitCommand(t, seedDir, "commit", "-am", "branch")
+			runGitCommand(t, seedDir, "push", "origin", pr.BranchName)
+
+			workspacePath := filepath.Join(workspaceRoot, "owner-repo-70")
+			runGitCommand(t, "", "clone", remoteDir, workspacePath)
+			runGitCommand(t, workspacePath, "remote", "add", "fork", remoteDir)
+
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "responder", `responder {{.PRNumber}}`)
+			ps := prompt.NewStore(promptsDir)
+			if err := ps.Load(); err != nil {
+				t.Fatalf("load prompts: %v", err)
+			}
+			rl := rules.NewRuleLoader(t.TempDir())
+			if err := rl.Load(); err != nil {
+				t.Fatalf("load rules: %v", err)
+			}
+
+			rt := &stubRuntime{outputs: append(tc.outputs, stubOutput{output: `{"action":"no_action"}`})}
+			p := &Pipeline{
+				cfg:        cfg,
+				db:         database,
+				gh:         ghclient.New(cfg),
+				prompts:    ps,
+				runner:     NewAgentRunner(ps, rt, 0),
+				ruleLoader: rl,
+			}
+
+			prInfo := &ghclient.PRInfo{
+				State:       "OPEN",
+				IsDraft:     false,
+				HeadRefName: pr.BranchName,
+				Reviews: []ghclient.PRReview{
+					{
+						Author:      "maintainer",
+						State:       "CHANGES_REQUESTED",
+						Body:        "Please fix the silent skip on responder parse failure.",
+						SubmittedAt: lastCheck.Add(time.Hour).Format(time.RFC3339),
+					},
+				},
+			}
+
+			err := p.handleOpen(context.Background(), pr, issue.Repo, prInfo)
+			if err == nil {
+				t.Error("handleOpen error = nil, want responder failure")
+			} else if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("handleOpen error = %v, want wrapped %v", err, tc.wantErr)
+			} else if tc.wantErr == nil && !strings.Contains(err.Error(), "parse responder JSON output") {
+				t.Errorf("handleOpen error = %v, want responder JSON parse failure", err)
+			}
+
+			status, round, checked := getFeedbackPRState(t, database, pr.ID)
+			if status != string(models.PRStatusOpen) {
+				t.Fatalf("status = %q, want %q", status, models.PRStatusOpen)
+			}
+			if round != initialRound {
+				t.Errorf("feedback_round = %d, want %d after responder failure", round, initialRound)
+			}
+			if checked != initialCheck {
+				t.Errorf("last_feedback_check_at = %+v, want unchanged %+v after responder failure", checked, initialCheck)
+			}
+
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil {
+				t.Fatalf("get events: %v", err)
+			}
+			found := false
+			for _, event := range events {
+				if event.Stage != "responder" {
+					continue
+				}
+				found = true
+				if event.Success {
+					t.Fatal("responder event success=true, want false")
+				}
+				if event.ErrorMessage == "" {
+					t.Fatal("responder event missing error_message")
+				}
+			}
+			if !found {
+				t.Fatal("expected responder failure event, found none")
+			}
+
+			// Reload the persisted checkpoint as the feedback loop does on the next poll.
+			prs, err := database.GetOpenPRs()
+			if err != nil || len(prs) != 1 {
+				t.Fatalf("reload open PRs: count=%d, error=%v", len(prs), err)
+			}
+			if err := p.handleOpen(context.Background(), prs[0], issue.Repo, prInfo); err != nil {
+				t.Fatalf("retry same feedback: %v", err)
+			}
+			if rt.index != len(tc.outputs)+1 {
+				t.Errorf("runtime calls = %d, want %d to process the same feedback again", rt.index, len(tc.outputs)+1)
+			}
+			_, round, checked = getFeedbackPRState(t, database, pr.ID)
+			if round != initialRound+1 || !checked.Valid || checked == initialCheck {
+				t.Errorf("successful no_action checkpoint: round=%d, checked=%+v; want round=%d and a new timestamp", round, checked, initialRound+1)
+			}
+		})
+	}
+}
+
 func TestExecuteResponderActionCloseFailureSkipsReplies(t *testing.T) {
 	logPath := installFakeGH(t, true)
 	database := newFeedbackTestDB(t)
@@ -248,6 +396,29 @@ exit 0
 	}
 	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return logPath
+}
+
+func installFakeGHForFeedbackHandleOpen(t *testing.T) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	scriptPath := filepath.Join(tempDir, "gh")
+	script := `#!/bin/sh
+case "$*" in
+  api\ repos/*/pulls/*/comments|api\ repos/*/issues/*/comments)
+    printf '[]\n'
+    exit 0
+    ;;
+  *)
+    printf 'unexpected gh args: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh script: %v", err)
+	}
+	t.Setenv("PATH", tempDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func newFeedbackTestDB(t *testing.T) *db.DB {
