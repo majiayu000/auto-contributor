@@ -3,10 +3,12 @@ package pipeline
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/majiayu000/auto-contributor/internal/config"
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/internal/runtime"
@@ -60,7 +62,7 @@ func TestBuildEngineerCtx_IsolatesReworkPayload(t *testing.T) {
 }
 
 func TestBuildResponderCtx_IsolatesGitHubFeedbackPayloads(t *testing.T) {
-	p := &Pipeline{}
+	p := &Pipeline{cfg: &config.Config{}}
 	issue := &models.Issue{Repo: "owner/repo", IssueNumber: 55, Title: "bug", Body: "body"}
 	pr := &models.PullRequest{PRNumber: 7, PRURL: "https://github.com/owner/repo/pull/7", BranchName: "feat/x"}
 
@@ -209,5 +211,90 @@ func TestFormatTrajectoriesForPrompt_UsesStructuredUntrustedData(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "rewrite config") {
 		t.Fatalf("expected trajectory details preserved: %s", rendered)
+	}
+}
+
+func TestAgentPromptsUseConfiguredIdentity(t *testing.T) {
+	for _, email := range []string{"contributor+signed@example.invalid", ""} {
+		for _, stage := range []string{"engineer", "engineer_rework", "responder", "submitter"} {
+			t.Run(stage+"/"+email, func(t *testing.T) {
+				rt := &stubRuntime{outputs: []stubOutput{{output: `{"status":"submitted","pr_number":7}`}}}
+				p, _ := newLoopTestPipeline(t, rt)
+				p.cfg = &config.Config{GitHubUsername: "other-contributor", GitHubEmail: email}
+				ps := prompt.NewStore(filepath.Join("..", "..", "prompts"))
+				if err := ps.Load(); err != nil {
+					t.Fatalf("load shipped prompts: %v", err)
+				}
+				p.runner = NewAgentRunner(ps, rt, 0)
+				issue := &models.Issue{Repo: "upstream/repo", IssueNumber: 104, Title: "bug"}
+				analyst := &AnalystResult{BaseBranch: "main", BranchName: "fix/identity", FixPlan: FixPlan{}}
+				var rendered string
+				var err error
+				switch stage {
+				case "engineer", "engineer_rework":
+					var review *CodeReviewResult
+					if stage == "engineer_rework" {
+						review = &CodeReviewResult{ReworkInstructions: "fix the test"}
+					}
+					rendered, err = ps.Render("engineer", p.buildEngineerCtx(issue, analyst, review, 2, ""))
+				case "responder":
+					pr := &models.PullRequest{PRNumber: 7, BranchName: analyst.BranchName}
+					rendered, err = ps.Render(stage, p.buildResponderCtx(issue, pr, nil, nil, nil, ""))
+				case "submitter":
+					_, err = p.runSubmitter(context.Background(), issue, t.TempDir(), analyst)
+					if len(rt.prompts) != 1 {
+						t.Fatalf("runtime prompt count = %d, want 1", len(rt.prompts))
+					}
+					rendered = rt.prompts[0]
+				}
+				if err != nil {
+					t.Fatalf("render %s: %v", stage, err)
+				}
+				if strings.Contains(rendered, "user@example.com") || strings.Contains(rendered, "majiayu000") {
+					t.Fatal("prompt still forces the hardcoded contributor identity")
+				}
+				if stage == "submitter" {
+					if !strings.Contains(rendered, "--head other-contributor:fix/identity") {
+						t.Fatalf("submitter does not use configured fork owner: %s", rendered)
+					}
+					if rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+						t.Fatalf("submitter policy = %q", rt.policies[0])
+					}
+					return
+				}
+
+				workspace := t.TempDir()
+				runGitCommand(t, "", "init", workspace)
+				runGitCommand(t, workspace, "config", "user.name", "Existing Contributor")
+				runGitCommand(t, workspace, "config", "user.email", "existing@example.invalid")
+				var setup []string
+				for _, line := range strings.Split(rendered, "\n") {
+					if strings.HasPrefix(line, "git config user.") {
+						setup = append(setup, line)
+					}
+				}
+				if email == "" && len(setup) != 0 {
+					t.Fatal("empty configured email must leave the existing identity unchanged")
+				}
+				if email != "" && len(setup) != 2 {
+					t.Fatalf("Git setup commands = %d, want name and email", len(setup))
+				}
+				cmd := exec.Command("sh", "-eu", "-c", strings.Join(setup, "\n"))
+				cmd.Dir = workspace
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("execute rendered Git setup: %v: %s", err, out)
+				}
+				runGitCommand(t, workspace, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-s", "-m", "test identity")
+				name, wantEmail := "other-contributor", email
+				if email == "" {
+					name, wantEmail = "Existing Contributor", "existing@example.invalid"
+				}
+				identity := name + " <" + wantEmail + ">"
+				got := runGitCommand(t, workspace, "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B")
+				if !strings.HasPrefix(got, identity+"\n"+identity+"\n") || !strings.Contains(got, "Signed-off-by: "+identity) {
+					t.Fatalf("commit author, committer, and DCO sign-off must match %q, got %q", identity, got)
+				}
+			})
+		}
 	}
 }

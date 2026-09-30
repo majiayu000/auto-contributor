@@ -88,15 +88,17 @@ func (p *Pipeline) buildEngineerCtx(issue *models.Issue, analyst *AnalystResult,
 	planJSON, _ := json.MarshalIndent(analyst.FixPlan, "", "  ")
 
 	ctx := map[string]any{
-		"Repo":         issue.Repo,
-		"IssueNumber":  issue.IssueNumber,
-		"IssueData":    formatIssueForPrompt(issue),
-		"AnalystPlan":  string(planJSON),
-		"BaseBranch":   analyst.BaseBranch,
-		"CommitFormat": analyst.CommitFormat,
-		"BranchName":   analyst.BranchName,
-		"CICommands":   analyst.CICommands,
-		"IsRework":     lastReview != nil,
+		"Repo":           issue.Repo,
+		"GitHubUsername": p.cfg.GitHubUsername,
+		"GitHubEmail":    p.cfg.GitHubEmail,
+		"IssueNumber":    issue.IssueNumber,
+		"IssueData":      formatIssueForPrompt(issue),
+		"AnalystPlan":    string(planJSON),
+		"BaseBranch":     analyst.BaseBranch,
+		"CommitFormat":   analyst.CommitFormat,
+		"BranchName":     analyst.BranchName,
+		"CICommands":     analyst.CICommands,
+		"IsRework":       lastReview != nil,
 	}
 
 	if lastReview != nil {
@@ -161,6 +163,8 @@ func (p *Pipeline) runSubmitter(ctx context.Context, issue *models.Issue, worksp
 		"BranchName":     analyst.BranchName,
 		"BaseBranch":     analyst.BaseBranch,
 		"CICommands":     analyst.CICommands,
+		"GitHubUsername": p.cfg.GitHubUsername,
+		"GitHubEmail":    p.cfg.GitHubEmail,
 		"PRTitle":        issue.Title,
 		"ChangesSummary": analyst.FixPlan.Description,
 		"TestPlan":       analyst.FixPlan.TestStrategy,

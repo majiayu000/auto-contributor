@@ -104,6 +104,7 @@ func newLoopTestPipeline(t *testing.T, rt runtime.Runtime) (*Pipeline, *db.DB) {
 	}
 
 	return &Pipeline{
+		cfg:        config.Default(),
 		db:         database,
 		prompts:    ps,
 		runner:     NewAgentRunner(ps, rt, 0),
