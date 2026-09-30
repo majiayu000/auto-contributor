@@ -177,12 +177,9 @@ func isBot(author string) bool {
 	return false
 }
 
-// extractAndStoreLessons fetches reviews/comments for a PR and stores lessons in DB.
-// Called when a PR reaches terminal state (merged/closed) so we learn from the feedback.
-func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo) {
-	// Fetch issue-level comments first: needed for both outcome classification and lesson extraction.
-	issueComments, _ := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
-
+// extractAndStoreLessons stores lessons using issue comments fetched before the
+// local PR became terminal, so failed classification inputs remain retryable.
+func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment) {
 	// Always update outcome and label events unconditionally — a transient DB error on a prior
 	// call must not permanently stall outcome tracking even when lessons were already saved.
 	label := ClassifyOutcome(prInfo, issueComments, pr)
