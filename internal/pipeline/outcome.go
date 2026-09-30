@@ -29,7 +29,7 @@ var outcomeKeywords = map[string][]string{
 }
 
 // ClassifyOutcome determines why a PR reached its terminal state.
-func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment, comments []ghclient.PRReviewComment, pr *models.PullRequest) string {
+func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment, comments []ghclient.PRReviewComment, pr *models.PullRequest, contributor string) string {
 	if prInfo.State == "MERGED" {
 		return OutcomeMerged
 	}
@@ -55,7 +55,7 @@ func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComm
 		allText.WriteString(" ")
 	}
 	for _, c := range comments {
-		if isBot(c.Author) {
+		if isBot(c.Author) || (contributor != "" && strings.EqualFold(c.Author, contributor)) {
 			continue
 		}
 		allText.WriteString(strings.ToLower(c.Body))

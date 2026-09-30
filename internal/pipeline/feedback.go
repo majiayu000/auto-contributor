@@ -41,6 +41,10 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err != nil {
 			return fmt.Errorf("get issue comments for merged PR: %w", err)
 		}
+		comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+		if err != nil {
+			return fmt.Errorf("get review comments for merged PR: %w", err)
+		}
 		// Use the authoritative GitHub merge timestamp so polling delay does not
 		// inflate the measured response time.
 		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, prResponseHours(prInfo.CreatedAt, prInfo.MergedAt, pr.CreatedAt)); err != nil {
@@ -49,7 +53,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
-		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo, issueComments)
+		p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
 		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
@@ -95,6 +99,10 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			if err != nil {
 				return fmt.Errorf("get issue comments after stale auto-close: %w", err)
 			}
+			comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+			if err != nil {
+				return fmt.Errorf("get review comments after stale auto-close: %w", err)
+			}
 			// Record outcome before setting terminal status so that a transient
 			// DB failure here leaves the PR as open; the next loop cycle sees
 			// GitHub state=CLOSED and retries via the terminal-state handler.
@@ -105,7 +113,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 				log.WithError(err).Warn("failed to update PR status to closed after stale auto-close")
 			} else {
 				prInfo.State = "CLOSED"
-				p.extractAndStoreLessons(ctx, pr, prRepo, prInfo, issueComments)
+				p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
 				p.updateQValues(pr.IssueID)
 			}
 		}
@@ -180,6 +188,10 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 				if err != nil {
 					return fmt.Errorf("get issue comments after CI auto-close: %w", err)
 				}
+				comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+				if err != nil {
+					return fmt.Errorf("get review comments after CI auto-close: %w", err)
+				}
 				// Record outcome before setting terminal status (same retry-safe
 				// ordering as the stale auto-close path above).
 				if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
@@ -188,7 +200,7 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 					log.WithError(err).Warn("failed to update PR status to closed after CI auto-close")
 				} else {
 					prInfo.State = "CLOSED"
-					p.extractAndStoreLessons(ctx, pr, prRepo, prInfo, issueComments)
+					p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
 					p.updateQValues(pr.IssueID)
 				}
 			}

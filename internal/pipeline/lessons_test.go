@@ -23,14 +23,20 @@ func TestProcessPRCommentFetchFailureRemainsRetryable(t *testing.T) {
 		name, state, author, body, label string
 		status                           models.PRStatus
 		age                              time.Duration
+		commentType                      string
 	}{
-		{"closed auto", "CLOSED", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, time.Hour},
-		{"closed rejection", "CLOSED", "maintainer", "These changes are out of scope and should be removed.", OutcomeRejectedScope, models.PRStatusOpen, time.Hour},
-		{"merged", "MERGED", "maintainer", "Thanks for addressing the feedback.", OutcomeMerged, models.PRStatusOpen, time.Hour},
-		{"stale auto-close", "OPEN", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, 31 * 24 * time.Hour},
-		{"CI auto-close", "OPEN", "majiayu000", "Closing: CI failures remain unresolved after multiple attempts.", OutcomeAutoClosed, models.PRStatusDraft, 8 * 24 * time.Hour},
+		{"closed auto", "CLOSED", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, time.Hour, "issue"},
+		{"closed rejection", "CLOSED", "maintainer", "These changes are out of scope and should be removed.", OutcomeRejectedScope, models.PRStatusOpen, time.Hour, "issue"},
+		{"merged", "MERGED", "maintainer", "Thanks for addressing the feedback.", OutcomeMerged, models.PRStatusOpen, time.Hour, "issue"},
+		{"stale auto-close", "OPEN", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, 31 * 24 * time.Hour, "issue"},
+		{"CI auto-close", "OPEN", "majiayu000", "Closing: CI failures remain unresolved after multiple attempts.", OutcomeAutoClosed, models.PRStatusDraft, 8 * 24 * time.Hour, "issue"},
+		{"closed auto", "CLOSED", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, time.Hour, "review"},
+		{"closed rejection", "CLOSED", "maintainer", "These changes are out of scope and should be removed.", OutcomeRejectedScope, models.PRStatusOpen, time.Hour, "review"},
+		{"merged", "MERGED", "maintainer", "Thanks for addressing the feedback.", OutcomeMerged, models.PRStatusOpen, time.Hour, "review"},
+		{"stale auto-close", "OPEN", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, 31 * 24 * time.Hour, "review"},
+		{"CI auto-close", "OPEN", "majiayu000", "Closing: CI failures remain unresolved after multiple attempts.", OutcomeAutoClosed, models.PRStatusDraft, 8 * 24 * time.Hour, "review"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name+"/"+tc.commentType, func(t *testing.T) {
 			dir := t.TempDir()
 			script := `#!/bin/sh
 case "$*" in
@@ -44,7 +50,13 @@ case "$*" in
     fi
     printf '%s' "$GH_TEST_ISSUE_COMMENTS"
     ;;
-  "api repos/owner/repo/pulls/42/comments"*) printf '%s' '[]' ;;
+  "api repos/owner/repo/pulls/42/comments"*)
+    if [ "$GH_TEST_FAIL_REVIEW_COMMENTS" = "1" ]; then
+      printf 'temporary review comment fetch failure\n' >&2
+      exit 1
+    fi
+    printf '%s' "$GH_TEST_REVIEW_COMMENTS"
+    ;;
   *) printf 'unexpected arguments: %s\n' "$*" >&2; exit 1 ;;
 esac
 `
@@ -66,7 +78,13 @@ esac
 			}
 			commentsJSON := string(data)
 			t.Setenv("GH_TEST_ISSUE_COMMENTS", commentsJSON)
-			t.Setenv("GH_TEST_FAIL_ISSUE_COMMENTS", "1")
+			reviewJSON := `[{"user":{"login":"maintainer"},"body":"Please keep these changes limited to the issue scope.","path":"main.go"}]`
+			t.Setenv("GH_TEST_REVIEW_COMMENTS", reviewJSON)
+			commentEnv, failEnv := "GH_TEST_ISSUE_COMMENTS", "GH_TEST_FAIL_ISSUE_COMMENTS"
+			if tc.commentType == "review" {
+				commentEnv, failEnv = "GH_TEST_REVIEW_COMMENTS", "GH_TEST_FAIL_REVIEW_COMMENTS"
+			}
+			t.Setenv(failEnv, "1")
 
 			database := newFeedbackTestDB(t)
 			issue, pr := createFeedbackTestPR(t, database)
@@ -96,11 +114,11 @@ esac
 
 			for _, failure := range []string{"command", "malformed JSON"} {
 				if failure == "malformed JSON" {
-					t.Setenv("GH_TEST_FAIL_ISSUE_COMMENTS", "0")
-					t.Setenv("GH_TEST_ISSUE_COMMENTS", "invalid JSON")
+					t.Setenv(failEnv, "0")
+					t.Setenv(commentEnv, "invalid JSON")
 				}
-				if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "issue comments") {
-					t.Errorf("%s: ProcessPR error = %v, want issue-comment fetch error", failure, err)
+				if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), tc.commentType+" comments") {
+					t.Errorf("%s: ProcessPR error = %v, want %s-comment fetch error", failure, err, tc.commentType)
 				}
 				status, _, _ := getFeedbackPRState(t, database, pr.ID)
 				if status != string(tc.status) {
@@ -133,6 +151,7 @@ esac
 			}
 
 			t.Setenv("GH_TEST_ISSUE_COMMENTS", commentsJSON)
+			t.Setenv("GH_TEST_REVIEW_COMMENTS", reviewJSON)
 			if err := p.ProcessPR(context.Background(), pr); err != nil {
 				t.Fatalf("successful retry: %v", err)
 			}
@@ -156,6 +175,9 @@ esac
 			wantQ := 0.5 + qAlpha*(rewardForOutcome(tc.label)-0.5)
 			if math.Abs(rule.QValue-wantQ) > 1e-9 || rule.RetrievalCount != 1 {
 				t.Errorf("Q-value/count = %v/%d, want %v/1", rule.QValue, rule.RetrievalCount, wantQ)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count == 0 {
+				t.Errorf("lessons after retry = %d, %v, want retained inline feedback", count, err)
 			}
 			profile, err := database.GetRepoProfile(issue.Repo)
 			if err != nil || profile == nil || profile.TotalPRsSubmitted != 1 {

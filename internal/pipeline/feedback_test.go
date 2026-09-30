@@ -348,11 +348,13 @@ func TestResponderCloseUsesPolledFeedback(t *testing.T) {
 		issueComments string
 		inline        string
 		wantLabel     string
+		wantLessons   int
 	}{
-		{"issue scope", `[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope."}]`, `[]`, OutcomeRejectedScope},
-		{"inline duplicate", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this duplicate PR; the issue is already addressed.","path":"main.go"}]`, OutcomeRejectedDupe},
-		{"inline scope", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope.","path":"main.go"}]`, OutcomeRejectedScope},
-		{"inline quality", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this PR; this logic is incorrect and broken.","path":"main.go"}]`, OutcomeRejectedQuality},
+		{"issue scope", `[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope."}]`, `[]`, OutcomeRejectedScope, 1},
+		{"inline duplicate", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this duplicate PR; the issue is already addressed.","path":"main.go"}]`, OutcomeRejectedDupe, 1},
+		{"inline scope", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope.","path":"main.go"}]`, OutcomeRejectedScope, 1},
+		{"inline quality", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this PR; this logic is incorrect and broken.","path":"main.go"}]`, OutcomeRejectedQuality, 1},
+		{"contributor reply", `[]`, `[{"user":{"login":"maintainer"},"body":"Please close this PR; naming style violates conventions.","path":"main.go"},{"user":{"login":"CONTRIBUTOR"},"body":"fixed the incorrect logic","path":"main.go"}]`, OutcomeRejectedStyle, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logPath := installFakeGH(t, false)
@@ -364,6 +366,7 @@ func TestResponderCloseUsesPolledFeedback(t *testing.T) {
 			database := newFeedbackTestDB(t)
 			issue, pr := createFeedbackTestPR(t, database)
 			p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+			p.cfg.GitHubUsername = "contributor"
 			rt := prepareResponderCloseTest(t, p, pr, workspace)
 
 			if err := p.handleOpen(context.Background(), pr, issue.Repo, &ghclient.PRInfo{State: "OPEN"}); err != nil {
@@ -386,8 +389,8 @@ func TestResponderCloseUsesPolledFeedback(t *testing.T) {
 				t.Errorf("trajectories = %+v, %v, want %q and success=false", trajectories, err, tc.wantLabel)
 			}
 			lessons, err := database.CountLessonsByPR(pr.ID)
-			if err != nil || lessons != 1 {
-				t.Errorf("lessons = %d, %v, want one cached maintainer lesson", lessons, err)
+			if err != nil || lessons != tc.wantLessons {
+				t.Errorf("lessons = %d, %v, want %d cached feedback lessons", lessons, err, tc.wantLessons)
 			}
 			rule := loadRule(t, p.ruleLoader, "close-learning")
 			if rule.QValue < 0.449 || rule.QValue > 0.451 || rule.RetrievalCount != 1 {
