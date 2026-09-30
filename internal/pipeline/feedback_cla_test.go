@@ -31,6 +31,10 @@ func TestProcessPRCLAStatus(t *testing.T) {
 	}{
 		{"unsigned thanks and recheck", models.PRStatusOpen, []ghclient.IssueComment{bot(request)}, false, models.PRStatusNeedsAttention, false},
 		{"classic unsigned request", models.PRStatusOpen, []ghclient.IssueComment{bot(classicRequest)}, false, models.PRStatusNeedsAttention, false},
+		{"sign our CLA request", models.PRStatusOpen, []ghclient.IssueComment{bot("Please sign our CLA.")}, false, models.PRStatusNeedsAttention, false},
+		{"sign our CLA with thanks and recheck", models.PRStatusOpen, []ghclient.IssueComment{{Author: "cla-bot", Body: "Thank you! Please SIGN OUR CLA. Already signed? Recheck it."}}, false, models.PRStatusNeedsAttention, false},
+		{"sign our CLA overrides old confirmation", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("All contributors have signed the CLA."), {Author: "contributor-assistant[bot]", Body: "Please sign our CLA."}}, false, models.PRStatusNeedsAttention, false},
+		{"human signing request does not pause", models.PRStatusOpen, []ghclient.IssueComment{{Author: "contributor", Body: "Please sign our CLA."}}, false, models.PRStatusOpen, true},
 		{"still unsigned", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot(request)}, false, models.PRStatusNeedsAttention, false},
 		{"thanks is not signed", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("Thank you for your submission!")}, false, models.PRStatusNeedsAttention, false},
 		{"not signed", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("All contributors have not signed the CLA.")}, false, models.PRStatusNeedsAttention, false},
@@ -70,9 +74,44 @@ func TestProcessPRCLAStatus(t *testing.T) {
 	}
 }
 
+func TestProcessPRCLAPaginatedComments(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		initial models.PRStatus
+		first   string
+		later   string
+		want    models.PRStatus
+	}{
+		{"later confirmation resumes", models.PRStatusNeedsAttention, "Please sign the CLA.", "All contributors have signed the CLA.", models.PRStatusOpen},
+		{"later request pauses", models.PRStatusOpen, "All contributors have signed the CLA.", "Please sign our CLA.", models.PRStatusNeedsAttention},
+		{"later negative remains paused", models.PRStatusNeedsAttention, "All contributors have signed the CLA.", "Not all contributors have signed the CLA.", models.PRStatusNeedsAttention},
+		{"later unknown does not hide confirmation", models.PRStatusNeedsAttention, "All contributors have signed the CLA.", "Thank you for your submission!", models.PRStatusOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, pr, rt := newCLATestPipeline(t, tc.initial, []ghclient.IssueComment{{Author: "cla-assistant[bot]", Body: tc.first}}, false)
+			data, err := json.Marshal([]any{map[string]any{"body": tc.later, "user": map[string]string{"login": "cla-assistant[bot]"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GH_TEST_CLA_LATER_COMMENTS", string(data))
+			if err := p.ProcessPR(context.Background(), pr); err != nil {
+				t.Fatalf("ProcessPR: %v", err)
+			}
+			status, round, checked := getFeedbackPRState(t, p.db, pr.ID)
+			wantCalls := 0
+			if tc.want == models.PRStatusOpen {
+				wantCalls = 1
+			}
+			if status != string(tc.want) || pr.Status != tc.want || rt.index != wantCalls || round != wantCalls || checked.Valid != (wantCalls == 1) {
+				t.Fatalf("status/memory/calls/round/checked = %s/%s/%d/%d/%v, want %s/%s/%d/%d/%v", status, pr.Status, rt.index, round, checked.Valid, tc.want, tc.want, wantCalls, wantCalls, wantCalls == 1)
+			}
+		})
+	}
+}
+
 func TestProcessPRCLAErrorsRemainRetryable(t *testing.T) {
 	for _, initial := range []models.PRStatus{models.PRStatusOpen, models.PRStatusNeedsAttention} {
-		for _, failure := range []string{"fetch", "parse", "status update"} {
+		for _, failure := range []string{"fetch", "later fetch", "parse", "status update"} {
 			t.Run(string(initial)+"/"+failure, func(t *testing.T) {
 				body := "Please sign the CLA."
 				if initial == models.PRStatusNeedsAttention {
@@ -83,6 +122,8 @@ func TestProcessPRCLAErrorsRemainRetryable(t *testing.T) {
 				switch failure {
 				case "fetch":
 					t.Setenv("GH_TEST_CLA_FAIL", "1")
+				case "later fetch":
+					t.Setenv("GH_TEST_CLA_FAIL", "later")
 				case "parse":
 					t.Setenv("GH_TEST_CLA_COMMENTS", "invalid JSON")
 				case "status update":
@@ -143,7 +184,19 @@ case "$*" in
       printf 'temporary CLA fetch failure\n' >&2
       exit 1
     fi
-    printf '%s' "$GH_TEST_CLA_COMMENTS"
+    if [ "$*" = "api repos/owner/repo/issues/42/comments --paginate --slurp" ]; then
+      printf '[%s' "$GH_TEST_CLA_COMMENTS"
+      if [ "$GH_TEST_CLA_FAIL" = "later" ]; then
+        printf 'temporary later-page CLA fetch failure\n' >&2
+        exit 1
+      fi
+      if [ -n "$GH_TEST_CLA_LATER_COMMENTS" ]; then
+        printf ',%s' "$GH_TEST_CLA_LATER_COMMENTS"
+      fi
+      printf ']'
+    else
+      printf '%s' "$GH_TEST_CLA_COMMENTS"
+    fi
     ;;
   "api repos/owner/repo/pulls/42/comments"*)
     printf '%s' '[{"id":1,"body":"Please address this maintainer feedback","user":{"login":"maintainer"},"created_at":"2026-09-30T00:00:00Z"}]'
@@ -162,7 +215,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rawComments []any
+	rawComments := []any{}
 	for _, c := range comments {
 		rawComments = append(rawComments, map[string]any{"body": c.Body, "user": map[string]string{"login": c.Author}})
 	}
@@ -173,6 +226,7 @@ esac
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GH_TEST_CLA_INFO", string(info))
 	t.Setenv("GH_TEST_CLA_COMMENTS", string(data))
+	t.Setenv("GH_TEST_CLA_LATER_COMMENTS", "")
 	t.Setenv("GH_TEST_CLA_FAIL", "0")
 	return p, pr, rt
 }
