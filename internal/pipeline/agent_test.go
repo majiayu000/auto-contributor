@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattn/go-sqlite3"
+
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
@@ -110,6 +112,167 @@ func newLoopTestPipeline(t *testing.T, rt runtime.Runtime) (*Pipeline, *db.DB) {
 		ruleLoader: rl,
 		maxReview:  2,
 	}, database
+}
+
+func TestProcessIssueReturnsPRCountErrorsBeforeScout(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failQuery int
+		wantError string
+	}{
+		{"merged", 1, "count merged PRs"},
+		{"open", 2, "count open PRs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, database := newLoopTestPipeline(t, &stubRuntime{})
+			p.cfg = &config.Config{MaxPRsPerRepo: 1}
+			p.gh = ghclient.New(p.cfg)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 103, Title: "PR cap", Status: models.IssueStatusDiscovered}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			ghLog := installPRCapTestGH(t)
+
+			// Deny only the selected real count query on the single SQLite connection.
+			database.SetMaxOpenConns(1)
+			conn, err := database.Conn(context.Background())
+			if err != nil {
+				t.Fatalf("get SQLite connection: %v", err)
+			}
+			queryCount := 0
+			if err := conn.Raw(func(raw any) error {
+				raw.(*sqlite3.SQLiteConn).RegisterAuthorizer(func(action int, _, _, _ string) int {
+					if action == sqlite3.SQLITE_SELECT {
+						queryCount++
+						if queryCount == tc.failQuery {
+							return sqlite3.SQLITE_DENY
+						}
+					}
+					return sqlite3.SQLITE_OK
+				})
+				return nil
+			}); err != nil {
+				t.Fatalf("install SQLite authorizer: %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatalf("release SQLite connection: %v", err)
+			}
+
+			err = p.ProcessIssue(context.Background(), issue)
+			conn, connErr := database.Conn(context.Background())
+			if connErr != nil {
+				t.Fatalf("get SQLite connection: %v", connErr)
+			}
+			if err := conn.Raw(func(raw any) error {
+				raw.(*sqlite3.SQLiteConn).RegisterAuthorizer(nil)
+				return nil
+			}); err != nil {
+				t.Fatalf("reset SQLite authorizer: %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatalf("release SQLite connection: %v", err)
+			}
+			var sqliteErr sqlite3.Error
+			if !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrAuth {
+				t.Errorf("ProcessIssue error = %v, want original SQLite authorization error", err)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Errorf("ProcessIssue error = %v, want %q context", err, tc.wantError)
+			}
+			if queryCount != tc.failQuery {
+				t.Errorf("count queries = %d, want %d", queryCount, tc.failQuery)
+			}
+			if _, err := os.Stat(ghLog); !os.IsNotExist(err) {
+				t.Errorf("GitHub called after count failure: log stat error = %v", err)
+			}
+			stored, err := database.GetIssueByID(issue.ID)
+			if err != nil {
+				t.Fatalf("get issue: %v", err)
+			}
+			if stored.Status != models.IssueStatusDiscovered || stored.ErrorMessage != "" {
+				t.Errorf("issue status = %q, error = %q, want unchanged discovered issue", stored.Status, stored.ErrorMessage)
+			}
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil {
+				t.Fatalf("get events: %v", err)
+			}
+			if len(events) != 0 {
+				t.Errorf("pipeline events = %d, want 0", len(events))
+			}
+		})
+	}
+}
+
+func TestProcessIssuePRCapUsesSuccessfulCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		maxPR     int
+		merged    int
+		open      int
+		wantScout bool
+	}{
+		{"default limit", 0, 0, 2, false},
+		{"configured limit", 3, 0, 3, false},
+		{"merged allowance", 1, 1, 1, true},
+		{"merged limit reached", 1, 1, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, database := newLoopTestPipeline(t, &stubRuntime{})
+			p.cfg = &config.Config{MaxPRsPerRepo: tc.maxPR}
+			p.gh = ghclient.New(p.cfg)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 103, Title: "PR cap", Status: models.IssueStatusDiscovered}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			for _, count := range []struct {
+				status models.PRStatus
+				n      int
+			}{{models.PRStatusMerged, tc.merged}, {models.PRStatusOpen, tc.open}} {
+				for i := 0; i < count.n; i++ {
+					pr := &models.PullRequest{IssueID: issue.ID, PRURL: "https://github.com/owner/repo/pull/1", BranchName: "fix/cap", Status: count.status}
+					if err := database.CreatePullRequest(pr); err != nil {
+						t.Fatalf("create PR: %v", err)
+					}
+				}
+			}
+			ghLog := installPRCapTestGH(t)
+			err := p.ProcessIssue(context.Background(), issue)
+			if tc.wantScout {
+				if err == nil || !strings.Contains(err.Error(), "PR cap scout reached") {
+					t.Fatalf("ProcessIssue error = %v, want Scout precollection reached", err)
+				}
+				if _, err := os.Stat(ghLog); err != nil {
+					t.Fatalf("Scout did not call GitHub: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("ProcessIssue error = %v, want nil on reached cap", err)
+				}
+				if _, err := os.Stat(ghLog); !os.IsNotExist(err) {
+					t.Fatalf("GitHub called after reached cap: %v", err)
+				}
+				stored, err := database.GetIssueByID(issue.ID)
+				if err != nil {
+					t.Fatalf("get issue: %v", err)
+				}
+				if stored.Status != models.IssueStatusAbandoned || !strings.Contains(stored.ErrorMessage, "rate limit:") {
+					t.Fatalf("issue status = %q, error = %q, want rate-limit abandonment", stored.Status, stored.ErrorMessage)
+				}
+			}
+		})
+	}
+}
+
+func installPRCapTestGH(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "gh.log")
+	script := "#!/bin/sh\necho called >> " + shellQuote(logPath) + "\necho 'PR cap scout reached' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
 }
 
 func assertReviewerFailureEvent(t *testing.T, database *db.DB, issueID int64, wantErr string) {
