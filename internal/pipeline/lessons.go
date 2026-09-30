@@ -1,7 +1,9 @@
 package pipeline
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -110,7 +112,7 @@ func extractLessonsFromIssueComments(
 		if c.Body == "" || len(c.Body) < 20 {
 			continue
 		}
-		if isBot(c.Author) {
+		if isBot(c.Author) || c.Body == responderCloseComment {
 			continue
 		}
 		category := categorizeComment(c.Body)
@@ -178,30 +180,40 @@ func isBot(author string) bool {
 
 // storeLessons uses the same feedback for outcome classification and lessons.
 // Responder closes pass their polled comments to avoid fetching again after close.
-func (p *Pipeline) storeLessons(pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment) {
+func (p *Pipeline) storeLessons(pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment) error {
 	// Always update outcome and label events unconditionally — a transient DB error on a prior
 	// call must not permanently stall outcome tracking even when lessons were already saved.
 	label := ClassifyOutcome(prInfo, issueComments, comments, pr, p.cfg.GitHubUsername)
 	if err := p.db.LabelEventsByIssue(pr.IssueID, label); err != nil {
-		log.WithFields(Fields{"error": err}).Warn("failed to label pipeline events")
+		return fmt.Errorf("label pipeline events: %w", err)
 	} else {
 		log.WithFields(Fields{"pr": pr.PRURL, "outcome": label}).Info("labeled pipeline events")
 	}
 	success := label == OutcomeMerged
 	if err := p.db.UpdateTrajectoryOutcome(pr.IssueID, pr.PRNumber, label, success); err != nil {
-		log.WithFields(Fields{"error": err, "pr": pr.PRURL}).Warn("failed to update trajectory outcome")
+		// GitHub-synced PRs have no solve trajectory. Keep that existing absence
+		// visible, while actual database failures leave terminal learning pending.
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("update trajectory outcome: %w", err)
+		}
+		log.WithError(err).WithField("pr", pr.PRURL).Warn("no trajectory to label")
 	}
 
 	// Stamp last_validated_at on synthesized rules when a PR merges.
 	// Merged PRs confirm that the rules guiding those stages produced good output.
 	if label == OutcomeMerged {
-		p.stampRuleValidation(pr)
+		if err := p.stampRuleValidation(pr); err != nil {
+			return err
+		}
 	}
 
 	// Skip lesson extraction if we already have lessons for this PR.
-	count, _ := p.db.CountLessonsByPR(pr.ID)
+	count, err := p.db.CountLessonsByPR(pr.ID)
+	if err != nil {
+		return fmt.Errorf("count review lessons: %w", err)
+	}
 	if count > 0 {
-		return
+		return nil
 	}
 
 	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments)
@@ -211,30 +223,24 @@ func (p *Pipeline) storeLessons(pr *models.PullRequest, prRepo string, prInfo *g
 		lessons = append(lessons, extractLessonsFromIssueComments(pr, prRepo, issueComments)...)
 	}
 
-	saved := 0
-	for _, l := range lessons {
-		if err := p.db.SaveReviewLesson(l); err != nil {
-			log.WithError(err).Warn("failed to save review lesson")
-			continue
+	if len(lessons) > 0 {
+		if err := p.db.SaveReviewLesson(lessons...); err != nil {
+			return fmt.Errorf("save review lessons: %w", err)
 		}
-		saved++
-	}
-
-	if saved > 0 {
 		log.WithFields(Fields{
 			"pr":      pr.PRURL,
-			"lessons": saved,
+			"lessons": len(lessons),
 		}).Info("extracted review lessons")
 	}
+	return nil
 }
 
 // stampRuleValidation sets last_validated_at on all synthesized rules for the pipeline
 // stages that were active during this PR's lifecycle. Called only on merged outcomes.
-func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
+func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) error {
 	events, err := p.db.GetEventsByIssue(pr.IssueID)
 	if err != nil {
-		log.WithError(err).Warn("failed to fetch events for rule validation stamp")
-		return
+		return fmt.Errorf("fetch events for rule validation stamp: %w", err)
 	}
 
 	today := time.Now().Format("2006-01-02")
@@ -242,22 +248,22 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 	seenRules := make(map[string]bool)
 	stamped := 0
 
-	stampRule := func(stage, ruleID, originalKey string) {
+	stampRule := func(stage, ruleID, originalKey string) error {
 		normalizedKey := stage + "/" + ruleID
 		if seenRules[normalizedKey] {
-			return
+			return nil
 		}
 		seenRules[normalizedKey] = true
 
 		rule := p.ruleLoader.ByStageAndID(stage, ruleID)
 		if rule == nil || rule.Source != "synthesized" {
-			return
+			return nil
 		}
 		if err := rules.UpdateRuleLastValidatedAt(rulesDir, ruleID, stage, today); err != nil {
-			log.WithFields(Fields{"rule": originalKey, "error": err}).Warn("failed to stamp rule last_validated_at")
-			return
+			return fmt.Errorf("stamp rule %s last_validated_at: %w", originalKey, err)
 		}
 		stamped++
+		return nil
 	}
 
 	for _, e := range events {
@@ -267,21 +273,26 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 
 		var ruleKeys []string
 		if err := json.Unmarshal([]byte(e.ExperiencesUsed), &ruleKeys); err != nil {
-			log.WithFields(Fields{"stage": e.Stage, "error": err}).Warn("failed to parse experiences_used for rule validation stamp")
-			continue
+			return fmt.Errorf("parse experiences_used for rule validation stamp: %w", err)
 		}
 
 		for _, key := range ruleKeys {
 			if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
-				stampRule(parts[0], parts[1], key)
+				if err := stampRule(parts[0], parts[1], key); err != nil {
+					return err
+				}
 				continue
 			}
 
 			// Legacy records stored bare rule IDs. Those IDs came from rules injected
 			// for the event stage, which includes stage-specific and global rules.
-			stampRule(e.Stage, key, key)
+			if err := stampRule(e.Stage, key, key); err != nil {
+				return err
+			}
 			if e.Stage != "global" {
-				stampRule("global", key, key)
+				if err := stampRule("global", key, key); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -289,13 +300,14 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) {
 	// Reload the in-memory rule cache so the next decay pass sees the updated
 	// last_validated_at values and does not wrongly decay the just-stamped rules.
 	if err := p.ruleLoader.Reload(); err != nil {
-		log.WithError(err).Warn("failed to reload rule cache after stamping last_validated_at")
+		return fmt.Errorf("reload rule cache after stamping last_validated_at: %w", err)
 	}
 
 	log.WithFields(Fields{
 		"pr":    pr.PRURL,
 		"rules": stamped,
 	}).Info("stamped last_validated_at on synthesized rules for merged PR")
+	return nil
 }
 
 // isNonActionable returns true for reviews that are just approvals/LGTM with no actionable content.

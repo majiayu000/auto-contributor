@@ -315,8 +315,13 @@ func TestResponderCloseDBFailureRemainsRetryable(t *testing.T) {
 				if _, err := os.Stat(workspace); err != nil {
 					t.Errorf("workspace stat: %v, want retained workspace after feedback fetch failure", err)
 				}
-				if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.RetrievalCount != 0 {
-					t.Errorf("retrieval count = %d, want no reward from incomplete feedback", rule.RetrievalCount)
+				wantCount := 0
+				if column == "status" {
+					// Feedback learning succeeded before the failed terminal write.
+					wantCount = 1
+				}
+				if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.RetrievalCount != wantCount {
+					t.Errorf("retrieval count = %d, want %d without another reward from failed fetch", rule.RetrievalCount, wantCount)
 				}
 				t.Setenv(env, "0")
 			}
@@ -335,8 +340,12 @@ func TestResponderCloseDBFailureRemainsRetryable(t *testing.T) {
 				t.Errorf("retried workspace stat error = %v, want removed workspace", err)
 			}
 			rule := loadRule(t, p.ruleLoader, "close-learning")
-			if rule.RetrievalCount != 1 {
-				t.Errorf("retried retrieval count = %d, want 1", rule.RetrievalCount)
+			wantCount := 1
+			if column == "status" {
+				wantCount = 2 // YAML rewards are outside the SQL terminal write.
+			}
+			if rule.RetrievalCount != wantCount {
+				t.Errorf("retried retrieval count = %d, want %d", rule.RetrievalCount, wantCount)
 			}
 		})
 	}
@@ -433,6 +442,144 @@ func TestResponderCloseUsesGitHubCreationTime(t *testing.T) {
 	}
 	if got := *profile.AvgResponseTimeHours; got < beforeClose.Add(-time.Second).Sub(created).Hours() || got > time.Since(created).Hours() {
 		t.Errorf("response time = %v, want GitHub creation to just-completed close (~72 hours)", got)
+	}
+}
+
+func TestResponderCloseLearningFailureRemainsRetryable(t *testing.T) {
+	for _, failure := range []string{"event label", "trajectory", "second lesson", "second rule", "terminal status"} {
+		t.Run(failure, func(t *testing.T) {
+			logPath := installFakeGH(t, false)
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+			p.cfg.GitHubUsername = "contributor"
+			writeRule(t, p.ruleLoader.RulesDir(), &rules.Rule{ID: "second-learning", Stage: "engineer", Severity: "medium", Confidence: 0.8, QValue: 0.5, Body: "Keep learning retryable."})
+			if err := p.ruleLoader.Reload(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Exec(`UPDATE pipeline_events SET experiences_used = '["responder/close-learning","engineer/second-learning"]' WHERE issue_id = ?`, issue.ID); err != nil {
+				t.Fatal(err)
+			}
+			trigger := ""
+			switch failure {
+			case "event label":
+				trigger = "BEFORE UPDATE OF outcome_label ON pipeline_events"
+			case "trajectory":
+				trigger = "BEFORE UPDATE OF outcome_label ON trajectories"
+			case "second lesson":
+				trigger = "BEFORE INSERT ON review_lessons WHEN NEW.reviewer = 'second-reviewer'"
+			case "terminal status":
+				trigger = "BEFORE UPDATE OF status ON pull_requests"
+			}
+			if trigger != "" {
+				if _, err := database.Exec("CREATE TRIGGER fail_learning " + trigger + " BEGIN SELECT RAISE(ABORT, 'learning unavailable'); END"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rulePath := filepath.Join(p.ruleLoader.RulesDir(), "engineer", "second-learning.yaml")
+			if failure == "second rule" {
+				if err := os.Rename(rulePath, rulePath+".saved"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inline := []ghclient.PRReviewComment{
+				{Author: "first-reviewer", Body: "Please keep the fix within the issue scope.", Path: "main.go"},
+				{Author: "second-reviewer", Body: "Please add a test for this close behavior.", Path: "main_test.go"},
+			}
+			inlineJSON := `[{"user":{"login":"first-reviewer"},"body":"Please keep the fix within the issue scope.","path":"main.go"},{"user":{"login":"second-reviewer"},"body":"Please add a test for this close behavior.","path":"main_test.go"}]`
+			t.Setenv("GH_TEST_REVIEW_COMMENTS", inlineJSON)
+			t.Setenv("GH_TEST_ISSUE_COMMENTS", `[{"user":{"login":"contributor"},"body":"Closing because maintainer feedback explicitly asked to close or abandon this PR."}]`)
+			err := p.executeResponderAction(context.Background(), pr, issue.Repo, &ghclient.PRInfo{State: "OPEN"}, inline, nil, FeedbackResult{Action: "close"}, 1)
+			if err == nil {
+				t.Errorf("close returned nil after %s failure", failure)
+			}
+			openPRs, err := database.GetOpenPRs()
+			if err != nil || len(openPRs) != 1 {
+				t.Errorf("GetOpenPRs = %v, %v, want one retryable PR", openPRs, err)
+			}
+			if _, err := os.Stat(workspace); err != nil {
+				t.Errorf("workspace removed before learning completed: %v", err)
+			}
+			wantCount, wantQ := 0, 0.5
+			if failure == "second rule" || failure == "terminal status" {
+				// Preserve the current per-file reward writes: an earlier Q-value
+				// can persist before a later rule or SQL terminal write fails.
+				wantCount, wantQ = 1, 0.45
+			}
+			if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue < wantQ-0.001 || rule.QValue > wantQ+0.001 || rule.RetrievalCount != wantCount {
+				t.Errorf("reward after failure = %+v, want Q=%v count=%d", rule, wantQ, wantCount)
+			}
+			if trigger != "" {
+				if _, err := database.Exec("DROP TRIGGER fail_learning"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "second rule" {
+				if err := os.Rename(rulePath+".saved", rulePath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Reload a fresh Pipeline to exercise retry from persisted data.
+			p.ruleLoader = rules.NewRuleLoader(p.ruleLoader.RulesDir())
+			if err := p.ruleLoader.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ProcessPR(context.Background(), pr); err != nil {
+				t.Fatalf("CLOSED retry: %v", err)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 2 {
+				t.Errorf("lessons after retry = %d, %v, want both lessons exactly once", count, err)
+			}
+			for _, id := range []string{"close-learning", "second-learning"} {
+				rule := loadRule(t, p.ruleLoader, id)
+				wantCount, wantQ := 1, 0.45
+				if failure == "terminal status" || (failure == "second rule" && id == "close-learning") {
+					wantCount, wantQ = 2, 0.405
+				}
+				if rule.RetrievalCount != wantCount || rule.QValue < wantQ-0.001 || rule.QValue > wantQ+0.001 {
+					t.Errorf("%s after retry = %+v, want Q=%v count=%d", id, rule, wantQ, wantCount)
+				}
+			}
+			profile, err := database.GetRepoProfile(issue.Repo)
+			if err != nil || profile == nil || profile.TotalPRsSubmitted != 1 || profile.TotalRejected != 1 {
+				t.Errorf("profile after retry = %+v, %v, want one outcome", profile, err)
+			}
+			openPRs, err = database.GetOpenPRs()
+			if err != nil || len(openPRs) != 0 {
+				t.Errorf("GetOpenPRs after retry = %v, %v, want completed PR", openPRs, err)
+			}
+			if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+				t.Errorf("workspace retained after successful retry: %v", err)
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil || strings.Count(string(logData), "pr close 42") != 1 {
+				t.Errorf("remote close calls = %q, %v, want exactly one", logData, err)
+			}
+		})
+	}
+}
+
+func TestResponderCloseGeneratedReasonMatchesClosedRetry(t *testing.T) {
+	for _, contributor := range []string{"contributor", "contributor-bot"} {
+		t.Run(contributor, func(t *testing.T) {
+			installFakeGH(t, false)
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, _ := newResponderLearningTestPipeline(t, database, issue, pr)
+			p.cfg.GitHubUsername = contributor
+			comments := []ghclient.IssueComment{{Author: "maintainer", Body: "please abandon this PR"}}
+			if err := p.executeResponderAction(context.Background(), pr, issue.Repo, &ghclient.PRInfo{State: "OPEN"}, nil, comments, FeedbackResult{Action: "close"}, 1); err != nil {
+				t.Fatal(err)
+			}
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil || len(events) != 1 || events[0].OutcomeLabel != OutcomeRejectedUnwant {
+				t.Errorf("first close = %v, %v, want rejected_unwanted", events, err)
+			}
+			comments = append(comments, ghclient.IssueComment{Author: contributor, Body: "Closing because maintainer feedback explicitly asked to close or abandon this PR."})
+			if label := ClassifyOutcome(&ghclient.PRInfo{State: "CLOSED"}, comments, nil, pr, contributor); label != OutcomeRejectedUnwant {
+				t.Errorf("CLOSED retry classification = %q, want rejected_unwanted", label)
+			}
+		})
 	}
 }
 

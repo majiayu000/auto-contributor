@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/majiayu000/auto-contributor/internal/rules"
@@ -40,12 +42,12 @@ func rewardForOutcome(outcomeLabel string) float64 {
 //
 //	Q_new = Q_old + alpha * (reward - Q_old)
 //
-// Called after extractAndStoreLessons, which has already labelled all events
+// Called after storeLessons, which has already labelled all events
 // with the outcome via LabelEventsByIssue.
-func (p *Pipeline) updateQValues(issueID int64) {
+func (p *Pipeline) updateQValues(issueID int64) (result error) {
 	events, err := p.db.GetEventsByIssue(issueID)
-	if err != nil || len(events) == 0 {
-		return
+	if err != nil {
+		return fmt.Errorf("get events for Q-value update: %w", err)
 	}
 
 	// Determine outcome from the first event that has a label set.
@@ -57,11 +59,10 @@ func (p *Pipeline) updateQValues(issueID int64) {
 		}
 	}
 	if outcomeLabel == "" {
-		return
+		return nil
 	}
 
 	reward := rewardForOutcome(outcomeLabel)
-	rulesDir := p.ruleLoader.RulesDir()
 
 	// Collect unique participation keys across all events for this issue.
 	// Keys are stored as "stage/ruleID" (new format) or bare "ruleID" (legacy).
@@ -73,7 +74,7 @@ func (p *Pipeline) updateQValues(issueID int64) {
 		}
 		var ids []string
 		if err := json.Unmarshal([]byte(e.ExperiencesUsed), &ids); err != nil {
-			continue
+			return fmt.Errorf("parse experiences_used for Q-value update: %w", err)
 		}
 		for _, id := range ids {
 			if !seen[id] {
@@ -84,11 +85,21 @@ func (p *Pipeline) updateQValues(issueID int64) {
 	}
 
 	if len(participantKeys) == 0 {
-		return
+		return nil
 	}
 
-	// Apply Q-value update for each participating rule.
+	rulesDir := p.ruleLoader.RulesDir()
+	// Refresh the cache even after a partial write so a later retry uses what
+	// was actually persisted. YAML rewards remain outside the SQL transaction.
 	updated := 0
+	defer func() {
+		if updated > 0 {
+			if err := p.ruleLoader.Reload(); err != nil {
+				result = errors.Join(result, fmt.Errorf("reload rules after Q-value update: %w", err))
+			}
+		}
+	}()
+	// Apply Q-value update for each participating rule.
 	for _, key := range participantKeys {
 		// Keys are stored as "stage/ruleID" (new format) or bare "ruleID" (legacy).
 		var rule *rules.Rule
@@ -118,18 +129,12 @@ func (p *Pipeline) updateQValues(issueID int64) {
 		}
 
 		if err := rules.UpdateRuleQValue(rulesDir, ruleID, rule.Stage, newQ, newRetrievals, newSuccess); err != nil {
-			log.WithFields(Fields{"rule": key, "error": err}).Warn("failed to update rule Q-value")
-			continue
+			return fmt.Errorf("update rule %s Q-value: %w", key, err)
 		}
 		updated++
 	}
 
 	if updated > 0 {
-		// Reload in-memory cache so subsequent calls in this process use the
-		// freshly-written Q-values/counters rather than the stale baseline.
-		if err := p.ruleLoader.Reload(); err != nil {
-			log.WithError(err).Warn("failed to reload rules after Q-value update")
-		}
 		log.WithFields(Fields{
 			"issue":   issueID,
 			"outcome": outcomeLabel,
@@ -137,4 +142,5 @@ func (p *Pipeline) updateQValues(issueID int64) {
 			"reward":  reward,
 		}).Info("updated rule Q-values (MemRL)")
 	}
+	return nil
 }

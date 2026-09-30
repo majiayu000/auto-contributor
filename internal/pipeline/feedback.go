@@ -50,11 +50,15 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, prResponseHours(prInfo.CreatedAt, prInfo.MergedAt, pr.CreatedAt)); err != nil {
 			return fmt.Errorf("record merged PR outcome: %w", err)
 		}
+		if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+			return err
+		}
+		if err := p.updateQValues(pr.IssueID); err != nil {
+			return err
+		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
-		p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
-		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
@@ -73,11 +77,15 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, prInfo.ClosedAt, pr.CreatedAt)); err != nil {
 			return fmt.Errorf("record closed PR outcome: %w", err)
 		}
+		if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+			return err
+		}
+		if err := p.updateQValues(pr.IssueID); err != nil {
+			return err
+		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 			return fmt.Errorf("update PR status to closed: %w", err)
 		}
-		p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
-		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
 		return nil
@@ -109,12 +117,17 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 			// terminalAt is empty: we just triggered the close so time.Now()≈close time.
 			if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
 				log.WithError(err).Warn("failed to record stale auto-close outcome")
-			} else if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
-				log.WithError(err).Warn("failed to update PR status to closed after stale auto-close")
 			} else {
 				prInfo.State = "CLOSED"
-				p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
-				p.updateQValues(pr.IssueID)
+				if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+					return err
+				}
+				if err := p.updateQValues(pr.IssueID); err != nil {
+					return err
+				}
+				if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+					return fmt.Errorf("update PR status after stale auto-close: %w", err)
+				}
 			}
 		}
 		return nil
@@ -196,12 +209,17 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 				// ordering as the stale auto-close path above).
 				if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
 					log.WithError(err).Warn("failed to record CI auto-close outcome")
-				} else if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
-					log.WithError(err).Warn("failed to update PR status to closed after CI auto-close")
 				} else {
 					prInfo.State = "CLOSED"
-					p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
-					p.updateQValues(pr.IssueID)
+					if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+						return err
+					}
+					if err := p.updateQValues(pr.IssueID); err != nil {
+						return err
+					}
+					if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+						return fmt.Errorf("update PR status after CI auto-close: %w", err)
+					}
 				}
 			}
 			return nil
@@ -485,9 +503,10 @@ func (p *Pipeline) postResponderReplies(ctx context.Context, pr *models.PullRequ
 	return repliedIDs
 }
 
+const responderCloseComment = "Closing because maintainer feedback explicitly asked to close or abandon this PR."
+
 func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment) error {
-	comment := "Closing because maintainer feedback explicitly asked to close or abandon this PR."
-	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, comment); err != nil {
+	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, responderCloseComment); err != nil {
 		return fmt.Errorf("close PR remotely: %w", err)
 	}
 	closedAt := time.Now().UTC().Format(time.RFC3339)
@@ -496,13 +515,20 @@ func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequ
 	if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, closedAt, pr.CreatedAt)); err != nil {
 		return fmt.Errorf("record responder close outcome: %w", err)
 	}
+	prInfo.State = "CLOSED"
+	prInfo.ClosedAt = closedAt
+	// ClosePR posts this reason after the cached comments were fetched. Include
+	// it now so the first close and a CLOSED retry classify the same feedback.
+	issueComments = append(issueComments, ghclient.IssueComment{Author: p.cfg.GitHubUsername, Body: responderCloseComment})
+	if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+		return err
+	}
+	if err := p.updateQValues(pr.IssueID); err != nil {
+		return err
+	}
 	if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 		return fmt.Errorf("update PR status to closed after remote close: %w", err)
 	}
-	prInfo.State = "CLOSED"
-	prInfo.ClosedAt = closedAt
-	p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
-	p.updateQValues(pr.IssueID)
 	p.cleanupWorkspace(pr)
 	return nil
 }
