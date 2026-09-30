@@ -113,6 +113,27 @@ func TestCodexExecute_TrustedAddsDangerousFlag(t *testing.T) {
 	}
 }
 
+func TestCodexExecuteAllowsNonRepositoryWorkDir(t *testing.T) {
+	cliPath := filepath.Join(t.TempDir(), "codex.sh")
+	script := `#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "--skip-git-repo-check" ]; then
+        printf 'ok'
+        exit 0
+    fi
+done
+printf 'Not inside a trusted directory and --skip-git-repo-check was not specified.\n' >&2
+exit 1
+`
+	if err := os.WriteFile(cliPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write Codex git-check stub: %v", err)
+	}
+	output, err := NewCodex(cliPath).Execute(context.Background(), t.TempDir(), "prompt", ExecutionPolicyUntrusted)
+	if err != nil || output != "ok" {
+		t.Fatalf("execute outside Git = (%q, %v), want ok", output, err)
+	}
+}
+
 func TestCodexExecuteStdin_UsesRequestedPolicy(t *testing.T) {
 	cliPath, argsFile, _ := writeRecorderCLI(t)
 	rt := NewCodex(cliPath)

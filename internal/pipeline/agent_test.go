@@ -379,6 +379,66 @@ func TestRunScoutFailsBeforeRuntimeWhenWorkDirCreationFails(t *testing.T) {
 	}
 }
 
+func TestRunScoutRejectsTempDirInsideWorkspace(t *testing.T) {
+	for _, location := range []string{"equal", "nested", "symlink"} {
+		t.Run(location, func(t *testing.T) {
+			workspaceDir := t.TempDir()
+			tempBase := workspaceDir
+			if location == "nested" {
+				tempBase = filepath.Join(workspaceDir, "tmp")
+				if err := os.Mkdir(tempBase, 0700); err != nil {
+					t.Fatalf("create nested temp base: %v", err)
+				}
+			}
+			if location == "symlink" {
+				tempBase = filepath.Join(t.TempDir(), "workspace-link")
+				if err := os.Symlink(workspaceDir, tempBase); err != nil {
+					t.Fatalf("link temp base to workspace: %v", err)
+				}
+			}
+			rt := &stubRuntime{outputs: []stubOutput{{output: `{"verdict":"PROCEED"}`}}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{WorkspaceDir: workspaceDir}
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatalf("load scout prompt: %v", err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "untrusted issue"}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			t.Setenv("TMPDIR", tempBase)
+
+			result, err := p.runScout(context.Background(), issue)
+			if result != nil || err == nil || !strings.Contains(err.Error(), "outside WorkspaceDir") {
+				t.Fatalf("runScout = (%+v, %v), want isolation failure", result, err)
+			}
+			if rt.index != 0 {
+				t.Fatalf("runtime calls = %d, want 0", rt.index)
+			}
+			entries, err := os.ReadDir(tempBase)
+			if err != nil {
+				t.Fatalf("read temp base: %v", err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "auto-contributor-scout-") {
+					t.Fatalf("scout workdir was not removed: %s", entry.Name())
+				}
+			}
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil {
+				t.Fatalf("get events: %v", err)
+			}
+			if len(events) != 1 || events[0].Success || events[0].Verdict != "error" || !strings.Contains(events[0].ErrorMessage, "outside WorkspaceDir") {
+				t.Fatalf("events = %+v, want recorded scout isolation failure", events)
+			}
+		})
+	}
+}
+
 func TestRunScoutUsesSemanticRetrieverRuleSelection(t *testing.T) {
 	rt := &stubRuntime{outputs: []stubOutput{
 		{output: `{"verdict":"PROCEED","reason":"","difficulty":1,"has_competing_pr":false,"suggested_approach":"minimal fix"}`},
