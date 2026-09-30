@@ -223,7 +223,8 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 				continue
 			}
 			body := strings.ToLower(strings.TrimSpace(c.Body))
-			if strings.Contains(body, "sign the cla") || strings.Contains(body, "sign our [contributor license agreement]") {
+			if strings.Contains(body, "sign the cla") || strings.Contains(body, "sign our [contributor license agreement]") ||
+				(strings.Contains(body, "cla") && (strings.Contains(body, "not signed") || strings.HasPrefix(body, "not all"))) {
 				claRequired = true
 				break
 			}

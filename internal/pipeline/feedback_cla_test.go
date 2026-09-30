@@ -35,6 +35,7 @@ func TestProcessPRCLAStatus(t *testing.T) {
 		{"thanks is not signed", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("Thank you for your submission!")}, false, models.PRStatusNeedsAttention, false},
 		{"not signed", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("All contributors have not signed the CLA.")}, false, models.PRStatusNeedsAttention, false},
 		{"not all signed", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("Not all contributors have signed the CLA.")}, false, models.PRStatusNeedsAttention, false},
+		{"negative status after old confirmation", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("All contributors have signed the CLA."), bot("Not all contributors have signed the CLA.")}, false, models.PRStatusNeedsAttention, false},
 		{"mixed message still requires signing", models.PRStatusNeedsAttention, []ghclient.IssueComment{bot("All contributors have signed the CLA? If not, please sign the CLA.")}, false, models.PRStatusNeedsAttention, false},
 		{"no CLA comment", models.PRStatusNeedsAttention, nil, false, models.PRStatusNeedsAttention, false},
 		{"human claim is not confirmation", models.PRStatusNeedsAttention, []ghclient.IssueComment{{Author: "contributor", Body: "All contributors have signed the CLA."}}, false, models.PRStatusNeedsAttention, false},
