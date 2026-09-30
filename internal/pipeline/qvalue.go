@@ -74,7 +74,8 @@ func (p *Pipeline) updateQValues(issueID int64) (result error) {
 		}
 		var ids []string
 		if err := json.Unmarshal([]byte(e.ExperiencesUsed), &ids); err != nil {
-			return fmt.Errorf("parse experiences_used for Q-value update: %w", err)
+			log.WithError(err).WithFields(Fields{"event": e.ID, "stage": e.Stage}).Warn("skipping malformed experiences_used for Q-value update")
+			continue
 		}
 		for _, id := range ids {
 			if !seen[id] {

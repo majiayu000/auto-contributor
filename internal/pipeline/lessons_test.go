@@ -55,7 +55,10 @@ case "$*" in
       printf 'temporary review comment fetch failure\n' >&2
       exit 1
     fi
-    printf '%s' "$GH_TEST_REVIEW_COMMENTS"
+    case "$*" in
+      *"--paginate --slurp"*) printf '%s' "[$GH_TEST_REVIEW_COMMENTS]" ;;
+      *) printf '%s' "$GH_TEST_REVIEW_COMMENTS" ;;
+    esac
     ;;
   *) printf 'unexpected arguments: %s\n' "$*" >&2; exit 1 ;;
 esac

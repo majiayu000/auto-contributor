@@ -273,7 +273,8 @@ func (p *Pipeline) stampRuleValidation(pr *models.PullRequest) error {
 
 		var ruleKeys []string
 		if err := json.Unmarshal([]byte(e.ExperiencesUsed), &ruleKeys); err != nil {
-			return fmt.Errorf("parse experiences_used for rule validation stamp: %w", err)
+			log.WithError(err).WithFields(Fields{"event": e.ID, "stage": e.Stage}).Warn("skipping malformed experiences_used for rule validation stamp")
+			continue
 		}
 
 		for _, key := range ruleKeys {

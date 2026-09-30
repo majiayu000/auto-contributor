@@ -425,6 +425,128 @@ func TestResponderCloseUsesPolledFeedback(t *testing.T) {
 	}
 }
 
+func TestProcessPRLaterInlineCommentPages(t *testing.T) {
+	for _, state := range []string{"OPEN", "CLOSED"} {
+		t.Run(state, func(t *testing.T) {
+			installFakeGH(t, false)
+			t.Setenv("GH_TEST_ISSUE_COMMENTS", `[]`)
+			t.Setenv("GH_TEST_REVIEW_COMMENTS", `[{"user":{"login":"CONTRIBUTOR"},"body":"fixed the incorrect logic","path":"main.go"}]`)
+			t.Setenv("GH_TEST_REVIEW_PAGE_2", `[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope.","path":"later.go"}]`)
+			t.Setenv("GH_TEST_FAIL_REVIEW_PAGE_2", "1")
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+			p.cfg.GitHubUsername = "contributor"
+			var rt *stubRuntime
+			if state == "OPEN" {
+				rt = prepareResponderCloseTest(t, p, pr, workspace)
+			}
+			process := func() error {
+				if state == "OPEN" {
+					return p.handleOpen(context.Background(), pr, issue.Repo, &ghclient.PRInfo{State: state})
+				}
+				return p.ProcessPR(context.Background(), pr)
+			}
+			if err := process(); err == nil || !strings.Contains(err.Error(), "review page 2 unavailable") {
+				t.Fatalf("later page failure = %v, want fetch error", err)
+			}
+			openPRs, err := database.GetOpenPRs()
+			if err != nil || len(openPRs) != 1 {
+				t.Fatalf("open PRs = %v, %v, want retryable PR", openPRs, err)
+			}
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil || len(events) != 1 || events[0].OutcomeLabel != "" {
+				t.Fatalf("events = %v, %v, want no partial label", events, err)
+			}
+			if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue != 0.5 || rule.RetrievalCount != 0 {
+				t.Fatalf("partial feedback rewarded rule: %+v", rule)
+			}
+			if _, err := os.Stat(workspace); err != nil {
+				t.Fatalf("workspace lost before retry: %v", err)
+			}
+			if rt != nil && rt.index != 0 {
+				t.Fatal("responder ran with partial feedback")
+			}
+			t.Setenv("GH_TEST_FAIL_REVIEW_PAGE_2", "0")
+			if err := process(); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if rt != nil && (rt.index != 1 || !strings.Contains(rt.prompts[0], "out of scope")) {
+				t.Fatalf("responder did not receive later page: %+v", rt)
+			}
+			events, err = database.GetEventsByIssue(issue.ID)
+			if err != nil || len(events) == 0 {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.OutcomeLabel != OutcomeRejectedScope {
+					t.Errorf("label = %q, want later maintainer scope over contributor reply", event.OutcomeLabel)
+				}
+			}
+			if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue != 0.45 || rule.RetrievalCount != 1 {
+				t.Errorf("reward = %+v, want scope reward exactly once", rule)
+			}
+			openPRs, err = database.GetOpenPRs()
+			if err != nil || len(openPRs) != 0 {
+				t.Errorf("open PRs after retry = %v, %v", openPRs, err)
+			}
+		})
+	}
+}
+
+func TestProcessPRSkipsMalformedParticipation(t *testing.T) {
+	for _, state := range []string{"CLOSED", "MERGED"} {
+		for _, malformed := range []string{`[invalid`, `["responder/corrupt-only",1]`} {
+			t.Run(state+"/"+malformed, func(t *testing.T) {
+				installFakeGH(t, false)
+				t.Setenv("GH_TEST_PR_INFO", `{"state":"`+state+`"}`)
+				t.Setenv("GH_TEST_ISSUE_COMMENTS", `[]`)
+				database := newFeedbackTestDB(t)
+				issue, pr := createFeedbackTestPR(t, database)
+				p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+				writeRule(t, p.ruleLoader.RulesDir(), &rules.Rule{ID: "corrupt-only", Stage: "responder", Severity: "medium", Confidence: 0.8, Source: "synthesized", QValue: 0.5, Body: "Do not learn from an undecodable participation record."})
+				if err := p.ruleLoader.Reload(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.Exec("UPDATE pipeline_events SET experiences_used = ? WHERE issue_id = ?", malformed, issue.ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.RecordEvent(&models.PipelineEvent{IssueID: issue.ID, Repo: issue.Repo, IssueNumber: issue.IssueNumber, Stage: "responder", StartedAt: time.Now(), ExperiencesUsed: `["responder/close-learning"]`}); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.ProcessPR(context.Background(), pr); err != nil {
+					t.Fatalf("terminal processing with malformed and valid events: %v", err)
+				}
+				wantQ, wantSuccess, wantStamp := 0.47, 0, ""
+				wantStatus := models.PRStatusClosed
+				if state == "MERGED" {
+					wantQ, wantSuccess, wantStamp = 0.55, 1, time.Now().Format("2006-01-02")
+					wantStatus = models.PRStatusMerged
+				}
+				valid := loadRule(t, p.ruleLoader, "close-learning")
+				if valid.QValue < wantQ-0.001 || valid.QValue > wantQ+0.001 || valid.RetrievalCount != 1 || valid.SuccessCount != wantSuccess || valid.LastValidatedAt != wantStamp {
+					t.Errorf("valid event rule = %+v, want reward %v success %d stamp %q", valid, wantQ, wantSuccess, wantStamp)
+				}
+				invalid := loadRule(t, p.ruleLoader, "corrupt-only")
+				if invalid.QValue != 0.5 || invalid.RetrievalCount != 0 || invalid.SuccessCount != 0 || invalid.LastValidatedAt != "" {
+					t.Errorf("malformed event changed rule: %+v", invalid)
+				}
+				status, _, _ := getFeedbackPRState(t, database, pr.ID)
+				if status != string(wantStatus) {
+					t.Errorf("status = %q, want %q", status, wantStatus)
+				}
+				openPRs, err := database.GetOpenPRs()
+				if err != nil || len(openPRs) != 0 {
+					t.Errorf("open PRs = %v, %v, want completed PR", openPRs, err)
+				}
+				if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+					t.Errorf("workspace retained after completion: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestResponderCloseUsesGitHubCreationTime(t *testing.T) {
 	installFakeGH(t, false)
 	database := newFeedbackTestDB(t)
@@ -704,7 +826,12 @@ if [ "$GH_TEST_FAIL_CLOSE" = "1" ]; then
 fi
 case "$*" in
   "pr close "*) : > "$GH_TEST_CLOSED" ;;
-  "pr view "*) printf '%s\n' '{"state":"CLOSED","headRefName":"fix/close-action"}' ;;
+  "pr view "*)
+    if [ -n "$GH_TEST_PR_INFO" ]; then
+      printf '%s\n' "$GH_TEST_PR_INFO"
+    else
+      printf '%s\n' '{"state":"CLOSED","headRefName":"fix/close-action"}'
+    fi ;;
   *"repos/owner/repo/issues/42/comments"*)
     if [ "$GH_TEST_FAIL_ISSUE_COMMENTS" = "1" ] || { [ "$GH_TEST_FAIL_COMMENTS_AFTER_CLOSE" = "1" ] && [ -f "$GH_TEST_CLOSED" ]; }; then
       printf 'issue comments unavailable\n' >&2
@@ -720,7 +847,16 @@ case "$*" in
       printf 'inline comments unavailable\n' >&2
       exit 1
     fi
-    printf '%s\n' "${GH_TEST_REVIEW_COMMENTS:-[]}" ;;
+    case "$*" in
+      *"--paginate --slurp"*)
+        if [ "$GH_TEST_FAIL_REVIEW_PAGE_2" = "1" ]; then
+          printf '%s\n' "[${GH_TEST_REVIEW_COMMENTS:-[]}]"
+          printf 'review page 2 unavailable\n' >&2
+          exit 1
+        fi
+        printf '%s\n' "[${GH_TEST_REVIEW_COMMENTS:-[]},${GH_TEST_REVIEW_PAGE_2:-[]}]" ;;
+      *) printf '%s\n' "${GH_TEST_REVIEW_COMMENTS:-[]}" ;;
+    esac ;;
 esac
 exit 0
 `
