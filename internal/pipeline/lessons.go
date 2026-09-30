@@ -180,9 +180,20 @@ func isBot(author string) bool {
 // extractAndStoreLessons stores lessons using issue comments fetched before the
 // local PR became terminal, so failed classification inputs remain retryable.
 func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment) {
+	comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+	if err != nil {
+		log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to fetch comments for lesson extraction")
+		comments = nil
+	}
+	p.storeLessons(pr, prRepo, prInfo, comments, issueComments)
+}
+
+// storeLessons uses the same feedback for outcome classification and lessons.
+// Responder closes pass their polled comments to avoid fetching again after close.
+func (p *Pipeline) storeLessons(pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment) {
 	// Always update outcome and label events unconditionally — a transient DB error on a prior
 	// call must not permanently stall outcome tracking even when lessons were already saved.
-	label := ClassifyOutcome(prInfo, issueComments, pr)
+	label := ClassifyOutcome(prInfo, issueComments, comments, pr)
 	if err := p.db.LabelEventsByIssue(pr.IssueID, label); err != nil {
 		log.WithFields(Fields{"error": err}).Warn("failed to label pipeline events")
 	} else {
@@ -203,13 +214,6 @@ func (p *Pipeline) extractAndStoreLessons(ctx context.Context, pr *models.PullRe
 	count, _ := p.db.CountLessonsByPR(pr.ID)
 	if count > 0 {
 		return
-	}
-
-	// Get inline review comments
-	comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
-	if err != nil {
-		log.WithError(err).WithField("pr", pr.PRURL).Warn("failed to fetch comments for lesson extraction")
-		comments = nil
 	}
 
 	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments)
