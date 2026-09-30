@@ -12,6 +12,7 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
+	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/pkg/models"
 )
 
@@ -88,14 +89,16 @@ func TestFinalizeResponderActionCloseClosesRemoteBeforeLocalStatus(t *testing.T)
 	database := newFeedbackTestDB(t)
 	_, pr := createFeedbackTestPR(t, database)
 	p := &Pipeline{
-		db: database,
-		gh: ghclient.New(&config.Config{}),
+		cfg: &config.Config{WorkspaceDir: t.TempDir()},
+		db:  database,
+		gh:  ghclient.New(&config.Config{}),
 	}
 
 	err := p.finalizeResponderAction(
 		context.Background(),
 		pr,
 		"owner/repo",
+		&ghclient.PRInfo{State: "OPEN"},
 		FeedbackResult{Action: "close"},
 		pr.FeedbackRound+1,
 	)
@@ -137,6 +140,7 @@ func TestFinalizeResponderActionCloseFailureLeavesPRRetryable(t *testing.T) {
 		context.Background(),
 		pr,
 		"owner/repo",
+		&ghclient.PRInfo{State: "OPEN"},
 		FeedbackResult{Action: "close"},
 		pr.FeedbackRound+1,
 	)
@@ -169,6 +173,7 @@ func TestExecuteResponderActionCloseFailureSkipsReplies(t *testing.T) {
 		context.Background(),
 		pr,
 		"owner/repo",
+		&ghclient.PRInfo{State: "OPEN"},
 		FeedbackResult{
 			Action: "close",
 			Replies: []FeedbackReply{
@@ -205,6 +210,147 @@ func TestExecuteResponderActionCloseFailureSkipsReplies(t *testing.T) {
 	}
 }
 
+func TestResponderCloseLearnsOutcomeAndCleansWorkspace(t *testing.T) {
+	installFakeGH(t, false)
+	database := newFeedbackTestDB(t)
+	issue, pr := createFeedbackTestPR(t, database)
+	p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+
+	prInfo := &ghclient.PRInfo{State: "OPEN", Reviews: []ghclient.PRReview{
+		{Author: "reviewer", State: "CHANGES_REQUESTED", Body: "Please add a test for the incorrect close behavior."},
+	}}
+	if err := p.executeResponderAction(context.Background(), pr, issue.Repo, prInfo, FeedbackResult{Action: "close"}, 1); err != nil {
+		t.Fatalf("executeResponderAction: %v", err)
+	}
+
+	profile, err := database.GetRepoProfile(issue.Repo)
+	if err != nil {
+		t.Fatalf("GetRepoProfile: %v", err)
+	}
+	if profile == nil || profile.TotalPRsSubmitted != 1 || profile.TotalRejected != 1 || profile.TotalMerged != 0 || profile.MergeRate != 0 {
+		t.Errorf("repo profile = %+v, want one rejected PR", profile)
+	}
+	if profile != nil && (profile.AvgResponseTimeHours == nil || *profile.AvgResponseTimeHours < 1.9 || *profile.AvgResponseTimeHours > 2.1) {
+		t.Errorf("response time = %v, want approximately two hours", profile.AvgResponseTimeHours)
+	}
+
+	events, err := database.GetEventsByIssue(issue.ID)
+	if err != nil {
+		t.Fatalf("GetEventsByIssue: %v", err)
+	}
+	if len(events) != 1 || events[0].OutcomeLabel != OutcomeRejectedScope {
+		t.Errorf("events = %+v, want rejected_scope label", events)
+	}
+	trajectories, err := database.GetRecentTrajectories(1)
+	if err != nil {
+		t.Fatalf("GetRecentTrajectories: %v", err)
+	}
+	if len(trajectories) != 1 || trajectories[0].OutcomeLabel != OutcomeRejectedScope || trajectories[0].Success {
+		t.Errorf("trajectories = %+v, want rejected_scope and success=false", trajectories)
+	}
+	lessons, err := database.CountLessonsByPR(pr.ID)
+	if err != nil {
+		t.Fatalf("CountLessonsByPR: %v", err)
+	}
+	if lessons != 2 {
+		t.Errorf("lessons = %d, want both cached review and maintainer scope lessons", lessons)
+	}
+	rule := loadRule(t, p.ruleLoader, "close-learning")
+	if rule.QValue < 0.449 || rule.QValue > 0.451 || rule.RetrievalCount != 1 || rule.SuccessCount != 0 {
+		t.Errorf("rule = %+v, want Q=0.45 and one unsuccessful retrieval", rule)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("workspace stat error = %v, want removed workspace", err)
+	}
+}
+
+func TestResponderCloseDBFailureRemainsRetryable(t *testing.T) {
+	for _, column := range []string{"outcome_recorded", "status"} {
+		t.Run(column, func(t *testing.T) {
+			logPath := installFakeGH(t, false)
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+			if _, err := database.Exec("CREATE TRIGGER fail_close_write BEFORE UPDATE OF " + column + " ON pull_requests BEGIN SELECT RAISE(ABORT, 'close write failed'); END"); err != nil {
+				t.Fatalf("create failure trigger: %v", err)
+			}
+
+			err := p.executeResponderAction(context.Background(), pr, issue.Repo, &ghclient.PRInfo{State: "OPEN"}, FeedbackResult{Action: "close"}, 1)
+			if err == nil || !strings.Contains(err.Error(), "close write failed") {
+				t.Fatalf("executeResponderAction error = %v, want database write failure", err)
+			}
+			status, round, checked := getFeedbackPRState(t, database, pr.ID)
+			if status != string(models.PRStatusOpen) || round != 0 || checked.Valid {
+				t.Errorf("PR state = %s, %d, %v, want open, 0, unchecked", status, round, checked)
+			}
+			openPRs, err := database.GetOpenPRs()
+			if err != nil || len(openPRs) != 1 {
+				t.Fatalf("GetOpenPRs = %v, %v, want PR available for retry", openPRs, err)
+			}
+			if _, err := os.Stat(workspace); err != nil {
+				t.Errorf("workspace stat: %v, want retained workspace before retry", err)
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil || !strings.Contains(string(logData), "pr close 42 -R owner/repo") {
+				t.Fatalf("fake gh log = %q, %v, want successful remote close before DB failure", logData, err)
+			}
+
+			if _, err := database.Exec("DROP TRIGGER fail_close_write"); err != nil {
+				t.Fatalf("drop failure trigger: %v", err)
+			}
+			if err := p.ProcessPR(context.Background(), openPRs[0]); err != nil {
+				t.Fatalf("retry ProcessPR: %v", err)
+			}
+			profile, err := database.GetRepoProfile(issue.Repo)
+			if err != nil || profile == nil || profile.TotalRejected != 1 || profile.TotalPRsSubmitted != 1 {
+				t.Errorf("retried profile = %+v, %v, want one rejected PR without double counting", profile, err)
+			}
+			status, _, _ = getFeedbackPRState(t, database, pr.ID)
+			if status != string(models.PRStatusClosed) {
+				t.Errorf("retried PR status = %q, want closed", status)
+			}
+			if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+				t.Errorf("retried workspace stat error = %v, want removed workspace", err)
+			}
+			rule := loadRule(t, p.ruleLoader, "close-learning")
+			if rule.RetrievalCount != 1 {
+				t.Errorf("retried retrieval count = %d, want 1", rule.RetrievalCount)
+			}
+		})
+	}
+}
+
+func newResponderLearningTestPipeline(t *testing.T, database *db.DB, issue *models.Issue, pr *models.PullRequest) (*Pipeline, string) {
+	t.Helper()
+	rulesDir := t.TempDir()
+	writeRule(t, rulesDir, &rules.Rule{
+		ID: "close-learning", Stage: "responder", Severity: "medium", Confidence: 0.8,
+		Source: "synthesized", QValue: 0.5, Body: "Respect maintainer scope feedback.",
+	})
+	pr.CreatedAt = time.Now().Add(-2 * time.Hour)
+	if err := database.RecordEvent(&models.PipelineEvent{
+		IssueID: issue.ID, Repo: issue.Repo, IssueNumber: issue.IssueNumber,
+		Stage: "responder", StartedAt: time.Now(), ExperiencesUsed: `["responder/close-learning"]`,
+	}); err != nil {
+		t.Fatalf("RecordEvent: %v", err)
+	}
+	if err := database.SaveTrajectory(&models.Trajectory{
+		IssueID: issue.ID, PRNumber: pr.PRNumber, Repo: issue.Repo, IssueNumber: issue.IssueNumber,
+	}); err != nil {
+		t.Fatalf("SaveTrajectory: %v", err)
+	}
+	cfg := &config.Config{WorkspaceDir: t.TempDir()}
+	workspace := filepath.Join(cfg.WorkspaceDir, "owner-repo-70")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	p := &Pipeline{cfg: cfg, db: database, gh: ghclient.New(cfg), ruleLoader: rules.NewRuleLoader(rulesDir)}
+	if err := p.ruleLoader.Load(); err != nil {
+		t.Fatalf("load rules: %v", err)
+	}
+	return p, workspace
+}
+
 func TestPRResponseHours_BothTimestamps(t *testing.T) {
 	created := "2024-01-01T00:00:00Z"
 	terminal := "2024-01-01T02:00:00Z"
@@ -234,6 +380,11 @@ if [ "$GH_TEST_FAIL_CLOSE" = "1" ]; then
   printf 'close failed\n' >&2
   exit 1
 fi
+case "$*" in
+  "pr view "*) printf '%s\n' '{"state":"CLOSED","headRefName":"fix/close-action"}' ;;
+  *"repos/owner/repo/issues/42/comments"*) printf '%s\n' '[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope."}]' ;;
+  *"repos/owner/repo/pulls/42/comments"*) printf '%s\n' '[]' ;;
+esac
 exit 0
 `
 	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {

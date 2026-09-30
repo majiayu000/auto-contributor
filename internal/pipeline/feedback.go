@@ -397,7 +397,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	}
 
 	newRound := pr.FeedbackRound + 1
-	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+	if err := p.executeResponderAction(ctx, pr, prRepo, prInfo, result, newRound); err != nil {
 		return err
 	}
 
@@ -411,9 +411,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	return nil
 }
 
-func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
+func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, result FeedbackResult, newRound int) error {
 	if result.Action == "close" {
-		if err := p.closePRFromResponder(ctx, pr, prRepo); err != nil {
+		if err := p.closePRFromResponder(ctx, pr, prRepo, prInfo); err != nil {
 			return err
 		}
 	}
@@ -430,8 +430,8 @@ func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRe
 	return nil
 }
 
-func (p *Pipeline) finalizeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
-	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+func (p *Pipeline) finalizeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, result FeedbackResult, newRound int) error {
+	if err := p.executeResponderAction(ctx, pr, prRepo, prInfo, result, newRound); err != nil {
 		return err
 	}
 	return nil
@@ -449,14 +449,23 @@ func (p *Pipeline) postResponderReplies(ctx context.Context, pr *models.PullRequ
 	return repliedIDs
 }
 
-func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string) error {
+func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo) error {
 	comment := "Closing because maintainer feedback explicitly asked to close or abandon this PR."
 	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, comment); err != nil {
 		return fmt.Errorf("close PR remotely: %w", err)
 	}
+	// Keep the PR pollable if outcome persistence fails after the remote close.
+	// The next cycle will retry through ProcessPR's GitHub CLOSED handler.
+	if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
+		return fmt.Errorf("record responder close outcome: %w", err)
+	}
 	if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 		return fmt.Errorf("update PR status to closed after remote close: %w", err)
 	}
+	prInfo.State = "CLOSED"
+	p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
+	p.updateQValues(pr.IssueID)
+	p.cleanupWorkspace(pr)
 	return nil
 }
 
