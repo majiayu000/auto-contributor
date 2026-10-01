@@ -291,7 +291,10 @@ The CI baseline for this repository is `go vet ./...`, `go build ./...`, and
 - Suggested GitHub topics: `automation`, `github`, `claude-code`, `pull-requests`,
   `go`.
 - Published launch baseline: [v0.1.0](https://github.com/majiayu000/auto-contributor/releases/tag/v0.1.0).
-  Check the release assets and notes for that version; the current main branch can differ.
+  Use the tag and release notes to identify that source snapshot; the current main branch can differ.
+  The `version` command in that tag and current source prints `auto-contributor v2.0.0 (Go)`.
+  This is a hard-coded label, not proof of a published v2.0.0 release. For reproducible
+  reports, include the release tag or source commit (`git rev-parse HEAD`).
 
 ## Rate Limiting
 
