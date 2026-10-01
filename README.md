@@ -4,6 +4,23 @@ Automated GitHub contribution bot powered by Claude Code CLI. Discovers issues, 
 
 [Installation](#installation) · [Controlled quick start](#controlled-single-issue-flow) · [Launch-readiness notes](docs/launch-readiness.md)
 
+## Choose an operating mode
+
+| Need | Start here | Effect |
+| --- | --- | --- |
+| Inspect candidate issues first | [Discovery only](#smart-discovery-only) | Discover candidates without solving or submitting PRs |
+| Work on one manually chosen issue | [Controlled single-issue flow](#controlled-single-issue-flow) | `pipeline` can create commits and a pull request |
+| Repeat contributions on a schedule | [Loop mode](#continuous-loop-mode-recommended) | Repeats discovery and solving; establish single-issue proof first |
+| Monitor processing | [Web dashboard](#features) | Observe the worker; dashboard access is not maintainer approval |
+
+This Go CLI orchestrates your local Claude Code and authenticated `gh` tools.
+For automation triggered inside one repository's workflows, review the official
+[Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions) integration.
+These are different operating models; this project does not install that Action.
+
+[Published releases](https://github.com/majiayu000/auto-contributor/releases) ·
+[Changelog](CHANGELOG.md) · [Report a problem](https://github.com/majiayu000/auto-contributor/issues) · [MIT license](LICENSE)
+
 ## Features
 
 - **Claude-Powered Discovery**: Uses Claude Code to intelligently find and analyze GitHub issues
@@ -273,8 +290,8 @@ The CI baseline for this repository is `go vet ./...`, `go build ./...`, and
 - Launch readiness: see `docs/launch-readiness.md`.
 - Suggested GitHub topics: `automation`, `github`, `claude-code`, `pull-requests`,
   `go`.
-- Initial release recommendation: create a `v0.1.0` GitHub release from a
-  reviewed main branch after the launch-readiness PR merges.
+- Published launch baseline: [v0.1.0](https://github.com/majiayu000/auto-contributor/releases/tag/v0.1.0).
+  Check the release assets and notes for that version; the current main branch can differ.
 
 ## Rate Limiting
 
