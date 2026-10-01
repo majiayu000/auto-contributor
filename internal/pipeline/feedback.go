@@ -53,7 +53,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
 			return err
 		}
-		if err := p.updateQValues(pr.IssueID); err != nil {
+		if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
 			return err
 		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
@@ -80,7 +80,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
 			return err
 		}
-		if err := p.updateQValues(pr.IssueID); err != nil {
+		if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
 			return err
 		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
@@ -122,7 +122,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 				if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
 					return err
 				}
-				if err := p.updateQValues(pr.IssueID); err != nil {
+				if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
 					return err
 				}
 				if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
@@ -214,7 +214,7 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 					if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
 						return err
 					}
-					if err := p.updateQValues(pr.IssueID); err != nil {
+					if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
 						return err
 					}
 					if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
@@ -523,7 +523,7 @@ func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequ
 	if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
 		return err
 	}
-	if err := p.updateQValues(pr.IssueID); err != nil {
+	if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
 		return err
 	}
 	if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {

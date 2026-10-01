@@ -44,7 +44,7 @@ func rewardForOutcome(outcomeLabel string) float64 {
 //
 // Called after storeLessons, which has already labelled all events
 // with the outcome via LabelEventsByIssue.
-func (p *Pipeline) updateQValues(issueID int64) (result error) {
+func (p *Pipeline) updateQValues(issueID int64, rewardID string) (result error) {
 	events, err := p.db.GetEventsByIssue(issueID)
 	if err != nil {
 		return fmt.Errorf("get events for Q-value update: %w", err)
@@ -90,8 +90,8 @@ func (p *Pipeline) updateQValues(issueID int64) (result error) {
 	}
 
 	rulesDir := p.ruleLoader.RulesDir()
-	// Refresh the cache even after a partial write so a later retry uses what
-	// was actually persisted. YAML rewards remain outside the SQL transaction.
+	// Refresh after every successful writer call, including an already-applied
+	// reward: the previous attempt may have committed but failed to Reload.
 	updated := 0
 	defer func() {
 		if updated > 0 {
@@ -116,20 +116,7 @@ func (p *Pipeline) updateQValues(issueID int64) (result error) {
 			continue
 		}
 
-		// Initialise QValue to 0.5 for rules that predate this feature.
-		qOld := rule.QValue
-		if qOld == 0 {
-			qOld = 0.5
-		}
-
-		newQ := qOld + qAlpha*(reward-qOld)
-		newRetrievals := rule.RetrievalCount + 1
-		newSuccess := rule.SuccessCount
-		if reward >= 1.0 {
-			newSuccess++
-		}
-
-		if err := rules.UpdateRuleQValue(rulesDir, ruleID, rule.Stage, newQ, newRetrievals, newSuccess); err != nil {
+		if err := rules.UpdateRuleQValue(rulesDir, ruleID, rule.Stage, rewardID, reward, qAlpha); err != nil {
 			return fmt.Errorf("update rule %s Q-value: %w", key, err)
 		}
 		updated++
@@ -141,7 +128,7 @@ func (p *Pipeline) updateQValues(issueID int64) (result error) {
 			"outcome": outcomeLabel,
 			"rules":   updated,
 			"reward":  reward,
-		}).Info("updated rule Q-values (MemRL)")
+		}).Info("processed rule Q-value rewards (MemRL)")
 	}
 	return nil
 }

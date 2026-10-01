@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -341,9 +342,6 @@ func TestResponderCloseDBFailureRemainsRetryable(t *testing.T) {
 			}
 			rule := loadRule(t, p.ruleLoader, "close-learning")
 			wantCount := 1
-			if column == "status" {
-				wantCount = 2 // YAML rewards are outside the SQL terminal write.
-			}
 			if rule.RetrievalCount != wantCount {
 				t.Errorf("retried retrieval count = %d, want %d", rule.RetrievalCount, wantCount)
 			}
@@ -665,9 +663,6 @@ func TestResponderCloseLearningFailureRemainsRetryable(t *testing.T) {
 			for _, id := range []string{"close-learning", "second-learning"} {
 				rule := loadRule(t, p.ruleLoader, id)
 				wantCount, wantQ := 1, 0.45
-				if failure == "terminal status" || (failure == "second rule" && id == "close-learning") {
-					wantCount, wantQ = 2, 0.405
-				}
 				if rule.RetrievalCount != wantCount || rule.QValue < wantQ-0.001 || rule.QValue > wantQ+0.001 {
 					t.Errorf("%s after retry = %+v, want Q=%v count=%d", id, rule, wantQ, wantCount)
 				}
@@ -842,7 +837,7 @@ case "$*" in
     else
       printf '%s\n' '{"state":"CLOSED","headRefName":"fix/close-action"}'
     fi ;;
-  *"repos/owner/repo/issues/42/comments"*)
+  *"repos/owner/repo/issues/42/comments"*|*"repos/owner/repo/issues/43/comments"*)
     if [ "$GH_TEST_FAIL_ISSUE_COMMENTS" = "1" ] || { [ "$GH_TEST_FAIL_COMMENTS_AFTER_CLOSE" = "1" ] && [ -f "$GH_TEST_CLOSED" ]; }; then
       printf 'issue comments unavailable\n' >&2
       exit 1
@@ -858,7 +853,7 @@ case "$*" in
         printf '[%s,%s]\n' "$issue_comments" "${GH_TEST_ISSUE_PAGE_2:-[]}" ;;
       *) printf '%s\n' "$issue_comments" ;;
     esac ;;
-  *"repos/owner/repo/pulls/42/comments"*)
+  *"repos/owner/repo/pulls/42/comments"*|*"repos/owner/repo/pulls/43/comments"*)
     if [ "$GH_TEST_FAIL_REVIEW_COMMENTS" = "1" ] || { [ "$GH_TEST_FAIL_COMMENTS_AFTER_CLOSE" = "1" ] && [ -f "$GH_TEST_CLOSED" ]; }; then
       printf 'inline comments unavailable\n' >&2
       exit 1
@@ -949,4 +944,68 @@ func getFeedbackPRState(t *testing.T, database *db.DB, prID int64) (string, int,
 		t.Fatalf("query PR state: %v", err)
 	}
 	return status, round, checked
+}
+
+func TestProcessPRRewardRetryAfterAnotherPR(t *testing.T) {
+	installFakeGH(t, false)
+	t.Setenv("GH_TEST_PR_INFO", `{"state":"CLOSED"}`)
+	t.Setenv("GH_TEST_ISSUE_COMMENTS", `[{"user":{"login":"maintainer"},"body":"Please close this PR; these changes are out of scope."}]`)
+	database := newFeedbackTestDB(t)
+	issueA, prA := createFeedbackTestPR(t, database)
+	pA, _ := newResponderLearningTestPipeline(t, database, issueA, prA)
+
+	issueB := &models.Issue{Repo: issueA.Repo, IssueNumber: 71, Title: "Another contribution", Status: models.IssueStatusCompleted}
+	if err := database.CreateIssue(issueB); err != nil {
+		t.Fatal(err)
+	}
+	prB := &models.PullRequest{IssueID: issueB.ID, PRNumber: 43, PRURL: "https://github.com/owner/repo/pull/43", BranchName: "fix/another", Status: models.PRStatusOpen}
+	if err := database.CreatePullRequest(prB); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordEvent(&models.PipelineEvent{IssueID: issueB.ID, Repo: issueB.Repo, IssueNumber: issueB.IssueNumber, Stage: "responder", StartedAt: time.Now(), ExperiencesUsed: `["responder/close-learning","close-learning"]`}); err != nil {
+		t.Fatal(err)
+	}
+	// B starts with a separate, stale loader so its reward must use A's persisted values.
+	pB := *pA
+	pB.ruleLoader = rules.NewRuleLoader(pA.ruleLoader.RulesDir())
+	if err := pB.ruleLoader.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(fmt.Sprintf("CREATE TRIGGER fail_a_status BEFORE UPDATE OF status ON pull_requests WHEN OLD.id = %d BEGIN SELECT RAISE(ABORT, 'terminal write unavailable'); END", prA.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := pA.ProcessPR(context.Background(), prA); err == nil || !strings.Contains(err.Error(), "terminal write unavailable") {
+		t.Fatalf("A error = %v, want final SQL failure after reward", err)
+	}
+	if rule := loadRule(t, pA.ruleLoader, "close-learning"); rule.QValue != 0.45 || rule.RetrievalCount != 1 || rule.SuccessCount != 0 {
+		t.Fatalf("A reward = %+v, want Q=0.45, retrieval=1, success=0", rule)
+	}
+	t.Setenv("GH_TEST_PR_INFO", `{"state":"MERGED"}`)
+	if err := pB.ProcessPR(context.Background(), prB); err != nil {
+		t.Fatalf("B: %v", err)
+	}
+	if rule := loadRule(t, pB.ruleLoader, "close-learning"); rule.QValue < 0.5049 || rule.QValue > 0.5051 || rule.RetrievalCount != 2 || rule.SuccessCount != 1 {
+		t.Errorf("B reward = %+v, want Q=0.505, retrieval=2, success=1", rule)
+	}
+	if _, err := database.Exec("DROP TRIGGER fail_a_status"); err != nil {
+		t.Fatal(err)
+	}
+	// Restart A after B. Replaying A must neither reward it again nor lose B's reward.
+	pA.ruleLoader = rules.NewRuleLoader(pA.ruleLoader.RulesDir())
+	if err := pA.ruleLoader.Load(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GH_TEST_PR_INFO", `{"state":"CLOSED"}`)
+	if err := pA.ProcessPR(context.Background(), prA); err != nil {
+		t.Fatalf("A retry: %v", err)
+	}
+	if rule := loadRule(t, pA.ruleLoader, "close-learning"); rule.QValue < 0.5049 || rule.QValue > 0.5051 || rule.RetrievalCount != 2 || rule.SuccessCount != 1 {
+		t.Errorf("A/B/A reward = %+v, want Q=0.505, retrieval=2, success=1", rule)
+	}
+	if open, err := database.GetOpenPRs(); err != nil || len(open) != 0 {
+		t.Errorf("open PRs = %v, %v, want both terminal transitions complete", open, err)
+	}
+	if profile, err := database.GetRepoProfile(issueA.Repo); err != nil || profile == nil || profile.TotalPRsSubmitted != 2 || profile.TotalRejected != 1 || profile.TotalMerged != 1 {
+		t.Errorf("profile = %+v, %v, want one rejected and one merged outcome", profile, err)
+	}
 }
