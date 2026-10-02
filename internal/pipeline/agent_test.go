@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mattn/go-sqlite3"
-
 	"github.com/majiayu000/auto-contributor/internal/config"
 	"github.com/majiayu000/auto-contributor/internal/db"
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
@@ -127,20 +125,28 @@ func TestProcessIssueReturnsPRCountErrorsBeforeScout(t *testing.T) {
 		failQuery int
 		wantError string
 	}{
-		{"merged", 1, "count merged PRs"},
-		{"open", 2, "count open PRs"},
+		{"merged", 2, "count merged PRs"},
+		{"open", 3, "count open PRs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, database := newLoopTestPipeline(t, &stubRuntime{})
-			p.cfg = &config.Config{MaxPRsPerRepo: 1}
+			rt := &stubRuntime{outputs: []stubOutput{{output: `{"verdict":"SKIP","reason":"PR cap scout reached"}`}}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{MaxPRsPerRepo: 1, WorkspaceDir: t.TempDir()}
 			p.gh = ghclient.New(p.cfg)
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
 			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 103, Title: "PR cap", Status: models.IssueStatusDiscovered}
 			if err := database.CreateIssue(issue); err != nil {
 				t.Fatalf("create issue: %v", err)
 			}
 			ghLog := installPRCapTestGH(t)
 
-			// Deny only the selected real count query on the single SQLite connection.
+			// The blacklist SELECT runs first; deny only the selected PR count query.
 			database.SetMaxOpenConns(1)
 			conn, err := database.Conn(context.Background())
 			if err != nil {
@@ -183,7 +189,7 @@ func TestProcessIssueReturnsPRCountErrorsBeforeScout(t *testing.T) {
 			if !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrAuth {
 				t.Errorf("ProcessIssue error = %v, want original SQLite authorization error", err)
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) || !strings.Contains(err.Error(), issue.Repo) {
 				t.Errorf("ProcessIssue error = %v, want %q context", err, tc.wantError)
 			}
 			if queryCount != tc.failQuery {
@@ -203,6 +209,9 @@ func TestProcessIssueReturnsPRCountErrorsBeforeScout(t *testing.T) {
 			if err != nil {
 				t.Fatalf("get events: %v", err)
 			}
+			if len(rt.policies) != 0 {
+				t.Errorf("agent dispatched after count failure: %v", rt.policies)
+			}
 			if len(events) != 0 {
 				t.Errorf("pipeline events = %d, want 0", len(events))
 			}
@@ -218,15 +227,25 @@ func TestProcessIssuePRCapUsesSuccessfulCounts(t *testing.T) {
 		open      int
 		wantScout bool
 	}{
+		{"default under limit", 0, 0, 1, true},
+		{"configured under limit", 3, 0, 2, true},
 		{"default limit", 0, 0, 2, false},
 		{"configured limit", 3, 0, 3, false},
 		{"merged allowance", 1, 1, 1, true},
 		{"merged limit reached", 1, 1, 2, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p, database := newLoopTestPipeline(t, &stubRuntime{})
-			p.cfg = &config.Config{MaxPRsPerRepo: tc.maxPR}
+			rt := &stubRuntime{outputs: []stubOutput{{output: `{"verdict":"SKIP","reason":"PR cap scout reached"}`}}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{MaxPRsPerRepo: tc.maxPR, WorkspaceDir: t.TempDir()}
 			p.gh = ghclient.New(p.cfg)
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
 			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 103, Title: "PR cap", Status: models.IssueStatusDiscovered}
 			if err := database.CreateIssue(issue); err != nil {
 				t.Fatalf("create issue: %v", err)
@@ -245,15 +264,15 @@ func TestProcessIssuePRCapUsesSuccessfulCounts(t *testing.T) {
 			ghLog := installPRCapTestGH(t)
 			err := p.ProcessIssue(context.Background(), issue)
 			if tc.wantScout {
-				if err == nil || !strings.Contains(err.Error(), "PR cap scout reached") {
-					t.Fatalf("ProcessIssue error = %v, want Scout precollection reached", err)
+				if err != nil || len(rt.policies) != 1 || rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+					t.Fatalf("ProcessIssue error = %v, agent policies = %v, want normal Scout processing", err, rt.policies)
 				}
 				if _, err := os.Stat(ghLog); err != nil {
 					t.Fatalf("Scout did not call GitHub: %v", err)
 				}
 			} else {
-				if err != nil {
-					t.Fatalf("ProcessIssue error = %v, want nil on reached cap", err)
+				if err != nil || len(rt.policies) != 0 {
+					t.Fatalf("ProcessIssue error = %v, policies = %v, want no work on reached cap", err, rt.policies)
 				}
 				if _, err := os.Stat(ghLog); !os.IsNotExist(err) {
 					t.Fatalf("GitHub called after reached cap: %v", err)
@@ -274,7 +293,12 @@ func installPRCapTestGH(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "gh.log")
-	script := "#!/bin/sh\necho called >> " + shellQuote(logPath) + "\necho 'PR cap scout reached' >&2\nexit 1\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(logPath) + `
+case "$1 $2" in
+ api*|"pr list") printf '%s' '[]' ;;
+ *) printf 'unexpected gh args: %s\n' "$*" >&2; exit 1 ;;
+esac
+`
 	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0755); err != nil {
 		t.Fatalf("write fake gh: %v", err)
 	}
