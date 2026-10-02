@@ -18,6 +18,7 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
+	"github.com/mattn/go-sqlite3"
 )
 
 var _ runtime.Runtime = (*stubRuntime)(nil)
@@ -776,6 +777,108 @@ printf '%s' '{"verdict":"SKIP","reason":"synthetic scout fixture"}'
 			}
 			if err != nil || saved.Status != wantStatus {
 				t.Errorf("stored issue = %+v, %v, want %s", saved, err, wantStatus)
+			}
+		})
+	}
+}
+
+func TestProcessIssueBlacklist(t *testing.T) {
+	for _, state := range []string{"allowed", "blacklisted", "unavailable", "scout failure"} {
+		t.Run(state, func(t *testing.T) {
+			scoutErr := errors.New("synthetic scout failure")
+			output := stubOutput{output: `{"verdict":"SKIP","reason":"synthetic scout fixture"}`}
+			if state == "scout failure" {
+				output = stubOutput{err: scoutErr}
+			}
+			rt := &stubRuntime{outputs: []stubOutput{output}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{WorkspaceDir: t.TempDir()}
+			p.gh = ghclient.New(p.cfg)
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			issue := &models.Issue{Repo: "upstream/project", IssueNumber: 7, Title: "synthetic issue", Status: models.IssueStatusDiscovered}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatal(err)
+			}
+			switch state {
+			case "blacklisted":
+				if err := database.AddToBlacklist(issue.Repo, "synthetic ban"); err != nil {
+					t.Fatal(err)
+				}
+			case "unavailable":
+				if _, err := database.Exec("DROP TABLE blacklist"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixtureDir := t.TempDir()
+			ghLog := filepath.Join(fixtureDir, "gh.log")
+			t.Setenv("PROCESS_BLACKLIST_GH_LOG", ghLog)
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$PROCESS_BLACKLIST_GH_LOG"
+case "$1" in
+ api) printf '%s' '[]' ;;
+ pr) if [ "$2" = list ]; then printf '%s' '[]'; else exit 9; fi ;;
+ *) exit 9 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(fixtureDir, "gh"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := p.ProcessIssue(context.Background(), issue)
+			switch state {
+			case "unavailable":
+				var sqliteErr sqlite3.Error
+				if !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrError || !strings.Contains(err.Error(), "blacklist") || !strings.Contains(err.Error(), issue.Repo) {
+					t.Errorf("ProcessIssue error = %v, want contextual wrapped SQLite lookup failure", err)
+				}
+			case "scout failure":
+				if !errors.Is(err, scoutErr) {
+					t.Errorf("ProcessIssue error = %v, want original scout failure", err)
+				}
+			default:
+				if err != nil {
+					t.Errorf("ProcessIssue error = %v, want nil", err)
+				}
+			}
+			calls, readErr := os.ReadFile(ghLog)
+			blocked := state == "blacklisted" || state == "unavailable"
+			if blocked {
+				if !os.IsNotExist(readErr) || len(rt.policies) != 0 {
+					t.Errorf("blocked repo dispatched work: GitHub calls %q (%v), runtime calls %d", calls, readErr, len(rt.policies))
+				}
+			} else if readErr != nil || len(calls) == 0 || len(rt.policies) != 1 || rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+				t.Errorf("allowed repo did not run normal scout: GitHub calls %q (%v), runtime policies %v", calls, readErr, rt.policies)
+			}
+			saved, err := database.GetIssueByID(issue.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus := models.IssueStatusAbandoned
+			if state == "unavailable" {
+				wantStatus = models.IssueStatusDiscovered
+			}
+			if state == "scout failure" {
+				wantStatus = models.IssueStatusFailed
+			}
+			if saved.Status != wantStatus {
+				t.Errorf("stored status = %s, want %s", saved.Status, wantStatus)
+			}
+			var prs int
+			if err := database.QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&prs); err != nil {
+				t.Fatal(err)
+			}
+			if prs != 0 {
+				t.Errorf("unexpected PR records = %d", prs)
+			}
+			entries, err := os.ReadDir(p.cfg.WorkspaceDir)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("unexpected workspace writes = %v, %v", entries, err)
 			}
 		})
 	}
