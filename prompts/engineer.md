@@ -69,10 +69,14 @@ Run ALL of these before marking complete:
 
 ## Git Setup
 
+{{ if .GitHubEmail }}
 ```bash
-git config user.name "majiayu000"
-git config user.email "user@example.com"
+git config user.name "{{ .GitHubUsername }}"
+git config user.email "{{ .GitHubEmail }}"
 ```
+{{ else }}
+No email is configured. Keep the existing Git name and email unchanged.
+{{ end }}
 
 ## Commit Rules
 

@@ -188,16 +188,32 @@ func marshalRuleIDs(ids []string) (string, error) {
 // ProcessIssue runs the full pipeline for a single issue.
 // It updates DB status at each stage boundary.
 func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error {
+	// Recheck queued and manually selected issues before any agent or GitHub work.
+	blacklisted, err := p.db.IsBlacklisted(issue.Repo)
+	if err != nil {
+		return fmt.Errorf("blacklist check failed for %s#%d: %w", issue.Repo, issue.IssueNumber, err)
+	}
+	if blacklisted {
+		p.markAbandoned(issue, "blacklisted repo")
+		return nil
+	}
+
 	// Rate limit: max open PRs per repo (higher for repos that merged our PRs)
 	maxPR := p.cfg.MaxPRsPerRepo
 	if maxPR <= 0 {
 		maxPR = 2
 	}
-	mergedCount, _ := p.db.CountMergedPRsByRepo(issue.Repo)
+	mergedCount, err := p.db.CountMergedPRsByRepo(issue.Repo)
+	if err != nil {
+		return fmt.Errorf("count merged PRs on %s: %w", issue.Repo, err)
+	}
 	if mergedCount > 0 {
 		maxPR = maxPR + mergedCount // e.g. 1 merged → max 2, 2 merged → max 3
 	}
-	openCount, _ := p.db.CountOpenPRsByRepo(issue.Repo)
+	openCount, err := p.db.CountOpenPRsByRepo(issue.Repo)
+	if err != nil {
+		return fmt.Errorf("count open PRs on %s: %w", issue.Repo, err)
+	}
 	if openCount >= maxPR {
 		p.markAbandoned(issue, fmt.Sprintf("rate limit: %d open PRs on %s (max %d)", openCount, issue.Repo, maxPR))
 		log.WithFields(Fields{

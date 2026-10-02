@@ -46,18 +46,36 @@ func (db *DB) MigrateLessons() error {
 	return nil
 }
 
-// SaveReviewLesson inserts a new review lesson.
-func (db *DB) SaveReviewLesson(lesson *models.ReviewLesson) error {
+// SaveReviewLesson inserts new lessons atomically so retries capture new feedback
+// without duplicating lessons already persisted for this PR.
+func (db *DB) SaveReviewLesson(lessons ...*models.ReviewLesson) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
 	query := fmt.Sprintf(`
 		INSERT INTO review_lessons (pr_id, repo, category, lesson, source_comment, reviewer)
-		VALUES (%s)
-	`, db.placeholders(6))
+		SELECT %s
+		WHERE NOT EXISTS (
+			SELECT 1 FROM review_lessons
+			WHERE pr_id = %s AND repo = %s AND category = %s AND lesson = %s
+				AND source_comment = %s AND reviewer = %s
+		)
+	`, db.placeholders(6), db.placeholder(7), db.placeholder(8), db.placeholder(9),
+		db.placeholder(10), db.placeholder(11), db.placeholder(12))
 
-	_, err := db.Exec(query,
-		lesson.PRID, lesson.Repo, lesson.Category,
-		lesson.Lesson, lesson.SourceComment, lesson.Reviewer,
-	)
-	return err
+	for _, lesson := range lessons {
+		if _, err := tx.Exec(query,
+			lesson.PRID, lesson.Repo, lesson.Category,
+			lesson.Lesson, lesson.SourceComment, lesson.Reviewer,
+			lesson.PRID, lesson.Repo, lesson.Category,
+			lesson.Lesson, lesson.SourceComment, lesson.Reviewer,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // GetRecentLessons returns the most recent lessons, optionally filtered by repo language prefix.

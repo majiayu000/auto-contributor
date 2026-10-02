@@ -223,12 +223,12 @@ func parseChecksOutput(data []byte) *CIResult {
 
 // GetPRReviewComments fetches inline review comments for a PR.
 func (c *Client) GetPRReviewComments(ctx context.Context, repo string, prNum int) ([]PRReviewComment, error) {
-	output, err := c.ghAPI(ctx, fmt.Sprintf("repos/%s/pulls/%d/comments", repo, prNum))
+	output, err := c.ghAPI(ctx, fmt.Sprintf("repos/%s/pulls/%d/comments", repo, prNum), "--paginate", "--slurp")
 	if err != nil {
 		return nil, fmt.Errorf("get PR comments: %w", err)
 	}
 
-	var raw []struct {
+	var raw [][]struct {
 		ID        int64  `json:"id"`
 		Body      string `json:"body"`
 		Path      string `json:"path"`
@@ -243,19 +243,21 @@ func (c *Client) GetPRReviewComments(ctx context.Context, repo string, prNum int
 	}
 
 	var comments []PRReviewComment
-	for _, r := range raw {
-		line := 0
-		if r.Line != nil {
-			line = *r.Line
+	for _, page := range raw {
+		for _, r := range page {
+			line := 0
+			if r.Line != nil {
+				line = *r.Line
+			}
+			comments = append(comments, PRReviewComment{
+				ID:        r.ID,
+				Author:    r.User.Login,
+				Body:      r.Body,
+				Path:      r.Path,
+				Line:      line,
+				CreatedAt: r.CreatedAt,
+			})
 		}
-		comments = append(comments, PRReviewComment{
-			ID:        r.ID,
-			Author:    r.User.Login,
-			Body:      r.Body,
-			Path:      r.Path,
-			Line:      line,
-			CreatedAt: r.CreatedAt,
-		})
 	}
 	return comments, nil
 }
@@ -270,12 +272,12 @@ type IssueComment struct {
 
 // GetPRIssueComments fetches issue-level comments for a PR (used by bots like CLA assistant).
 func (c *Client) GetPRIssueComments(ctx context.Context, repo string, prNum int) ([]IssueComment, error) {
-	output, err := c.ghAPI(ctx, fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNum))
+	output, err := c.ghAPI(ctx, fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNum), "--paginate", "--slurp")
 	if err != nil {
 		return nil, fmt.Errorf("get issue comments: %w", err)
 	}
 
-	var raw []struct {
+	var pages [][]struct {
 		ID        int64  `json:"id"`
 		Body      string `json:"body"`
 		CreatedAt string `json:"created_at"`
@@ -283,18 +285,20 @@ func (c *Client) GetPRIssueComments(ctx context.Context, repo string, prNum int)
 			Login string `json:"login"`
 		} `json:"user"`
 	}
-	if err := json.Unmarshal(output, &raw); err != nil {
+	if err := json.Unmarshal(output, &pages); err != nil {
 		return nil, fmt.Errorf("parse issue comments: %w", err)
 	}
 
 	var comments []IssueComment
-	for _, r := range raw {
-		comments = append(comments, IssueComment{
-			ID:        r.ID,
-			Author:    r.User.Login,
-			Body:      r.Body,
-			CreatedAt: r.CreatedAt,
-		})
+	for _, page := range pages {
+		for _, r := range page {
+			comments = append(comments, IssueComment{
+				ID:        r.ID,
+				Author:    r.User.Login,
+				Body:      r.Body,
+				CreatedAt: r.CreatedAt,
+			})
+		}
 	}
 	return comments, nil
 }
