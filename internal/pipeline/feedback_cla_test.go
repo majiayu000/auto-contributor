@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	ghclient "github.com/majiayu000/auto-contributor/internal/github"
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/pkg/models"
+	"github.com/mattn/go-sqlite3"
 )
 
 func TestProcessPRCLAStatus(t *testing.T) {
@@ -118,6 +121,13 @@ func TestProcessPRCLAErrorsRemainRetryable(t *testing.T) {
 					body = "All contributors have signed the CLA."
 				}
 				p, pr, rt := newCLATestPipeline(t, initial, []ghclient.IssueComment{{Author: "cla-assistant[bot]", Body: body}}, false)
+				lastCheck := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+				pr.FeedbackRound, pr.LastFeedbackCheckAt = 2, &lastCheck
+				if _, err := p.db.Exec("UPDATE pull_requests SET feedback_round = ?, last_feedback_check_at = ? WHERE id = ?", 2, lastCheck, pr.ID); err != nil {
+					t.Fatal(err)
+				}
+				_, _, initialCheck := getFeedbackPRState(t, p.db, pr.ID)
+				originalComments := os.Getenv("GH_TEST_CLA_COMMENTS")
 				wantError := "get issue comments"
 				switch failure {
 				case "fetch":
@@ -132,19 +142,114 @@ func TestProcessPRCLAErrorsRemainRetryable(t *testing.T) {
 					}
 					wantError = "update PR status"
 				}
-				if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), wantError) {
+				err := p.ProcessPR(context.Background(), pr)
+				if err == nil || !strings.Contains(err.Error(), wantError) {
 					t.Errorf("ProcessPR error = %v, want %q", err, wantError)
 				}
+				switch failure {
+				case "fetch", "later fetch":
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+						t.Errorf("fetch error lost CLI cause: %v", err)
+					}
+				case "parse":
+					var syntaxErr *json.SyntaxError
+					if !errors.As(err, &syntaxErr) {
+						t.Errorf("parse error lost JSON cause: %v", err)
+					}
+				case "status update":
+					var sqliteErr sqlite3.Error
+					if !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrConstraint {
+						t.Errorf("status error lost SQLite cause: %v", err)
+					}
+				}
 				status, round, checked := getFeedbackPRState(t, p.db, pr.ID)
-				if status != string(initial) || pr.Status != initial || round != 0 || checked.Valid || rt.index != 0 {
+				if status != string(initial) || pr.Status != initial || round != 2 || checked != initialCheck || rt.index != 0 {
 					t.Errorf("failed CLA check changed retry state: %s/%s/%d/%v, calls=%d", status, pr.Status, round, checked.Valid, rt.index)
 				}
 				prs, err := p.db.GetOpenPRs()
 				if err != nil || len(prs) != 1 {
-					t.Errorf("GetOpenPRs = %v, %v, want one retryable PR", prs, err)
+					t.Fatalf("GetOpenPRs = %v, %v, want retryable PR", prs, err)
+				}
+				t.Setenv("GH_TEST_CLA_FAIL", "0")
+				t.Setenv("GH_TEST_CLA_COMMENTS", originalComments)
+				if failure == "status update" {
+					if _, err := p.db.Exec("DROP TRIGGER fail_cla_status"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := p.ProcessPR(context.Background(), prs[0]); err != nil {
+					t.Fatalf("retry after CLA failure: %v", err)
+				}
+				status, round, checked = getFeedbackPRState(t, p.db, pr.ID)
+				if initial == models.PRStatusNeedsAttention {
+					if status != string(models.PRStatusOpen) || round != 3 || checked == initialCheck || rt.index != 1 {
+						t.Fatalf("resume retry failed: %s/%d/%v, calls %d", status, round, checked, rt.index)
+					}
+				} else if status != string(models.PRStatusNeedsAttention) || round != 2 || checked != initialCheck || rt.index != 0 {
+					t.Fatalf("pause retry failed: %s/%d/%v, calls %d", status, round, checked, rt.index)
 				}
 			})
 		}
+	}
+}
+
+func TestProcessPRCLAPauseAndResumeAcrossPolls(t *testing.T) {
+	for _, scenario := range []string{"success", "responder failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			p, pr, rt := newCLATestPipeline(t, models.PRStatusOpen, []ghclient.IssueComment{{Author: "cla-assistant[bot]", Body: "Thank you! Please sign our CLA."}}, false)
+			if err := p.ProcessPR(context.Background(), pr); err != nil {
+				t.Fatal(err)
+			}
+			status, round, checked := getFeedbackPRState(t, p.db, pr.ID)
+			if status != string(models.PRStatusNeedsAttention) || round != 0 || checked.Valid || rt.index != 0 {
+				t.Fatalf("CLA pause failed: %s/%d/%v, calls %d", status, round, checked, rt.index)
+			}
+			paused, err := p.db.GetOpenPRs()
+			if err != nil || len(paused) != 1 {
+				t.Fatalf("reload paused PR: %d, %v", len(paused), err)
+			}
+			t.Setenv("GH_TEST_CLA_LATER_COMMENTS", `[{"user":{"login":"cla-assistant[bot]"},"body":"All contributors have signed the CLA."}]`)
+			runtimeErr := errors.New("synthetic resumed responder failure")
+			if scenario == "responder failure" {
+				rt.outputs = []stubOutput{{err: runtimeErr}, {output: `{"action":"no_action"}`}}
+			}
+			err = p.ProcessPR(context.Background(), paused[0])
+			if scenario == "responder failure" {
+				if !errors.Is(err, runtimeErr) {
+					t.Fatalf("resume error = %v, want wrapped runtime error", err)
+				}
+				status, round, checked = getFeedbackPRState(t, p.db, pr.ID)
+				if status != string(models.PRStatusOpen) || round != 0 || checked.Valid {
+					t.Fatalf("failed resumed responder lost feedback: %s/%d/%v", status, round, checked)
+				}
+				retry, err := p.db.GetOpenPRs()
+				if err != nil || len(retry) != 1 {
+					t.Fatalf("reload resumed PR: %d, %v", len(retry), err)
+				}
+				if err := p.ProcessPR(context.Background(), retry[0]); err != nil {
+					t.Fatal(err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			status, round, checked = getFeedbackPRState(t, p.db, pr.ID)
+			if status != string(models.PRStatusOpen) || round != 1 || !checked.Valid || !strings.Contains(rt.prompts[len(rt.prompts)-1], "Please address this maintainer feedback") {
+				t.Fatalf("resume lost waiting human feedback: %s/%d/%v", status, round, checked)
+			}
+			calls := rt.index
+			processed, err := p.db.GetOpenPRs()
+			if err != nil || len(processed) != 1 {
+				t.Fatalf("reload processed PR: %d, %v", len(processed), err)
+			}
+			if err := p.ProcessPR(context.Background(), processed[0]); err != nil {
+				t.Fatal(err)
+			}
+			_, round, _ = getFeedbackPRState(t, p.db, pr.ID)
+			if round != 1 || rt.index != calls {
+				t.Fatalf("feedback duplicated after resume: round %d, calls %d/%d", round, rt.index, calls)
+			}
+		})
 	}
 }
 
@@ -199,7 +304,7 @@ case "$*" in
     fi
     ;;
   "api repos/owner/repo/pulls/42/comments"*)
-    printf '%s' '[{"id":1,"body":"Please address this maintainer feedback","user":{"login":"maintainer"},"created_at":"2026-09-30T00:00:00Z"}]'
+    printf '%s' '[[{"id":1,"body":"Please address this maintainer feedback","user":{"login":"maintainer"},"created_at":"2026-09-30T00:00:00Z"}]]'
     ;;
   "api repos/owner/repo/issues/70/comments"*) printf '%s' '[]' ;;
   *) printf 'unexpected gh arguments: %s\n' "$*" >&2; exit 1 ;;
