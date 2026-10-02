@@ -133,7 +133,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	switch pr.Status {
 	case models.PRStatusDraft:
 		return p.handleDraft(ctx, pr, prRepo, prInfo)
-	case models.PRStatusOpen:
+	case models.PRStatusOpen, models.PRStatusNeedsAttention:
 		return p.handleOpen(ctx, pr, prRepo, prInfo)
 	default:
 		return nil
@@ -237,10 +237,10 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 	return nil
 }
 
-// handleOpen manages open (non-draft) PRs: check for feedback, run responder.
+// handleOpen checks CLA status and handles feedback for open or paused PRs.
 func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo) error {
 	// If GitHub says it's a draft (was converted back), transition to draft
-	if prInfo.IsDraft {
+	if prInfo.IsDraft && pr.Status != models.PRStatusNeedsAttention {
 		p.db.UpdatePRStatus(pr.ID, models.PRStatusDraft)
 		log.WithField("pr", pr.PRURL).Info("open PR converted to draft")
 		return nil
@@ -264,26 +264,52 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	if err != nil {
 		return fmt.Errorf("get issue comments: %w", err)
 	} else {
-		for _, c := range issueComments {
+		// Comments arrive oldest first. Use the latest explicit CLA state, so an
+		// old request does not hide a later confirmation (or a new signing request).
+		claRequired, claSigned := false, false
+		for i := len(issueComments) - 1; i >= 0; i-- {
+			c := issueComments[i]
 			if !isCLABot(c.Author) {
 				continue
 			}
-			body := strings.ToLower(c.Body)
-			if pr.Status == models.PRStatusNeedsAttention {
-				// Check if CLA has since been signed
-				if strings.Contains(body, "signed") || strings.Contains(body, "thank") || strings.Contains(body, "all contributors") {
-					log.WithField("pr", pr.PRURL).Info("CLA signed — restoring to open")
-					p.db.UpdatePRStatus(pr.ID, models.PRStatusOpen)
-					pr.Status = models.PRStatusOpen
+			body := strings.ToLower(strings.TrimSpace(c.Body))
+			if strings.Contains(body, "sign the cla") || strings.Contains(body, "sign our cla") || strings.Contains(body, "sign our [contributor license agreement]") ||
+				(strings.Contains(body, "cla") && (strings.Contains(body, "not signed") || strings.HasPrefix(body, "not all"))) {
+				claRequired = true
+				break
+			}
+			if strings.HasPrefix(body, "all contributors have signed the cla") ||
+				strings.HasPrefix(body, "all committers have signed the cla") ||
+				strings.Contains(body, "<br/>all committers have signed the cla.") {
+				claSigned = true
+				break
+			}
+		}
+		if claRequired {
+			if pr.Status != models.PRStatusNeedsAttention {
+				if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusNeedsAttention); err != nil {
+					return fmt.Errorf("update PR status to needs_attention: %w", err)
 				}
-				// Still waiting — skip
+				pr.Status = models.PRStatusNeedsAttention
+				log.WithField("pr", pr.PRURL).Warn("CLA required — marking needs_attention")
+			}
+			return nil
+		}
+		if pr.Status == models.PRStatusNeedsAttention {
+			if !claSigned {
 				return nil
 			}
-			// First time seeing CLA request
-			if strings.Contains(body, "cla") && !strings.Contains(body, "signed") && !strings.Contains(body, "thank") {
-				log.WithFields(Fields{"pr": pr.PRURL, "bot": c.Author}).Warn("CLA required — marking needs_attention")
-				p.db.UpdatePRStatus(pr.ID, models.PRStatusNeedsAttention)
-				return nil
+			status := models.PRStatusOpen
+			if prInfo.IsDraft {
+				status = models.PRStatusDraft
+			}
+			if err := p.db.UpdatePRStatus(pr.ID, status); err != nil {
+				return fmt.Errorf("update PR status after CLA signing: %w", err)
+			}
+			pr.Status = status
+			log.WithField("pr", pr.PRURL).Info("CLA signed — resuming PR processing")
+			if prInfo.IsDraft {
+				return p.handleDraft(ctx, pr, prRepo, prInfo)
 			}
 		}
 	}
