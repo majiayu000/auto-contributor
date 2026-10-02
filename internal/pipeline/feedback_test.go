@@ -1009,3 +1009,116 @@ func TestProcessPRRewardRetryAfterAnotherPR(t *testing.T) {
 		t.Errorf("profile = %+v, %v, want one rejected and one merged outcome", profile, err)
 	}
 }
+
+func TestProcessPRMergedIgnoresUnusedIssueCommentFailures(t *testing.T) {
+	for _, failure := range []string{"command", "malformed"} {
+		t.Run(failure, func(t *testing.T) {
+			logPath := installFakeGH(t, false)
+			t.Setenv("GH_TEST_PR_INFO", `{"state":"MERGED"}`)
+			if failure == "command" {
+				t.Setenv("GH_TEST_FAIL_ISSUE_COMMENTS", "1")
+			} else {
+				t.Setenv("GH_TEST_ISSUE_COMMENTS", `[invalid`)
+			}
+			t.Setenv("GH_TEST_REVIEW_COMMENTS", `[{"user":{"login":"maintainer"},"body":"Avoid this incorrect logic.","path":"main.go","diff_hunk":"@@"}]`)
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+			if err := p.ProcessPR(context.Background(), pr); err != nil {
+				t.Fatalf("merged PR with unused issue comment %s failure: %v", failure, err)
+			}
+			status, _, _ := getFeedbackPRState(t, database, pr.ID)
+			if status != string(models.PRStatusMerged) {
+				t.Errorf("status = %q, want merged", status)
+			}
+			if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue != 0.55 || rule.RetrievalCount != 1 || rule.SuccessCount != 1 {
+				t.Errorf("rule = %+v, want merged reward once", rule)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 1 {
+				t.Errorf("inline lessons = %d, %v, want one", count, err)
+			}
+			if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+				t.Errorf("workspace retained after merged learning: %v", err)
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil || strings.Contains(string(data), "/issues/42/comments") || !strings.Contains(string(data), "/pulls/42/comments") {
+				t.Errorf("GitHub calls = %q, %v, want review comments only", data, err)
+			}
+		})
+	}
+}
+
+func TestProcessPRRewardRetryWithChangedOutcome(t *testing.T) {
+	installFakeGH(t, false)
+	t.Setenv("GH_TEST_PR_INFO", `{"state":"CLOSED"}`)
+	t.Setenv("GH_TEST_ISSUE_COMMENTS", `[]`)
+	database := newFeedbackTestDB(t)
+	issue, pr := createFeedbackTestPR(t, database)
+	p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+	if _, err := database.Exec("CREATE TRIGGER fail_status BEFORE UPDATE OF status ON pull_requests BEGIN SELECT RAISE(ABORT, 'terminal write unavailable'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "terminal write unavailable") {
+		t.Fatalf("first error = %v, want final SQL failure after unknown reward", err)
+	}
+	if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue != 0.47 || rule.RetrievalCount != 1 {
+		t.Fatalf("first rule = %+v, want unknown reward once", rule)
+	}
+	// A maintainer supplies new feedback before the retry. Restart from disk.
+	t.Setenv("GH_TEST_ISSUE_COMMENTS", `[{"user":{"login":"maintainer"},"body":"The logic is incorrect."}]`)
+	p.ruleLoader = rules.NewRuleLoader(p.ruleLoader.RulesDir())
+	if err := p.ruleLoader.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "terminal write unavailable") {
+		t.Fatalf("changed outcome error = %v, want final SQL failure after new reward", err)
+	}
+	if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue < 0.4229 || rule.QValue > 0.4231 || rule.RetrievalCount != 2 || rule.SuccessCount != 0 {
+		t.Errorf("changed rule = %+v, want Q=0.423, retrieval=2, success=0", rule)
+	}
+	events, err := database.GetEventsByIssue(issue.ID)
+	if err != nil || len(events) != 1 || events[0].OutcomeLabel != OutcomeRejectedQuality {
+		t.Errorf("events = %+v, %v, want changed quality label", events, err)
+	}
+	trajectories, err := database.GetRecentTrajectories(1)
+	if err != nil || len(trajectories) != 1 || trajectories[0].OutcomeLabel != OutcomeRejectedQuality || trajectories[0].Success {
+		t.Errorf("trajectories = %+v, %v, want changed quality label and success=false", trajectories, err)
+	}
+	if open, err := database.GetOpenPRs(); err != nil || len(open) != 1 {
+		t.Errorf("open PRs = %v, %v, want retryable PR", open, err)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Errorf("workspace removed before completion: %v", err)
+	}
+	// Returning to an already-rewarded outcome must not replay its old reward.
+	t.Setenv("GH_TEST_ISSUE_COMMENTS", `[]`)
+	if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "terminal write unavailable") {
+		t.Fatalf("old outcome retry error = %v, want final SQL failure", err)
+	}
+	if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue < 0.4229 || rule.QValue > 0.4231 || rule.RetrievalCount != 2 {
+		t.Errorf("old outcome replay changed rewards: %+v", rule)
+	}
+	t.Setenv("GH_TEST_ISSUE_COMMENTS", `[{"user":{"login":"maintainer"},"body":"The logic is incorrect."}]`)
+	if _, err := database.Exec("DROP TRIGGER fail_status"); err != nil {
+		t.Fatal(err)
+	}
+	p.ruleLoader = rules.NewRuleLoader(p.ruleLoader.RulesDir())
+	if err := p.ruleLoader.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ProcessPR(context.Background(), pr); err != nil {
+		t.Fatalf("same outcome retry: %v", err)
+	}
+	if rule := loadRule(t, p.ruleLoader, "close-learning"); rule.QValue < 0.4229 || rule.QValue > 0.4231 || rule.RetrievalCount != 2 || rule.SuccessCount != 0 {
+		t.Errorf("repeated rule = %+v, want changed reward retained exactly once", rule)
+	}
+	if profile, err := database.GetRepoProfile(issue.Repo); err != nil || profile == nil || profile.TotalPRsSubmitted != 1 || profile.TotalRejected != 1 {
+		t.Errorf("profile = %+v, %v, want one rejected PR", profile, err)
+	}
+	if open, err := database.GetOpenPRs(); err != nil || len(open) != 0 {
+		t.Errorf("open PRs = %v, %v, want completed transition", open, err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("workspace retained after completion: %v", err)
+	}
+}

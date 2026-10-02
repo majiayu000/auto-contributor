@@ -35,12 +35,8 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	// Terminal state transitions from GitHub
 	switch prInfo.State {
 	case "MERGED":
-		// Fetch classification inputs before making the local PR terminal so
-		// a transient comment failure leaves it available for the next poll.
-		issueComments, err := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
-		if err != nil {
-			return fmt.Errorf("get issue comments for merged PR: %w", err)
-		}
+		// Merges need review comments for lessons, but neither their outcome nor
+		// their lessons use issue comments. Only fetch required learning inputs.
 		comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
 		if err != nil {
 			return fmt.Errorf("get review comments for merged PR: %w", err)
@@ -50,7 +46,7 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, prResponseHours(prInfo.CreatedAt, prInfo.MergedAt, pr.CreatedAt)); err != nil {
 			return fmt.Errorf("record merged PR outcome: %w", err)
 		}
-		if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+		if err := p.storeLessons(pr, prRepo, prInfo, comments, nil); err != nil {
 			return err
 		}
 		if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {

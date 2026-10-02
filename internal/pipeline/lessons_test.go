@@ -64,7 +64,6 @@ func TestProcessPRCommentFetchFailureRemainsRetryable(t *testing.T) {
 	}{
 		{"closed auto", "CLOSED", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, time.Hour, "issue"},
 		{"closed rejection", "CLOSED", "maintainer", "These changes are out of scope and should be removed.", OutcomeRejectedScope, models.PRStatusOpen, time.Hour, "issue"},
-		{"merged", "MERGED", "maintainer", "Thanks for addressing the feedback.", OutcomeMerged, models.PRStatusOpen, time.Hour, "issue"},
 		{"stale auto-close", "OPEN", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, 31 * 24 * time.Hour, "issue"},
 		{"CI auto-close", "OPEN", "majiayu000", "Closing: CI failures remain unresolved after multiple attempts.", OutcomeAutoClosed, models.PRStatusDraft, 8 * 24 * time.Hour, "issue"},
 		{"closed auto", "CLOSED", "majiayu000", "Closing due to extended inactivity.", OutcomeAutoClosed, models.PRStatusOpen, time.Hour, "review"},

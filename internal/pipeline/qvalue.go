@@ -63,6 +63,9 @@ func (p *Pipeline) updateQValues(issueID int64, rewardID string) (result error) 
 	}
 
 	reward := rewardForOutcome(outcomeLabel)
+	// A retry can receive feedback that changes the reward. Apply each PR/reward
+	// once; reclassification with the same reward must not increment counts again.
+	rewardID = fmt.Sprintf("%s#%g", rewardID, reward)
 
 	// Collect unique participation keys across all events for this issue.
 	// Keys are stored as "stage/ruleID" (new format) or bare "ruleID" (legacy).
