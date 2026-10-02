@@ -35,29 +35,53 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 	// Terminal state transitions from GitHub
 	switch prInfo.State {
 	case "MERGED":
+		// Merges need review comments for lessons, but neither their outcome nor
+		// their lessons use issue comments. Only fetch required learning inputs.
+		comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+		if err != nil {
+			return fmt.Errorf("get review comments for merged PR: %w", err)
+		}
 		// Use the authoritative GitHub merge timestamp so polling delay does not
 		// inflate the measured response time.
 		if err := p.db.RecordPROutcome(pr.ID, prRepo, true, prResponseHours(prInfo.CreatedAt, prInfo.MergedAt, pr.CreatedAt)); err != nil {
 			return fmt.Errorf("record merged PR outcome: %w", err)
 		}
+		if err := p.storeLessons(pr, prRepo, prInfo, comments, nil); err != nil {
+			return err
+		}
+		if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
+			return err
+		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
-		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
-		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR merged")
 		return nil
 	case "CLOSED":
+		// A responder close may reach this path after a DB failure. Fetch the
+		// learning inputs before making the local row terminal so failures retry.
+		issueComments, err := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
+		if err != nil {
+			return fmt.Errorf("get issue comments for closed PR: %w", err)
+		}
+		comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+		if err != nil {
+			return fmt.Errorf("get review comments for closed PR: %w", err)
+		}
 		// Use closedAt so response time reflects creation→close, not creation→poll.
 		if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, prInfo.ClosedAt, pr.CreatedAt)); err != nil {
 			return fmt.Errorf("record closed PR outcome: %w", err)
 		}
+		if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+			return err
+		}
+		if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
+			return err
+		}
 		if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 			return fmt.Errorf("update PR status to closed: %w", err)
 		}
-		p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
-		p.updateQValues(pr.IssueID)
 		p.cleanupWorkspace(pr)
 		log.WithField("pr", pr.PRURL).Info("PR closed")
 		return nil
@@ -75,18 +99,31 @@ func (p *Pipeline) ProcessPR(ctx context.Context, pr *models.PullRequest) error 
 		if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing due to extended inactivity. Happy to reopen if there's still interest."); err != nil {
 			log.WithError(err).Warn("failed to auto-close stale PR")
 		} else {
+			issueComments, err := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
+			if err != nil {
+				return fmt.Errorf("get issue comments after stale auto-close: %w", err)
+			}
+			comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+			if err != nil {
+				return fmt.Errorf("get review comments after stale auto-close: %w", err)
+			}
 			// Record outcome before setting terminal status so that a transient
 			// DB failure here leaves the PR as open; the next loop cycle sees
 			// GitHub state=CLOSED and retries via the terminal-state handler.
 			// terminalAt is empty: we just triggered the close so time.Now()≈close time.
 			if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
 				log.WithError(err).Warn("failed to record stale auto-close outcome")
-			} else if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
-				log.WithError(err).Warn("failed to update PR status to closed after stale auto-close")
 			} else {
 				prInfo.State = "CLOSED"
-				p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
-				p.updateQValues(pr.IssueID)
+				if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+					return err
+				}
+				if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
+					return err
+				}
+				if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+					return fmt.Errorf("update PR status after stale auto-close: %w", err)
+				}
 			}
 		}
 		return nil
@@ -156,16 +193,29 @@ func (p *Pipeline) handleDraft(ctx context.Context, pr *models.PullRequest, prRe
 			if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, "Closing: CI failures remain unresolved after multiple attempts."); err != nil {
 				log.WithError(err).Warn("failed to auto-close CI-failed PR")
 			} else {
+				issueComments, err := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
+				if err != nil {
+					return fmt.Errorf("get issue comments after CI auto-close: %w", err)
+				}
+				comments, err := p.gh.GetPRReviewComments(ctx, prRepo, pr.PRNumber)
+				if err != nil {
+					return fmt.Errorf("get review comments after CI auto-close: %w", err)
+				}
 				// Record outcome before setting terminal status (same retry-safe
 				// ordering as the stale auto-close path above).
 				if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, "", pr.CreatedAt)); err != nil {
 					log.WithError(err).Warn("failed to record CI auto-close outcome")
-				} else if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
-					log.WithError(err).Warn("failed to update PR status to closed after CI auto-close")
 				} else {
 					prInfo.State = "CLOSED"
-					p.extractAndStoreLessons(ctx, pr, prRepo, prInfo)
-					p.updateQValues(pr.IssueID)
+					if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+						return err
+					}
+					if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
+						return err
+					}
+					if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
+						return fmt.Errorf("update PR status after CI auto-close: %w", err)
+					}
 				}
 			}
 			return nil
@@ -209,7 +259,7 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		return fmt.Errorf("get comments: %w", err)
 	}
 
-	// Check issue-level comments for CLA bot requests
+	// Issue comments are also needed for responder-close learning.
 	issueComments, err := p.gh.GetPRIssueComments(ctx, prRepo, pr.PRNumber)
 	if err != nil {
 		return fmt.Errorf("get issue comments: %w", err)
@@ -285,14 +335,16 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 					break
 				}
 				tmplCtx := map[string]any{
-					"Repo":        prRepo,
-					"IssueNumber": issue.IssueNumber,
-					"IssueData":   formatIssueForPrompt(issue),
-					"PRNumber":    pr.PRNumber,
-					"PRURL":       pr.PRURL,
-					"BranchName":  pr.BranchName,
-					"IsRework":    true,
-					"ReworkRound": pr.FeedbackRound + 1,
+					"Repo":           prRepo,
+					"GitHubUsername": p.cfg.GitHubUsername,
+					"GitHubEmail":    p.cfg.GitHubEmail,
+					"IssueNumber":    issue.IssueNumber,
+					"IssueData":      formatIssueForPrompt(issue),
+					"PRNumber":       pr.PRNumber,
+					"PRURL":          pr.PRURL,
+					"BranchName":     pr.BranchName,
+					"IsRework":       true,
+					"ReworkRound":    pr.FeedbackRound + 1,
 					"ReworkInstructionsData": formatUntrustedGitHubData(map[string]any{
 						"rework_instructions": "Codecov reports missing test coverage on changed lines. Read the Codecov comment on the PR to identify which lines need coverage. Add tests to cover the missing lines, then push.",
 					}),
@@ -410,20 +462,19 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		"round":    pr.FeedbackRound + 1,
 	}).Info("processing feedback")
 
-	// Run responder agent
+	// Leave feedback pending when responder execution or JSON parsing fails.
 	start := time.Now()
 	var result FeedbackResult
 	raw, err := p.runner.RunJSONWithPolicy(ctx, "responder", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
-		log.WithError(err).Warn("responder parse error, treating as no_action")
+		log.WithError(err).Warn("responder failed")
 		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, "", false, "", err.Error(), responderRules)
-		result.Action = "no_action"
-	} else {
-		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
+		return fmt.Errorf("responder failed at feedback round %d for %s: %w", pr.FeedbackRound+1, pr.PRURL, err)
 	}
+	p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
 
 	newRound := pr.FeedbackRound + 1
-	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+	if err := p.executeResponderAction(ctx, pr, prRepo, prInfo, comments, issueComments, result, newRound); err != nil {
 		return err
 	}
 
@@ -437,9 +488,9 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 	return nil
 }
 
-func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
+func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment, result FeedbackResult, newRound int) error {
 	if result.Action == "close" {
-		if err := p.closePRFromResponder(ctx, pr, prRepo); err != nil {
+		if err := p.closePRFromResponder(ctx, pr, prRepo, prInfo, comments, issueComments); err != nil {
 			return err
 		}
 	}
@@ -456,8 +507,8 @@ func (p *Pipeline) executeResponderAction(ctx context.Context, pr *models.PullRe
 	return nil
 }
 
-func (p *Pipeline) finalizeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, result FeedbackResult, newRound int) error {
-	if err := p.executeResponderAction(ctx, pr, prRepo, result, newRound); err != nil {
+func (p *Pipeline) finalizeResponderAction(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment, result FeedbackResult, newRound int) error {
+	if err := p.executeResponderAction(ctx, pr, prRepo, prInfo, comments, issueComments, result, newRound); err != nil {
 		return err
 	}
 	return nil
@@ -475,14 +526,33 @@ func (p *Pipeline) postResponderReplies(ctx context.Context, pr *models.PullRequ
 	return repliedIDs
 }
 
-func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string) error {
-	comment := "Closing because maintainer feedback explicitly asked to close or abandon this PR."
-	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, comment); err != nil {
+const responderCloseComment = "Closing because maintainer feedback explicitly asked to close or abandon this PR."
+
+func (p *Pipeline) closePRFromResponder(ctx context.Context, pr *models.PullRequest, prRepo string, prInfo *ghclient.PRInfo, comments []ghclient.PRReviewComment, issueComments []ghclient.IssueComment) error {
+	if err := p.gh.ClosePR(ctx, prRepo, pr.PRNumber, responderCloseComment); err != nil {
 		return fmt.Errorf("close PR remotely: %w", err)
+	}
+	closedAt := time.Now().UTC().Format(time.RFC3339)
+	// Keep the PR pollable if outcome persistence fails after the remote close.
+	// The next cycle will retry through ProcessPR's GitHub CLOSED handler.
+	if err := p.db.RecordPROutcome(pr.ID, prRepo, false, prResponseHours(prInfo.CreatedAt, closedAt, pr.CreatedAt)); err != nil {
+		return fmt.Errorf("record responder close outcome: %w", err)
+	}
+	prInfo.State = "CLOSED"
+	prInfo.ClosedAt = closedAt
+	// ClosePR posts this reason after the cached comments were fetched. Include
+	// it now so the first close and a CLOSED retry classify the same feedback.
+	issueComments = append(issueComments, ghclient.IssueComment{Author: p.cfg.GitHubUsername, Body: responderCloseComment})
+	if err := p.storeLessons(pr, prRepo, prInfo, comments, issueComments); err != nil {
+		return err
+	}
+	if err := p.updateQValues(pr.IssueID, pr.PRURL); err != nil {
+		return err
 	}
 	if err := p.db.UpdatePRStatus(pr.ID, models.PRStatusClosed); err != nil {
 		return fmt.Errorf("update PR status to closed after remote close: %w", err)
 	}
+	p.cleanupWorkspace(pr)
 	return nil
 }
 
@@ -495,15 +565,17 @@ func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prR
 	}
 
 	tmplCtx := map[string]any{
-		"Repo":         prRepo,
-		"IssueNumber":  issue.IssueNumber,
-		"IssueData":    formatIssueForPrompt(issue),
-		"PRNumber":     pr.PRNumber,
-		"PRURL":        pr.PRURL,
-		"BranchName":   pr.BranchName,
-		"FailedChecks": strings.Join(ci.FailedChecks, ", "),
-		"IsRework":     true,
-		"ReworkRound":  pr.FeedbackRound + 1,
+		"Repo":           prRepo,
+		"GitHubUsername": p.cfg.GitHubUsername,
+		"GitHubEmail":    p.cfg.GitHubEmail,
+		"IssueNumber":    issue.IssueNumber,
+		"IssueData":      formatIssueForPrompt(issue),
+		"PRNumber":       pr.PRNumber,
+		"PRURL":          pr.PRURL,
+		"BranchName":     pr.BranchName,
+		"FailedChecks":   strings.Join(ci.FailedChecks, ", "),
+		"IsRework":       true,
+		"ReworkRound":    pr.FeedbackRound + 1,
 		"ReworkInstructionsData": formatUntrustedGitHubData(map[string]any{
 			"rework_instructions": fmt.Sprintf(
 				"CI checks failed: %s. Read the CI logs, identify the root cause, fix the code, and push.",
@@ -564,6 +636,8 @@ func (p *Pipeline) buildResponderCtx(
 ) map[string]any {
 	return map[string]any{
 		"Repo":                      issue.Repo,
+		"GitHubUsername":            p.cfg.GitHubUsername,
+		"GitHubEmail":               p.cfg.GitHubEmail,
 		"IssueNumber":               issue.IssueNumber,
 		"IssueData":                 formatIssueForPrompt(issue),
 		"OriginalIssueCommentsData": formatUntrustedGitHubData(p.fetchOriginalIssueComments(issue)),

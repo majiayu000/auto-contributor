@@ -23,7 +23,7 @@ func NewCodex(cliPath string) *CodexRuntime {
 func (r *CodexRuntime) Name() string { return "codex" }
 
 func (r *CodexRuntime) Execute(ctx context.Context, workDir string, prompt string, policy ExecutionPolicy) (string, error) {
-	args := []string{"exec"}
+	args := []string{"exec", "--skip-git-repo-check"}
 	if policy.allowsPrivilegedExecution() {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	}

@@ -372,7 +372,12 @@ func checkOpenPRFeedback(ctx context.Context, pipe *pipeline.Pipeline) {
 				continue
 			}
 			// Skip blacklisted repos
-			if bl, _ := database.IsBlacklisted(gpr.Repo); bl {
+			bl, err := database.IsBlacklisted(gpr.Repo)
+			if err != nil {
+				log.Warn("blacklist check failed, skipping PR sync", "repo", gpr.Repo, "pr", gpr.URL, "error", err)
+				continue
+			}
+			if bl {
 				continue
 			}
 			if _, err := database.EnsurePRWithIssue(
@@ -413,7 +418,12 @@ func checkOpenPRFeedback(ctx context.Context, pipe *pipeline.Pipeline) {
 			continue
 		}
 		// Skip blacklisted repos
-		if bl, _ := database.IsBlacklisted(repo); bl {
+		bl, err := database.IsBlacklisted(repo)
+		if err != nil {
+			log.Warn("blacklist check failed, skipping PR feedback", "repo", repo, "pr", pr.PRURL, "error", err)
+			continue
+		}
+		if bl {
 			log.Info("skipping blacklisted repo", "pr", pr.PRURL)
 			continue
 		}

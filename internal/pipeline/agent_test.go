@@ -1,10 +1,12 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,16 +18,18 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/rules"
 	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
+	"github.com/mattn/go-sqlite3"
 )
 
 var _ runtime.Runtime = (*stubRuntime)(nil)
 
 type stubRuntime struct {
-	outputs  []stubOutput
-	index    int
-	policies []runtime.ExecutionPolicy
-	prompts  []string
-	workDirs []string
+	outputs   []stubOutput
+	index     int
+	policies  []runtime.ExecutionPolicy
+	prompts   []string
+	workDirs  []string
+	onExecute func(workDir string)
 }
 
 type stubOutput struct {
@@ -44,6 +48,9 @@ func (r *stubRuntime) Execute(ctx context.Context, workDir string, prompt string
 	r.policies = append(r.policies, policy)
 	r.prompts = append(r.prompts, prompt)
 	r.workDirs = append(r.workDirs, workDir)
+	if r.onExecute != nil {
+		r.onExecute(workDir)
+	}
 	result := r.outputs[r.index]
 	r.index++
 	return result.output, result.err
@@ -104,12 +111,200 @@ func newLoopTestPipeline(t *testing.T, rt runtime.Runtime) (*Pipeline, *db.DB) {
 	}
 
 	return &Pipeline{
+		cfg:        config.Default(),
 		db:         database,
 		prompts:    ps,
 		runner:     NewAgentRunner(ps, rt, 0),
 		ruleLoader: rl,
 		maxReview:  2,
 	}, database
+}
+
+func TestProcessIssueReturnsPRCountErrorsBeforeScout(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failQuery int
+		wantError string
+	}{
+		{"merged", 2, "count merged PRs"},
+		{"open", 3, "count open PRs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &stubRuntime{outputs: []stubOutput{{output: `{"verdict":"SKIP","reason":"PR cap scout reached"}`}}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{MaxPRsPerRepo: 1, WorkspaceDir: t.TempDir()}
+			p.gh = ghclient.New(p.cfg)
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 103, Title: "PR cap", Status: models.IssueStatusDiscovered}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			ghLog := installPRCapTestGH(t)
+
+			// The blacklist SELECT runs first; deny only the selected PR count query.
+			database.SetMaxOpenConns(1)
+			conn, err := database.Conn(context.Background())
+			if err != nil {
+				t.Fatalf("get SQLite connection: %v", err)
+			}
+			queryCount := 0
+			if err := conn.Raw(func(raw any) error {
+				raw.(*sqlite3.SQLiteConn).RegisterAuthorizer(func(action int, _, _, _ string) int {
+					if action == sqlite3.SQLITE_SELECT {
+						queryCount++
+						if queryCount == tc.failQuery {
+							return sqlite3.SQLITE_DENY
+						}
+					}
+					return sqlite3.SQLITE_OK
+				})
+				return nil
+			}); err != nil {
+				t.Fatalf("install SQLite authorizer: %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatalf("release SQLite connection: %v", err)
+			}
+
+			err = p.ProcessIssue(context.Background(), issue)
+			conn, connErr := database.Conn(context.Background())
+			if connErr != nil {
+				t.Fatalf("get SQLite connection: %v", connErr)
+			}
+			if err := conn.Raw(func(raw any) error {
+				raw.(*sqlite3.SQLiteConn).RegisterAuthorizer(nil)
+				return nil
+			}); err != nil {
+				t.Fatalf("reset SQLite authorizer: %v", err)
+			}
+			if err := conn.Close(); err != nil {
+				t.Fatalf("release SQLite connection: %v", err)
+			}
+			var sqliteErr sqlite3.Error
+			if !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrAuth {
+				t.Errorf("ProcessIssue error = %v, want original SQLite authorization error", err)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) || !strings.Contains(err.Error(), issue.Repo) {
+				t.Errorf("ProcessIssue error = %v, want %q context", err, tc.wantError)
+			}
+			if queryCount != tc.failQuery {
+				t.Errorf("count queries = %d, want %d", queryCount, tc.failQuery)
+			}
+			if _, err := os.Stat(ghLog); !os.IsNotExist(err) {
+				t.Errorf("GitHub called after count failure: log stat error = %v", err)
+			}
+			stored, err := database.GetIssueByID(issue.ID)
+			if err != nil {
+				t.Fatalf("get issue: %v", err)
+			}
+			if stored.Status != models.IssueStatusDiscovered || stored.ErrorMessage != "" {
+				t.Errorf("issue status = %q, error = %q, want unchanged discovered issue", stored.Status, stored.ErrorMessage)
+			}
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil {
+				t.Fatalf("get events: %v", err)
+			}
+			if len(rt.policies) != 0 {
+				t.Errorf("agent dispatched after count failure: %v", rt.policies)
+			}
+			if len(events) != 0 {
+				t.Errorf("pipeline events = %d, want 0", len(events))
+			}
+		})
+	}
+}
+
+func TestProcessIssuePRCapUsesSuccessfulCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		maxPR     int
+		merged    int
+		open      int
+		wantScout bool
+	}{
+		{"default under limit", 0, 0, 1, true},
+		{"configured under limit", 3, 0, 2, true},
+		{"default limit", 0, 0, 2, false},
+		{"configured limit", 3, 0, 3, false},
+		{"merged allowance", 1, 1, 1, true},
+		{"merged limit reached", 1, 1, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &stubRuntime{outputs: []stubOutput{{output: `{"verdict":"SKIP","reason":"PR cap scout reached"}`}}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{MaxPRsPerRepo: tc.maxPR, WorkspaceDir: t.TempDir()}
+			p.gh = ghclient.New(p.cfg)
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 103, Title: "PR cap", Status: models.IssueStatusDiscovered}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			for _, count := range []struct {
+				status models.PRStatus
+				n      int
+			}{{models.PRStatusMerged, tc.merged}, {models.PRStatusOpen, tc.open}} {
+				for i := 0; i < count.n; i++ {
+					pr := &models.PullRequest{IssueID: issue.ID, PRURL: "https://github.com/owner/repo/pull/1", BranchName: "fix/cap", Status: count.status}
+					if err := database.CreatePullRequest(pr); err != nil {
+						t.Fatalf("create PR: %v", err)
+					}
+				}
+			}
+			ghLog := installPRCapTestGH(t)
+			err := p.ProcessIssue(context.Background(), issue)
+			if tc.wantScout {
+				if err != nil || len(rt.policies) != 1 || rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+					t.Fatalf("ProcessIssue error = %v, agent policies = %v, want normal Scout processing", err, rt.policies)
+				}
+				if _, err := os.Stat(ghLog); err != nil {
+					t.Fatalf("Scout did not call GitHub: %v", err)
+				}
+			} else {
+				if err != nil || len(rt.policies) != 0 {
+					t.Fatalf("ProcessIssue error = %v, policies = %v, want no work on reached cap", err, rt.policies)
+				}
+				if _, err := os.Stat(ghLog); !os.IsNotExist(err) {
+					t.Fatalf("GitHub called after reached cap: %v", err)
+				}
+				stored, err := database.GetIssueByID(issue.ID)
+				if err != nil {
+					t.Fatalf("get issue: %v", err)
+				}
+				if stored.Status != models.IssueStatusAbandoned || !strings.Contains(stored.ErrorMessage, "rate limit:") {
+					t.Fatalf("issue status = %q, error = %q, want rate-limit abandonment", stored.Status, stored.ErrorMessage)
+				}
+			}
+		})
+	}
+}
+
+func installPRCapTestGH(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "gh.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(logPath) + `
+case "$1 $2" in
+ api*|"pr list") printf '%s' '[]' ;;
+ *) printf 'unexpected gh args: %s\n' "$*" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
 }
 
 func assertReviewerFailureEvent(t *testing.T, database *db.DB, issueID int64, wantErr string) {
@@ -287,6 +482,152 @@ func TestEngineerReviewLoop_ReviewerParseFailureBlocksAndFailsIssue(t *testing.T
 	}
 
 	assertReviewerFailureEvent(t, database, issue.ID, "parse reviewer JSON output")
+}
+
+func TestRunScoutUsesIsolatedWorkDir(t *testing.T) {
+	runtimeErr := errors.New("scout runtime failed")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "runtime failure", err: runtimeErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspaceDir := t.TempDir()
+			rt := &stubRuntime{
+				outputs: []stubOutput{{output: `{"verdict":"PROCEED"}`, err: tc.err}},
+				onExecute: func(workDir string) {
+					if workDir == "" || workDir == workspaceDir || strings.HasPrefix(workDir, workspaceDir+string(os.PathSeparator)) {
+						t.Fatalf("scout workdir %q must be outside WorkspaceDir %q", workDir, workspaceDir)
+					}
+					entries, err := os.ReadDir(workDir)
+					if err != nil {
+						t.Fatalf("read scout workdir during execution: %v", err)
+					}
+					if len(entries) != 0 {
+						t.Fatalf("scout workdir contains %d entries, want empty", len(entries))
+					}
+				},
+			}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{WorkspaceDir: workspaceDir}
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatalf("load scout prompt: %v", err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "untrusted issue"}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+
+			result, err := p.runScout(context.Background(), issue)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("runScout error = %v, want %v", err, tc.err)
+			}
+			if tc.err == nil && (result == nil || result.Verdict != "PROCEED") {
+				t.Fatalf("runScout result = %+v, want PROCEED", result)
+			}
+			if tc.err != nil && result != nil {
+				t.Fatalf("runScout result = %+v, want nil on failure", result)
+			}
+			if len(rt.workDirs) != 1 || len(rt.policies) != 1 || rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+				t.Fatalf("runtime calls = %v, policies = %v, want one untrusted call", rt.workDirs, rt.policies)
+			}
+			if _, err := os.Stat(rt.workDirs[0]); !os.IsNotExist(err) {
+				t.Fatalf("scout workdir should be removed after return, stat error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRunScoutFailsBeforeRuntimeWhenWorkDirCreationFails(t *testing.T) {
+	rt := &stubRuntime{}
+	p, database := newLoopTestPipeline(t, rt)
+	p.cfg = &config.Config{WorkspaceDir: t.TempDir()}
+	issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "untrusted issue"}
+	if err := database.CreateIssue(issue); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+
+	result, err := p.runScout(context.Background(), issue)
+	if result != nil || err == nil || !strings.Contains(err.Error(), "create scout workdir") {
+		t.Fatalf("runScout = (%+v, %v), want workdir creation failure", result, err)
+	}
+	if rt.index != 0 {
+		t.Fatalf("runtime calls = %d, want 0", rt.index)
+	}
+	events, err := database.GetEventsByIssue(issue.ID)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
+	}
+	if len(events) != 1 || events[0].Stage != "scout" || events[0].Success || events[0].Verdict != "error" || !strings.Contains(events[0].ErrorMessage, "create scout workdir") {
+		t.Fatalf("events = %+v, want recorded scout workdir creation failure", events)
+	}
+}
+
+func TestRunScoutRejectsTempDirInsideWorkspace(t *testing.T) {
+	for _, location := range []string{"equal", "nested", "symlink"} {
+		t.Run(location, func(t *testing.T) {
+			workspaceDir := t.TempDir()
+			tempBase := workspaceDir
+			if location == "nested" {
+				tempBase = filepath.Join(workspaceDir, "tmp")
+				if err := os.Mkdir(tempBase, 0700); err != nil {
+					t.Fatalf("create nested temp base: %v", err)
+				}
+			}
+			if location == "symlink" {
+				tempBase = filepath.Join(t.TempDir(), "workspace-link")
+				if err := os.Symlink(workspaceDir, tempBase); err != nil {
+					t.Fatalf("link temp base to workspace: %v", err)
+				}
+			}
+			rt := &stubRuntime{outputs: []stubOutput{{output: `{"verdict":"PROCEED"}`}}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{WorkspaceDir: workspaceDir}
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatalf("load scout prompt: %v", err)
+			}
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "untrusted issue"}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatalf("create issue: %v", err)
+			}
+			t.Setenv("TMPDIR", tempBase)
+
+			result, err := p.runScout(context.Background(), issue)
+			if result != nil || err == nil || !strings.Contains(err.Error(), "outside WorkspaceDir") {
+				t.Fatalf("runScout = (%+v, %v), want isolation failure", result, err)
+			}
+			if rt.index != 0 {
+				t.Fatalf("runtime calls = %d, want 0", rt.index)
+			}
+			entries, err := os.ReadDir(tempBase)
+			if err != nil {
+				t.Fatalf("read temp base: %v", err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "auto-contributor-scout-") {
+					t.Fatalf("scout workdir was not removed: %s", entry.Name())
+				}
+			}
+			events, err := database.GetEventsByIssue(issue.ID)
+			if err != nil {
+				t.Fatalf("get events: %v", err)
+			}
+			if len(events) != 1 || events[0].Success || events[0].Verdict != "error" || !strings.Contains(events[0].ErrorMessage, "outside WorkspaceDir") {
+				t.Fatalf("events = %+v, want recorded scout isolation failure", events)
+			}
+		})
+	}
 }
 
 func TestRunScoutUsesSemanticRetrieverRuleSelection(t *testing.T) {
@@ -517,4 +858,216 @@ func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing
 	}
 
 	assertReviewerFailureEvent(t, database, issue.ID, "reviewer runtime exploded")
+}
+
+func TestProcessIssueScoutCLIIsolationAndCleanup(t *testing.T) {
+	for _, scenario := range []string{"success", "runtime failure", "cleanup failure", "runtime and cleanup failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			cleanupFailure := strings.Contains(scenario, "cleanup")
+			runtimeFailure := strings.Contains(scenario, "runtime")
+			if cleanupFailure && os.Geteuid() == 0 {
+				t.Skip("filesystem permission failure requires an unprivileged user")
+			}
+			fixtureDir := t.TempDir()
+			cwdFile, argsFile, entriesFile := filepath.Join(fixtureDir, "cwd"), filepath.Join(fixtureDir, "args"), filepath.Join(fixtureDir, "entries")
+			t.Setenv("SCOUT_TEST_CWD", cwdFile)
+			t.Setenv("SCOUT_TEST_ARGS", argsFile)
+			t.Setenv("SCOUT_TEST_ENTRIES", entriesFile)
+			t.Setenv("SCOUT_TEST_SCENARIO", scenario)
+			cliPath := filepath.Join(fixtureDir, "codex")
+			script := `#!/bin/sh
+pwd -P > "$SCOUT_TEST_CWD"
+printf '%s\n' "$@" > "$SCOUT_TEST_ARGS"
+ls -A > "$SCOUT_TEST_ENTRIES"
+case "$SCOUT_TEST_SCENARIO" in
+  *cleanup*) mkdir blocked && touch blocked/retained && chmod 500 blocked ;;
+esac
+case "$SCOUT_TEST_SCENARIO" in
+  *runtime*) printf 'synthetic CLI failure\n' >&2; exit 7 ;;
+esac
+printf '%s' '{"verdict":"SKIP","reason":"synthetic scout fixture"}'
+`
+			if err := os.WriteFile(cliPath, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			p, database := newLoopTestPipeline(t, &stubRuntime{})
+			p.cfg = &config.Config{WorkspaceDir: t.TempDir()}
+			sibling := filepath.Join(p.cfg.WorkspaceDir, "existing-clone")
+			if err := os.WriteFile(sibling, []byte("preserved"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			writePromptTemplate(t, fixtureDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(fixtureDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			p.runner = NewAgentRunner(p.prompts, runtime.NewCodex(cliPath), 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "synthetic issue"}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			originalOutput := log.Out
+			log.SetOutput(&logs)
+			defer log.SetOutput(originalOutput)
+			err := p.ProcessIssue(context.Background(), issue)
+			if runtimeFailure {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+					t.Errorf("ProcessIssue error = %v, want original CLI exit code 7", err)
+				}
+			} else if err != nil {
+				t.Errorf("ProcessIssue error = %v, want successful SKIP even if cleanup fails", err)
+			}
+			cwdData, err := os.ReadFile(cwdFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cwd := strings.TrimSpace(string(cwdData))
+			defer func() {
+				if cleanupFailure {
+					_ = os.Chmod(filepath.Join(cwd, "blocked"), 0700)
+				}
+				_ = os.RemoveAll(cwd)
+			}()
+			workspace, err := filepath.EvalSymlinks(p.cfg.WorkspaceDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cwd == workspace || strings.HasPrefix(cwd, workspace+string(os.PathSeparator)) || !strings.HasPrefix(filepath.Base(cwd), "auto-contributor-scout-") {
+				t.Errorf("actual CLI cwd %q is not an isolated scout directory outside %q", cwd, workspace)
+			}
+			args, err := os.ReadFile(argsFile)
+			if err != nil || !strings.HasPrefix(string(args), "exec\n--skip-git-repo-check\n") || strings.Contains(string(args), "--dangerously-bypass-approvals-and-sandbox") {
+				t.Errorf("actual CLI args = %q, %v, want non-repository untrusted invocation", args, err)
+			}
+			entries, err := os.ReadFile(entriesFile)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("initial CLI cwd entries = %q, %v, want empty", entries, err)
+			}
+			if cleanupFailure {
+				if !strings.Contains(logs.String(), "failed to remove scout workspace") {
+					t.Errorf("cleanup failure missing from logs: %s", logs.String())
+				}
+				if _, err := os.Stat(filepath.Join(cwd, "blocked", "retained")); err != nil {
+					t.Errorf("cleanup failure fixture unexpectedly removed: %v", err)
+				}
+			} else if _, err := os.Stat(cwd); !os.IsNotExist(err) {
+				t.Errorf("CLI cwd retained after return: %v", err)
+			}
+			if data, err := os.ReadFile(sibling); err != nil || string(data) != "preserved" {
+				t.Errorf("sibling clone fixture = %q, %v, want preserved", data, err)
+			}
+			saved, err := database.GetIssueByID(issue.ID)
+			wantStatus := models.IssueStatusAbandoned
+			if runtimeFailure {
+				wantStatus = models.IssueStatusFailed
+			}
+			if err != nil || saved.Status != wantStatus {
+				t.Errorf("stored issue = %+v, %v, want %s", saved, err, wantStatus)
+			}
+		})
+	}
+}
+
+func TestProcessIssueBlacklist(t *testing.T) {
+	for _, state := range []string{"allowed", "blacklisted", "unavailable", "scout failure"} {
+		t.Run(state, func(t *testing.T) {
+			scoutErr := errors.New("synthetic scout failure")
+			output := stubOutput{output: `{"verdict":"SKIP","reason":"synthetic scout fixture"}`}
+			if state == "scout failure" {
+				output = stubOutput{err: scoutErr}
+			}
+			rt := &stubRuntime{outputs: []stubOutput{output}}
+			p, database := newLoopTestPipeline(t, rt)
+			p.cfg = &config.Config{WorkspaceDir: t.TempDir()}
+			p.gh = ghclient.New(p.cfg)
+			promptsDir := t.TempDir()
+			writePromptTemplate(t, promptsDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(promptsDir)
+			p.runner = NewAgentRunner(p.prompts, rt, 0)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			issue := &models.Issue{Repo: "upstream/project", IssueNumber: 7, Title: "synthetic issue", Status: models.IssueStatusDiscovered}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatal(err)
+			}
+			switch state {
+			case "blacklisted":
+				if err := database.AddToBlacklist(issue.Repo, "synthetic ban"); err != nil {
+					t.Fatal(err)
+				}
+			case "unavailable":
+				if _, err := database.Exec("DROP TABLE blacklist"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixtureDir := t.TempDir()
+			ghLog := filepath.Join(fixtureDir, "gh.log")
+			t.Setenv("PROCESS_BLACKLIST_GH_LOG", ghLog)
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$PROCESS_BLACKLIST_GH_LOG"
+case "$1" in
+ api) printf '%s' '[]' ;;
+ pr) if [ "$2" = list ]; then printf '%s' '[]'; else exit 9; fi ;;
+ *) exit 9 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(fixtureDir, "gh"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fixtureDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := p.ProcessIssue(context.Background(), issue)
+			switch state {
+			case "unavailable":
+				var sqliteErr sqlite3.Error
+				if !errors.As(err, &sqliteErr) || sqliteErr.Code != sqlite3.ErrError || !strings.Contains(err.Error(), "blacklist") || !strings.Contains(err.Error(), issue.Repo) {
+					t.Errorf("ProcessIssue error = %v, want contextual wrapped SQLite lookup failure", err)
+				}
+			case "scout failure":
+				if !errors.Is(err, scoutErr) {
+					t.Errorf("ProcessIssue error = %v, want original scout failure", err)
+				}
+			default:
+				if err != nil {
+					t.Errorf("ProcessIssue error = %v, want nil", err)
+				}
+			}
+			calls, readErr := os.ReadFile(ghLog)
+			blocked := state == "blacklisted" || state == "unavailable"
+			if blocked {
+				if !os.IsNotExist(readErr) || len(rt.policies) != 0 {
+					t.Errorf("blocked repo dispatched work: GitHub calls %q (%v), runtime calls %d", calls, readErr, len(rt.policies))
+				}
+			} else if readErr != nil || len(calls) == 0 || len(rt.policies) != 1 || rt.policies[0] != runtime.ExecutionPolicyUntrusted {
+				t.Errorf("allowed repo did not run normal scout: GitHub calls %q (%v), runtime policies %v", calls, readErr, rt.policies)
+			}
+			saved, err := database.GetIssueByID(issue.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus := models.IssueStatusAbandoned
+			if state == "unavailable" {
+				wantStatus = models.IssueStatusDiscovered
+			}
+			if state == "scout failure" {
+				wantStatus = models.IssueStatusFailed
+			}
+			if saved.Status != wantStatus {
+				t.Errorf("stored status = %s, want %s", saved.Status, wantStatus)
+			}
+			var prs int
+			if err := database.QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&prs); err != nil {
+				t.Fatal(err)
+			}
+			if prs != 0 {
+				t.Errorf("unexpected PR records = %d", prs)
+			}
+			entries, err := os.ReadDir(p.cfg.WorkspaceDir)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("unexpected workspace writes = %v, %v", entries, err)
+			}
+		})
+	}
 }
