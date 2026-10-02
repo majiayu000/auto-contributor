@@ -1,10 +1,12 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -667,4 +669,114 @@ func TestEngineerReviewLoop_ReviewerRuntimeFailureBlocksAndFailsIssue(t *testing
 	}
 
 	assertReviewerFailureEvent(t, database, issue.ID, "reviewer runtime exploded")
+}
+
+func TestProcessIssueScoutCLIIsolationAndCleanup(t *testing.T) {
+	for _, scenario := range []string{"success", "runtime failure", "cleanup failure", "runtime and cleanup failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			cleanupFailure := strings.Contains(scenario, "cleanup")
+			runtimeFailure := strings.Contains(scenario, "runtime")
+			if cleanupFailure && os.Geteuid() == 0 {
+				t.Skip("filesystem permission failure requires an unprivileged user")
+			}
+			fixtureDir := t.TempDir()
+			cwdFile, argsFile, entriesFile := filepath.Join(fixtureDir, "cwd"), filepath.Join(fixtureDir, "args"), filepath.Join(fixtureDir, "entries")
+			t.Setenv("SCOUT_TEST_CWD", cwdFile)
+			t.Setenv("SCOUT_TEST_ARGS", argsFile)
+			t.Setenv("SCOUT_TEST_ENTRIES", entriesFile)
+			t.Setenv("SCOUT_TEST_SCENARIO", scenario)
+			cliPath := filepath.Join(fixtureDir, "codex")
+			script := `#!/bin/sh
+pwd -P > "$SCOUT_TEST_CWD"
+printf '%s\n' "$@" > "$SCOUT_TEST_ARGS"
+ls -A > "$SCOUT_TEST_ENTRIES"
+case "$SCOUT_TEST_SCENARIO" in
+  *cleanup*) mkdir blocked && touch blocked/retained && chmod 500 blocked ;;
+esac
+case "$SCOUT_TEST_SCENARIO" in
+  *runtime*) printf 'synthetic CLI failure\n' >&2; exit 7 ;;
+esac
+printf '%s' '{"verdict":"SKIP","reason":"synthetic scout fixture"}'
+`
+			if err := os.WriteFile(cliPath, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			p, database := newLoopTestPipeline(t, &stubRuntime{})
+			p.cfg = &config.Config{WorkspaceDir: t.TempDir()}
+			sibling := filepath.Join(p.cfg.WorkspaceDir, "existing-clone")
+			if err := os.WriteFile(sibling, []byte("preserved"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			writePromptTemplate(t, fixtureDir, "scout", `scout {{.IssueData}}`)
+			p.prompts = prompt.NewStore(fixtureDir)
+			if err := p.prompts.Load(); err != nil {
+				t.Fatal(err)
+			}
+			p.runner = NewAgentRunner(p.prompts, runtime.NewCodex(cliPath), 0)
+			issue := &models.Issue{Repo: "owner/repo", IssueNumber: 98, Title: "synthetic issue"}
+			if err := database.CreateIssue(issue); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			originalOutput := log.Out
+			log.SetOutput(&logs)
+			defer log.SetOutput(originalOutput)
+			err := p.ProcessIssue(context.Background(), issue)
+			if runtimeFailure {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+					t.Errorf("ProcessIssue error = %v, want original CLI exit code 7", err)
+				}
+			} else if err != nil {
+				t.Errorf("ProcessIssue error = %v, want successful SKIP even if cleanup fails", err)
+			}
+			cwdData, err := os.ReadFile(cwdFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cwd := strings.TrimSpace(string(cwdData))
+			defer func() {
+				if cleanupFailure {
+					_ = os.Chmod(filepath.Join(cwd, "blocked"), 0700)
+				}
+				_ = os.RemoveAll(cwd)
+			}()
+			workspace, err := filepath.EvalSymlinks(p.cfg.WorkspaceDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cwd == workspace || strings.HasPrefix(cwd, workspace+string(os.PathSeparator)) || !strings.HasPrefix(filepath.Base(cwd), "auto-contributor-scout-") {
+				t.Errorf("actual CLI cwd %q is not an isolated scout directory outside %q", cwd, workspace)
+			}
+			args, err := os.ReadFile(argsFile)
+			if err != nil || !strings.HasPrefix(string(args), "exec\n--skip-git-repo-check\n") || strings.Contains(string(args), "--dangerously-bypass-approvals-and-sandbox") {
+				t.Errorf("actual CLI args = %q, %v, want non-repository untrusted invocation", args, err)
+			}
+			entries, err := os.ReadFile(entriesFile)
+			if err != nil || len(entries) != 0 {
+				t.Errorf("initial CLI cwd entries = %q, %v, want empty", entries, err)
+			}
+			if cleanupFailure {
+				if !strings.Contains(logs.String(), "failed to remove scout workspace") {
+					t.Errorf("cleanup failure missing from logs: %s", logs.String())
+				}
+				if _, err := os.Stat(filepath.Join(cwd, "blocked", "retained")); err != nil {
+					t.Errorf("cleanup failure fixture unexpectedly removed: %v", err)
+				}
+			} else if _, err := os.Stat(cwd); !os.IsNotExist(err) {
+				t.Errorf("CLI cwd retained after return: %v", err)
+			}
+			if data, err := os.ReadFile(sibling); err != nil || string(data) != "preserved" {
+				t.Errorf("sibling clone fixture = %q, %v, want preserved", data, err)
+			}
+			saved, err := database.GetIssueByID(issue.ID)
+			wantStatus := models.IssueStatusAbandoned
+			if runtimeFailure {
+				wantStatus = models.IssueStatusFailed
+			}
+			if err != nil || saved.Status != wantStatus {
+				t.Errorf("stored issue = %+v, %v, want %s", saved, err, wantStatus)
+			}
+		})
+	}
 }
