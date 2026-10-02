@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,14 +41,51 @@ func (p *Pipeline) runScout(ctx context.Context, issue *models.Issue) (*ScoutRes
 		tmplCtx["PastLessons"] = formatLessonsForPrompt(lessons)
 	}
 
+	// Scout consumes untrusted GitHub data before any clone is needed. Keep its
+	// working directory outside the shared parent of issue workspaces.
+	workDir, err := createScoutWorkDir(p.cfg.WorkspaceDir)
+	if err != nil {
+		err = fmt.Errorf("create scout workdir: %w", err)
+		p.recordEvent(issue, nil, "scout", 1, start, "error", false, "", err.Error(), stageRules)
+		return nil, err
+	}
+	defer func() {
+		if err := os.RemoveAll(workDir); err != nil {
+			log.WithError(err).WithField("workdir", workDir).Warn("failed to remove scout workspace")
+		}
+	}()
+
 	var result ScoutResult
-	if _, err := p.runner.RunJSONWithPolicy(ctx, "scout", p.cfg.WorkspaceDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
+	if _, err := p.runner.RunJSONWithPolicy(ctx, "scout", workDir, tmplCtx, &result, runtime.ExecutionPolicyUntrusted); err != nil {
 		p.recordEvent(issue, nil, "scout", 1, start, "", false, "", err.Error(), stageRules)
 		return nil, err
 	}
 	summary, _ := json.Marshal(map[string]any{"verdict": result.Verdict, "difficulty": result.Difficulty, "competing_pr": result.HasCompetingPR})
 	p.recordEvent(issue, nil, "scout", 1, start, result.Verdict, result.Verdict == "PROCEED", string(summary), "", stageRules)
 	return &result, nil
+}
+
+func createScoutWorkDir(workspaceDir string) (string, error) {
+	paths := []string{os.TempDir(), workspaceDir}
+	for i, path := range paths {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("resolve directory %q: %w", path, err)
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
+		if err != nil {
+			return "", fmt.Errorf("resolve directory %q: %w", path, err)
+		}
+		paths[i] = resolved
+	}
+	relative, err := filepath.Rel(paths[1], paths[0])
+	if err != nil {
+		return "", fmt.Errorf("compare scout temp directory with WorkspaceDir: %w", err)
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))) {
+		return "", fmt.Errorf("scout temp directory %q must be outside WorkspaceDir %q", paths[0], paths[1])
+	}
+	return os.MkdirTemp(paths[0], "auto-contributor-scout-*")
 }
 
 // --- Analyst ---

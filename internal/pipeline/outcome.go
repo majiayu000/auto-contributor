@@ -29,7 +29,7 @@ var outcomeKeywords = map[string][]string{
 }
 
 // ClassifyOutcome determines why a PR reached its terminal state.
-func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment, pr *models.PullRequest) string {
+func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComment, comments []ghclient.PRReviewComment, pr *models.PullRequest, contributor string) string {
 	if prInfo.State == "MERGED" {
 		return OutcomeMerged
 	}
@@ -37,8 +37,12 @@ func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComm
 		return OutcomeHostileSpam
 	}
 
-	// Check if we auto-closed it
+	// Check our generated closing comments, including bot-named contributors.
+	responderClosed := false
 	for _, c := range issueComments {
+		if prInfo.State == "CLOSED" && c.Body == responderCloseComment && strings.EqualFold(c.Author, contributor) {
+			responderClosed = true
+		}
 		lower := strings.ToLower(c.Body)
 		if c.Author == "majiayu000" && (strings.Contains(lower, "closing due to extended inactivity") || strings.Contains(lower, "ci failures remain unresolved")) {
 			return OutcomeAutoClosed
@@ -52,6 +56,13 @@ func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComm
 			continue
 		}
 		allText.WriteString(strings.ToLower(r.Body))
+		allText.WriteString(" ")
+	}
+	for _, c := range comments {
+		if isBot(c.Author) || (contributor != "" && strings.EqualFold(c.Author, contributor)) {
+			continue
+		}
+		allText.WriteString(strings.ToLower(c.Body))
 		allText.WriteString(" ")
 	}
 	for _, c := range issueComments {
@@ -73,6 +84,9 @@ func ClassifyOutcome(prInfo *ghclient.PRInfo, issueComments []ghclient.IssueComm
 		}
 	}
 
+	if responderClosed {
+		return OutcomeRejectedUnwant
+	}
 	return OutcomeUnknownClosed
 }
 

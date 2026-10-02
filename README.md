@@ -2,6 +2,25 @@
 
 Automated GitHub contribution bot powered by Claude Code CLI. Discovers issues, creates fixes, and submits PRs automatically.
 
+[Installation](#installation) · [Controlled quick start](#controlled-single-issue-flow) · [Launch-readiness notes](docs/launch-readiness.md)
+
+## Choose an operating mode
+
+| Need | Start here | Effect |
+| --- | --- | --- |
+| Inspect candidate issues first | [Discovery only](#smart-discovery-only) | Discover candidates without solving or submitting PRs |
+| Work on one manually chosen issue | [Controlled single-issue flow](#controlled-single-issue-flow) | `pipeline` can create commits and a pull request |
+| Repeat contributions on a schedule | [Loop mode](#continuous-loop-mode-recommended) | Repeats discovery and solving; establish single-issue proof first |
+| Monitor processing | [Web dashboard](#features) | Observe the worker; dashboard access is not maintainer approval |
+
+This Go CLI orchestrates your local Claude Code and authenticated `gh` tools.
+For automation triggered inside one repository's workflows, review the official
+[Claude Code GitHub Actions](https://code.claude.com/docs/en/github-actions) integration.
+These are different operating models; this project does not install that Action.
+
+[Published releases](https://github.com/majiayu000/auto-contributor/releases) ·
+[Changelog](CHANGELOG.md) · [Report a problem](https://github.com/majiayu000/auto-contributor/issues) · [MIT license](LICENSE)
+
 ## Features
 
 - **Claude-Powered Discovery**: Uses Claude Code to intelligently find and analyze GitHub issues
@@ -14,7 +33,7 @@ Automated GitHub contribution bot powered by Claude Code CLI. Discovers issues, 
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.24+ (the repository selects Go 1.24.11 in `go.mod`)
 - [Claude Code CLI](https://claude.ai/code) - `claude` command available in PATH
 - [GitHub CLI](https://cli.github.com/) - `gh` command authenticated
 
@@ -271,8 +290,11 @@ The CI baseline for this repository is `go vet ./...`, `go build ./...`, and
 - Launch readiness: see `docs/launch-readiness.md`.
 - Suggested GitHub topics: `automation`, `github`, `claude-code`, `pull-requests`,
   `go`.
-- Initial release recommendation: create a `v0.1.0` GitHub release from a
-  reviewed main branch after the launch-readiness PR merges.
+- Published launch baseline: [v0.1.0](https://github.com/majiayu000/auto-contributor/releases/tag/v0.1.0).
+  Use the tag and release notes to identify that source snapshot; the current main branch can differ.
+  The `version` command in that tag and current source prints `auto-contributor v2.0.0 (Go)`.
+  This is a hard-coded label, not proof of a published v2.0.0 release. For reproducible
+  reports, include the release tag or source commit (`git rev-parse HEAD`).
 
 ## Rate Limiting
 

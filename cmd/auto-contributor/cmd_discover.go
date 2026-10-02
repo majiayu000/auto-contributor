@@ -27,7 +27,11 @@ func discoverIssues(cmd *cobra.Command, args []string) error {
 
 	for _, issue := range issues {
 		// Check blacklist before saving
-		isBlacklisted, _ := database.IsBlacklisted(issue.Repo)
+		isBlacklisted, err := database.IsBlacklisted(issue.Repo)
+		if err != nil {
+			log.Warn("blacklist check failed, skipping issue", "repo", issue.Repo, "issue", issue.IssueNumber, "error", err)
+			continue
+		}
 		if isBlacklisted {
 			fmt.Printf("Skipping blacklisted repo: %s\n", issue.Repo)
 			continue
