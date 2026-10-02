@@ -436,17 +436,16 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 		"round":    pr.FeedbackRound + 1,
 	}).Info("processing feedback")
 
-	// Run responder agent
+	// Leave feedback pending when responder execution or JSON parsing fails.
 	start := time.Now()
 	var result FeedbackResult
 	raw, err := p.runner.RunJSONWithPolicy(ctx, "responder", workspace, tmplCtx, &result, runtime.ExecutionPolicyUntrusted)
 	if err != nil {
-		log.WithError(err).Warn("responder parse error, treating as no_action")
+		log.WithError(err).Warn("responder failed")
 		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, "", false, "", err.Error(), responderRules)
-		result.Action = "no_action"
-	} else {
-		p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
+		return fmt.Errorf("responder failed at feedback round %d for %s: %w", pr.FeedbackRound+1, pr.PRURL, err)
 	}
+	p.recordEvent(issue, nil, "responder", pr.FeedbackRound+1, start, result.Action, result.Action != "close", truncate(raw, 500), "", responderRules)
 
 	newRound := pr.FeedbackRound + 1
 	if err := p.executeResponderAction(ctx, pr, prRepo, prInfo, comments, issueComments, result, newRound); err != nil {
