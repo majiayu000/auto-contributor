@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
 	"regexp"
 	"time"
@@ -253,7 +254,7 @@ func (db *DB) UpdateTrajectoryOutcome(issueID int64, prNumber int, outcomeLabel 
 			return fmt.Errorf("rows affected: %w", err)
 		}
 		if n == 0 {
-			return fmt.Errorf("no trajectory row found for issue_id=%d pr_number=%d", issueID, prNumber)
+			return fmt.Errorf("no trajectory row found for issue_id=%d pr_number=%d: %w", issueID, prNumber, sql.ErrNoRows)
 		}
 		return nil
 	}
@@ -274,7 +275,7 @@ func (db *DB) UpdateTrajectoryOutcome(issueID int64, prNumber int, outcomeLabel 
 		return fmt.Errorf("rows affected: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("no trajectory row found for issue_id=%d", issueID)
+		return fmt.Errorf("no trajectory row found for issue_id=%d: %w", issueID, sql.ErrNoRows)
 	}
 	return nil
 }

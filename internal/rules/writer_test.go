@@ -1,6 +1,9 @@
 package rules
 
 import (
+	"bytes"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -391,7 +394,7 @@ func TestUpdateFunctions_UnsafeStageReturnsError(t *testing.T) {
 	if err := UpdateRuleLastValidatedAt(dir, id, badStage, "2025-01-01"); err == nil {
 		t.Error("UpdateRuleLastValidatedAt: expected error for unsafe stage, got nil")
 	}
-	if err := UpdateRuleQValue(dir, id, badStage, 0.5, 1, 1); err == nil {
+	if err := UpdateRuleQValue(dir, id, badStage, "pr-a", 1, 0.1); err == nil {
 		t.Error("UpdateRuleQValue: expected error for unsafe stage, got nil")
 	}
 	if err := DecayRuleIfStale(dir, id, badStage, 0.9, 0.1, 30); err == nil {
@@ -436,7 +439,7 @@ func TestUpdateFunctions_UnsafeRuleIDReturnsError(t *testing.T) {
 	if err := UpdateRuleLastValidatedAt(dir, badID, stage, "2025-01-01"); err == nil {
 		t.Error("UpdateRuleLastValidatedAt: expected error for unsafe ruleID, got nil")
 	}
-	if err := UpdateRuleQValue(dir, badID, stage, 0.5, 1, 1); err == nil {
+	if err := UpdateRuleQValue(dir, badID, stage, "pr-a", 1, 0.1); err == nil {
 		t.Error("UpdateRuleQValue: expected error for unsafe ruleID, got nil")
 	}
 	if err := DecayRuleIfStale(dir, badID, stage, 0.9, 0.1, 30); err == nil {
@@ -514,4 +517,103 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestUpdateRuleQValueConcurrentRewards(t *testing.T) {
+	dir := t.TempDir()
+	writeTestRule(t, dir, &Rule{ID: "shared", Stage: "engineer", Body: "Shared learning", QValue: 0.5})
+	errs := make(chan error, 16)
+	for i := 0; i < 8; i++ {
+		go func() { errs <- UpdateRuleQValue(dir, "shared", "engineer", "pr-a", 0, 0.1) }()
+		go func() { errs <- UpdateRuleQValue(dir, "shared", "engineer", "pr-b", 1, 0.1) }()
+	}
+	for i := 0; i < 16; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatal(err)
+	}
+	rule := rl.ByID("shared")
+	if rule == nil || rule.RetrievalCount != 2 || rule.SuccessCount != 1 || len(rule.AppliedRewardIDs) != 2 {
+		t.Fatalf("rule = %+v, want both rewards once", rule)
+	}
+	if math.Abs(rule.QValue-0.495) > 0.0001 && math.Abs(rule.QValue-0.505) > 0.0001 {
+		t.Errorf("Q = %v, want the two rewards in either serial order", rule.QValue)
+	}
+}
+
+func TestUpdateRuleQValueAtomicCommitAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeTestRule(t, dir, &Rule{ID: "atomic", Stage: "engineer", Body: "Preserve complete learning", QValue: 0.5})
+	path := filepath.Join(dir, "engineer", "atomic.yaml")
+	if err := os.Chmod(path, 0640); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateRuleQValue(dir, "atomic", "engineer", "", 0, 0.1); err == nil {
+		t.Fatal("empty reward ID accepted")
+	}
+	if err := UpdateRuleQValue(dir, "missing", "engineer", "pr-a", 0, 0.1); err == nil {
+		t.Fatal("missing rule accepted")
+	}
+	if os.Geteuid() != 0 {
+		for _, target := range []string{path, filepath.Dir(path)} {
+			info, err := os.Stat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(target, info.Mode().Perm()&^0222); err != nil {
+				t.Fatal(err)
+			}
+			err = UpdateRuleQValue(dir, "atomic", "engineer", "pr-a", 0, 0.1)
+			if restoreErr := os.Chmod(target, info.Mode().Perm()); restoreErr != nil {
+				t.Fatal(restoreErr)
+			}
+			var pathErr *os.PathError
+			if !errors.Is(err, os.ErrPermission) || !errors.As(err, &pathErr) {
+				t.Fatalf("error = %v, want original filesystem permission error", err)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || !bytes.Equal(after, original) {
+				t.Fatalf("failed commit changed rule: %q, %v", after, readErr)
+			}
+		}
+	}
+	if err := UpdateRuleQValue(dir, "atomic", "engineer", "pr-a", 0, 0.1); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) || after.Mode().Perm() != 0640 {
+		t.Errorf("commit did not replace the file while preserving mode: %v", after.Mode())
+	}
+	rl := NewRuleLoader(dir)
+	if err := rl.Load(); err != nil {
+		t.Fatal(err)
+	}
+	rule := rl.ByID("atomic")
+	if rule == nil || rule.QValue != 0.45 || rule.RetrievalCount != 1 || len(rule.AppliedRewardIDs) != 1 || rule.AppliedRewardIDs[0] != "pr-a" {
+		t.Errorf("committed state = %+v, want Q and receipt together exactly once", rule)
+	}
+	if files, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".atomic.yaml.*")); err != nil || len(files) != 0 {
+		t.Errorf("temporary files = %v, %v, want none", files, err)
+	}
+	if err := os.WriteFile(path, []byte("q_value: [invalid"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateRuleQValue(dir, "atomic", "engineer", "pr-b", 1, 0.1); err == nil {
+		t.Fatal("malformed rule accepted")
+	}
 }

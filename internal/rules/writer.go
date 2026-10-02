@@ -1,7 +1,9 @@
 package rules
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,13 +159,17 @@ func UpdateRuleLastValidatedAt(rulesDir string, ruleID string, stage string, val
 	return os.WriteFile(path, updated, 0644)
 }
 
-// UpdateRuleQValue updates the q_value, retrieval_count, and success_count fields of an existing rule file.
-func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float64, retrievalCount int, successCount int) error {
+// UpdateRuleQValue applies a PR reward once, committing its ID with the Q-value
+// and counts in the same rule file. Read, compute, and commit hold writeMu.
+func UpdateRuleQValue(rulesDir string, ruleID string, stage string, rewardID string, reward float64, alpha float64) (result error) {
 	if err := validateRuleID(ruleID); err != nil {
 		return err
 	}
 	if err := validateStage(stage, true); err != nil {
 		return err
+	}
+	if rewardID == "" {
+		return fmt.Errorf("reward ID is required")
 	}
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -173,8 +179,14 @@ func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float
 		return fmt.Errorf("rule file not found: %s", ruleID)
 	}
 
-	data, err := os.ReadFile(path)
+	// Open without truncating, retaining the existing write-permission contract.
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
+		return err
+	}
+	data, readErr := io.ReadAll(file)
+	info, statErr := file.Stat()
+	if err := errors.Join(readErr, statErr, file.Close()); err != nil {
 		return err
 	}
 
@@ -183,15 +195,49 @@ func UpdateRuleQValue(rulesDir string, ruleID string, stage string, qValue float
 		return err
 	}
 
-	rule.QValue = qValue
-	rule.RetrievalCount = retrievalCount
-	rule.SuccessCount = successCount
+	for _, applied := range rule.AppliedRewardIDs {
+		if applied == rewardID {
+			return nil
+		}
+	}
+	qOld := rule.QValue
+	if qOld == 0 {
+		qOld = 0.5
+	}
+	rule.QValue = qOld + alpha*(reward-qOld)
+	rule.RetrievalCount++
+	if reward >= 1.0 {
+		rule.SuccessCount++
+	}
+	rule.AppliedRewardIDs = append(rule.AppliedRewardIDs, rewardID)
 	updated, err := yaml.Marshal(&rule)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, updated, 0644)
+	// Same-directory rename keeps a failed write from exposing partial Q/receipt state.
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := os.Remove(temp.Name()); err != nil && !os.IsNotExist(err) {
+			result = errors.Join(result, err)
+		}
+	}()
+	if err := temp.Chmod(info.Mode().Perm()); err != nil {
+		return errors.Join(err, temp.Close())
+	}
+	if _, err := temp.Write(updated); err != nil {
+		return errors.Join(err, temp.Close())
+	}
+	if err := temp.Sync(); err != nil {
+		return errors.Join(err, temp.Close())
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temp.Name(), path)
 }
 
 // DeleteRule removes a rule file from disk.
