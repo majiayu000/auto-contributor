@@ -354,6 +354,67 @@ printf '%s' '{"action":"no_action"}'
 	}
 }
 
+func TestProcessPRResponderHumanAndManualControls(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	for _, scenario := range []string{"human comments", "manually promoted", "needs attention", "converted to draft"} {
+		t.Run(scenario, func(t *testing.T) {
+			installFakeGH(t, false)
+			p, database := newLoopTestPipeline(t, &stubRuntime{})
+			_, pr := createFeedbackTestPR(t, database)
+			pr.CreatedAt = time.Now()
+			p.cfg = &config.Config{WorkspaceDir: t.TempDir(), GitHubUsername: "tester"}
+			p.gh = ghclient.New(p.cfg)
+			workspace := filepath.Join(p.cfg.WorkspaceDir, "owner-repo-70")
+			rt := prepareResponderCloseTest(t, p, pr, workspace)
+			rt.outputs = []stubOutput{{output: `{"action":"no_action"}`}}
+			lastCheck := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+			pr.FeedbackRound, pr.LastFeedbackCheckAt = 2, &lastCheck
+			if scenario == "needs attention" {
+				pr.Status = models.PRStatusNeedsAttention
+			}
+			if scenario == "manually promoted" {
+				pr.Status = models.PRStatusDraft
+			}
+			if _, err := database.Exec("UPDATE pull_requests SET status = ?, feedback_round = ?, last_feedback_check_at = ? WHERE id = ?", pr.Status, pr.FeedbackRound, lastCheck, pr.ID); err != nil {
+				t.Fatal(err)
+			}
+			_, _, initialCheck := getFeedbackPRState(t, database, pr.ID)
+			t.Setenv("GH_TEST_PR_INFO", fmt.Sprintf(`{"state":"OPEN","isDraft":%t,"headRefName":%q}`, scenario == "converted to draft", pr.BranchName))
+			t.Setenv("GH_TEST_ISSUE_COMMENTS", fmt.Sprintf(`[{"id":7,"user":{"login":"maintainer"},"body":"Please preserve this human comment.","created_at":%q}]`, lastCheck.Add(time.Hour).Format(time.RFC3339)))
+			if err := p.ProcessPR(context.Background(), pr); err != nil {
+				t.Fatal(err)
+			}
+			status, round, checked := getFeedbackPRState(t, database, pr.ID)
+			if scenario == "needs attention" || scenario == "converted to draft" {
+				wantStatus := models.PRStatusNeedsAttention
+				if scenario == "converted to draft" {
+					wantStatus = models.PRStatusDraft
+				}
+				if status != string(wantStatus) || round != 2 || checked != initialCheck || len(rt.policies) != 0 {
+					t.Fatalf("manual status/checkpoint changed: %s/%d/%v, policies %v", status, round, checked, rt.policies)
+				}
+				return
+			}
+			if status != string(models.PRStatusOpen) || round != 3 || checked == initialCheck || len(rt.prompts) != 1 || !strings.Contains(rt.prompts[0], "Please preserve this human comment.") {
+				t.Fatalf("valid comment control failed: %s/%d/%v, prompts %d", status, round, checked, len(rt.prompts))
+			}
+			// A later poll sees the same successful decision and does not invoke the agent again.
+			prs, err := database.GetOpenPRs()
+			if err != nil || len(prs) != 1 {
+				t.Fatalf("reload open PRs: %d, %v", len(prs), err)
+			}
+			if err := p.ProcessPR(context.Background(), prs[0]); err != nil {
+				t.Fatal(err)
+			}
+			_, round, _ = getFeedbackPRState(t, database, pr.ID)
+			if round != 3 || len(rt.prompts) != 1 {
+				t.Fatalf("successful feedback processed again: round %d, calls %d", round, len(rt.prompts))
+			}
+		})
+	}
+}
+
 func TestExecuteResponderActionCloseFailureSkipsReplies(t *testing.T) {
 	logPath := installFakeGH(t, true)
 	database := newFeedbackTestDB(t)
