@@ -188,6 +188,16 @@ func marshalRuleIDs(ids []string) (string, error) {
 // ProcessIssue runs the full pipeline for a single issue.
 // It updates DB status at each stage boundary.
 func (p *Pipeline) ProcessIssue(ctx context.Context, issue *models.Issue) error {
+	// Recheck queued and manually selected issues before any agent or GitHub work.
+	blacklisted, err := p.db.IsBlacklisted(issue.Repo)
+	if err != nil {
+		return fmt.Errorf("blacklist check failed for %s#%d: %w", issue.Repo, issue.IssueNumber, err)
+	}
+	if blacklisted {
+		p.markAbandoned(issue, "blacklisted repo")
+		return nil
+	}
+
 	// Rate limit: max open PRs per repo (higher for repos that merged our PRs)
 	maxPR := p.cfg.MaxPRsPerRepo
 	if maxPR <= 0 {
