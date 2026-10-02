@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"github.com/majiayu000/auto-contributor/internal/prompt"
 	"github.com/majiayu000/auto-contributor/internal/runtime"
 	"github.com/majiayu000/auto-contributor/pkg/models"
+	"github.com/spf13/viper"
 )
 
 func TestFormatIssueForPrompt_IsolatesUntrustedIssueContent(t *testing.T) {
@@ -215,55 +218,134 @@ func TestFormatTrajectoriesForPrompt_UsesStructuredUntrustedData(t *testing.T) {
 }
 
 func TestAgentPromptsUseConfiguredIdentity(t *testing.T) {
-	for _, email := range []string{"contributor+signed@example.invalid", ""} {
-		for _, stage := range []string{"engineer", "engineer_rework", "responder", "submitter"} {
-			t.Run(stage+"/"+email, func(t *testing.T) {
-				rt := &stubRuntime{outputs: []stubOutput{{output: `{"status":"submitted","pr_number":7}`}}}
-				p, _ := newLoopTestPipeline(t, rt)
-				p.cfg = &config.Config{GitHubUsername: "other-contributor", GitHubEmail: email}
-				ps := prompt.NewStore(filepath.Join("..", "..", "prompts"))
-				if err := ps.Load(); err != nil {
-					t.Fatalf("load shipped prompts: %v", err)
+	// All Git commands use only temporary local config and synthetic identities.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_CONFIG_COUNT"} {
+		old, exists := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if exists {
+				_ = os.Setenv(key, old)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	for _, identityCase := range []string{"file", "environment override", "missing email"} {
+		for _, stage := range []string{"engineer", "engineer_rework", "responder", "submitter", "submitter CLI failure"} {
+			t.Run(stage+"/"+identityCase, func(t *testing.T) {
+				shippedPrompts, err := filepath.Abs(filepath.Join("..", "..", "prompts"))
+				if err != nil {
+					t.Fatal(err)
 				}
-				p.runner = NewAgentRunner(ps, rt, 0)
+				fixture := t.TempDir()
+				email := "contributor+signed@example.invalid"
+				if identityCase == "missing email" {
+					email = ""
+				}
+				configPath := filepath.Join(fixture, "config.yaml")
+				configText := fmt.Sprintf("github_username: other-contributor\ngithub_email: %q\nworkspace_dir: %q\ndatabase_path: %q\n", email, filepath.Join(fixture, "workspace"), filepath.Join(fixture, "data.db"))
+				if identityCase == "missing email" {
+					configText = strings.ReplaceAll(configText, "github_email: \"\"\n", "")
+				}
+				if identityCase == "environment override" {
+					configText = strings.ReplaceAll(configText, "other-contributor", "file-contributor")
+					configText = strings.ReplaceAll(configText, email, "file@example.invalid")
+				}
+				if err := os.WriteFile(configPath, []byte(configText), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("GITHUB_TOKEN", "")
+				t.Setenv("AC_GITHUB_TOKEN", "")
+				t.Setenv("GITHUB_USERNAME", "")
+				t.Setenv("AC_GITHUB_USERNAME", "")
+				t.Setenv("AC_GITHUB_EMAIL", "")
+				// Load through the public boundary from an isolated temporary working directory.
+				viper.Reset()
+				t.Cleanup(viper.Reset)
+				t.Chdir(fixture)
+				if identityCase == "environment override" {
+					t.Setenv("GITHUB_USERNAME", "other-contributor")
+					t.Setenv("AC_GITHUB_EMAIL", email)
+				}
+				loaded, err := config.Load()
+				if err != nil {
+					t.Fatalf("load fixture config: %v", err)
+				}
+				if loaded.GitHubUsername != "other-contributor" || loaded.GitHubEmail != email {
+					t.Fatalf("loaded identity = %s/%s, want fixture identity", loaded.GitHubUsername, loaded.GitHubEmail)
+				}
+				p, _ := newLoopTestPipeline(t, &stubRuntime{})
+				p.cfg = loaded
+				ps := prompt.NewStore(shippedPrompts)
+				if err := ps.Load(); err != nil {
+					t.Fatal(err)
+				}
+				promptPath, argsPath := filepath.Join(fixture, "prompt"), filepath.Join(fixture, "args")
+				t.Setenv("IDENTITY_TEST_PROMPT", promptPath)
+				t.Setenv("IDENTITY_TEST_ARGS", argsPath)
+				t.Setenv("IDENTITY_TEST_FAIL", "")
+				if stage == "submitter CLI failure" {
+					t.Setenv("IDENTITY_TEST_FAIL", "1")
+				}
+				cliPath := filepath.Join(fixture, "codex")
+				script := `#!/bin/sh
+printf '%s\n' "$@" > "$IDENTITY_TEST_ARGS"
+for argument do prompt="$argument"; done
+printf '%s' "$prompt" > "$IDENTITY_TEST_PROMPT"
+if [ "$IDENTITY_TEST_FAIL" = 1 ]; then printf 'synthetic identity CLI failure\n' >&2; exit 7; fi
+printf '%s' '{"status":"submitted","pr_number":7}'
+`
+				if err := os.WriteFile(cliPath, []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+				p.runner = NewAgentRunner(ps, runtime.NewCodex(cliPath), 0)
 				issue := &models.Issue{Repo: "upstream/repo", IssueNumber: 104, Title: "bug"}
 				analyst := &AnalystResult{BaseBranch: "main", BranchName: "fix/identity", FixPlan: FixPlan{}}
-				var rendered string
-				var err error
+				workspace := t.TempDir()
 				switch stage {
 				case "engineer", "engineer_rework":
 					var review *CodeReviewResult
 					if stage == "engineer_rework" {
 						review = &CodeReviewResult{ReworkInstructions: "fix the test"}
 					}
-					rendered, err = ps.Render("engineer", p.buildEngineerCtx(issue, analyst, review, 2, ""))
+					_, err = p.runner.RunWithPolicy(context.Background(), "engineer", workspace, p.buildEngineerCtx(issue, analyst, review, 2, ""), runtime.ExecutionPolicyTrusted)
 				case "responder":
 					pr := &models.PullRequest{PRNumber: 7, BranchName: analyst.BranchName}
-					rendered, err = ps.Render(stage, p.buildResponderCtx(issue, pr, nil, nil, nil, ""))
-				case "submitter":
-					_, err = p.runSubmitter(context.Background(), issue, t.TempDir(), analyst)
-					if len(rt.prompts) != 1 {
-						t.Fatalf("runtime prompt count = %d, want 1", len(rt.prompts))
-					}
-					rendered = rt.prompts[0]
+					_, err = p.runner.RunWithPolicy(context.Background(), stage, workspace, p.buildResponderCtx(issue, pr, nil, nil, nil, ""), runtime.ExecutionPolicyTrusted)
+				case "submitter", "submitter CLI failure":
+					_, err = p.runSubmitter(context.Background(), issue, workspace, analyst)
 				}
+				if stage == "submitter CLI failure" {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
+						t.Fatalf("runSubmitter error = %v, want original CLI exit 7", err)
+					}
+				} else if err != nil {
+					t.Fatalf("run %s: %v", stage, err)
+				}
+				renderedBytes, err := os.ReadFile(promptPath)
 				if err != nil {
-					t.Fatalf("render %s: %v", stage, err)
+					t.Fatal(err)
 				}
+				rendered := string(renderedBytes)
 				if strings.Contains(rendered, "user@example.com") || strings.Contains(rendered, "majiayu000") {
-					t.Fatal("prompt still forces the hardcoded contributor identity")
+					t.Fatal("CLI prompt forces hardcoded identity")
 				}
-				if stage == "submitter" {
+				if strings.HasPrefix(stage, "submitter") {
 					if !strings.Contains(rendered, "--head other-contributor:fix/identity") {
-						t.Fatalf("submitter does not use configured fork owner: %s", rendered)
+						t.Fatal("submitter does not use configured fork owner")
 					}
-					if rt.policies[0] != runtime.ExecutionPolicyUntrusted {
-						t.Fatalf("submitter policy = %q", rt.policies[0])
+					args, err := os.ReadFile(argsPath)
+					if err != nil || !strings.HasPrefix(string(args), "exec\n--skip-git-repo-check\n") || strings.Contains(string(args), "--dangerously-bypass-approvals-and-sandbox") {
+						t.Fatalf("submitter CLI policy args invalid: %v", err)
 					}
 					return
 				}
-
-				workspace := t.TempDir()
 				runGitCommand(t, "", "init", workspace)
 				runGitCommand(t, workspace, "config", "user.name", "Existing Contributor")
 				runGitCommand(t, workspace, "config", "user.email", "existing@example.invalid")
@@ -274,10 +356,10 @@ func TestAgentPromptsUseConfiguredIdentity(t *testing.T) {
 					}
 				}
 				if email == "" && len(setup) != 0 {
-					t.Fatal("empty configured email must leave the existing identity unchanged")
+					t.Fatal("empty email must preserve existing Git identity")
 				}
 				if email != "" && len(setup) != 2 {
-					t.Fatalf("Git setup commands = %d, want name and email", len(setup))
+					t.Fatalf("Git setup commands = %d, want 2", len(setup))
 				}
 				cmd := exec.Command("sh", "-eu", "-c", strings.Join(setup, "\n"))
 				cmd.Dir = workspace
@@ -292,7 +374,7 @@ func TestAgentPromptsUseConfiguredIdentity(t *testing.T) {
 				identity := name + " <" + wantEmail + ">"
 				got := runGitCommand(t, workspace, "log", "-1", "--format=%an <%ae>%n%cn <%ce>%n%B")
 				if !strings.HasPrefix(got, identity+"\n"+identity+"\n") || !strings.Contains(got, "Signed-off-by: "+identity) {
-					t.Fatalf("commit author, committer, and DCO sign-off must match %q, got %q", identity, got)
+					t.Fatalf("author, committer and sign-off should match %q; got %q", identity, got)
 				}
 			})
 		}
