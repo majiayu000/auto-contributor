@@ -209,15 +209,6 @@ func (p *Pipeline) storeLessons(pr *models.PullRequest, prRepo string, prInfo *g
 		}
 	}
 
-	// Skip lesson extraction if we already have lessons for this PR.
-	count, err := p.db.CountLessonsByPR(pr.ID)
-	if err != nil {
-		return fmt.Errorf("count review lessons: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-
 	lessons := extractLessons(pr, prRepo, prInfo.Reviews, comments, p.cfg.GitHubUsername)
 
 	// Also extract from issue comments when PR was closed without merge

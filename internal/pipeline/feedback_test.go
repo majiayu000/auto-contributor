@@ -1122,3 +1122,82 @@ func TestProcessPRRewardRetryWithChangedOutcome(t *testing.T) {
 		t.Errorf("workspace retained after completion: %v", err)
 	}
 }
+
+func TestProcessPRRetryCapturesNewLessonsAtomically(t *testing.T) {
+	for _, state := range []string{"CLOSED", "MERGED"} {
+		t.Run(state, func(t *testing.T) {
+			installFakeGH(t, false)
+			t.Setenv("GH_TEST_PR_INFO", `{"state":"`+state+`"}`)
+			t.Setenv("GH_TEST_ISSUE_COMMENTS", `[]`)
+			original := `{"user":{"login":"maintainer"},"body":"Please add a test for this behavior.","path":"main.go"}`
+			t.Setenv("GH_TEST_REVIEW_COMMENTS", `[`+original+`]`)
+			database := newFeedbackTestDB(t)
+			issue, pr := createFeedbackTestPR(t, database)
+			p, workspace := newResponderLearningTestPipeline(t, database, issue, pr)
+			if _, err := database.Exec("CREATE TRIGGER fail_status BEFORE UPDATE OF status ON pull_requests BEGIN SELECT RAISE(ABORT, 'terminal write unavailable'); END"); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "terminal write unavailable") {
+				t.Fatalf("first processing error = %v, want final SQL failure", err)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 1 {
+				t.Fatalf("initial lessons = %d, %v, want one saved before SQL failure", count, err)
+			}
+			// The same source text on a new file is a distinct lesson, and feedback
+			// arriving on an issue or inline thread must survive the next retry.
+			newPath := `{"user":{"login":"maintainer"},"body":"Please add a test for this behavior.","path":"other.go"}`
+			newFeedback := `{"user":{"login":"new-reviewer"},"body":"Please correct this incorrect logic.","path":"new.go"}`
+			if state == "CLOSED" {
+				t.Setenv("GH_TEST_REVIEW_COMMENTS", `[`+original+`,`+newPath+`]`)
+				t.Setenv("GH_TEST_ISSUE_COMMENTS", `[`+newFeedback+`]`)
+			} else {
+				t.Setenv("GH_TEST_REVIEW_COMMENTS", `[`+original+`,`+newPath+`,`+newFeedback+`]`)
+			}
+			if _, err := database.Exec("CREATE TRIGGER fail_lesson BEFORE INSERT ON review_lessons WHEN NEW.reviewer = 'new-reviewer' BEGIN SELECT RAISE(ABORT, 'new lesson unavailable'); END"); err != nil {
+				t.Fatal(err)
+			}
+			p.ruleLoader = rules.NewRuleLoader(p.ruleLoader.RulesDir())
+			if err := p.ruleLoader.Load(); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "new lesson unavailable") {
+				t.Errorf("new feedback error = %v, want lesson write failure before status", err)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 1 {
+				t.Errorf("failed batch lessons = %d, %v, want original retained and new batch rolled back", count, err)
+			}
+			if _, err := database.Exec("DROP TRIGGER fail_lesson"); err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := p.ProcessPR(context.Background(), pr); err == nil || !strings.Contains(err.Error(), "terminal write unavailable") {
+					t.Errorf("retry %d error = %v, want SQL failure after lessons saved", attempt, err)
+				}
+				if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 3 {
+					t.Errorf("retry %d lessons = %d, %v, want all three exactly once", attempt, count, err)
+				}
+			}
+			if open, err := database.GetOpenPRs(); err != nil || len(open) != 1 {
+				t.Errorf("open PRs = %v, %v, want retryable PR", open, err)
+			}
+			if _, err := os.Stat(workspace); err != nil {
+				t.Errorf("workspace removed before completion: %v", err)
+			}
+			if _, err := database.Exec("DROP TRIGGER fail_status"); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.ProcessPR(context.Background(), pr); err != nil {
+				t.Fatalf("final retry: %v", err)
+			}
+			if count, err := database.CountLessonsByPR(pr.ID); err != nil || count != 3 {
+				t.Errorf("final lessons = %d, %v, want all three exactly once", count, err)
+			}
+			if open, err := database.GetOpenPRs(); err != nil || len(open) != 0 {
+				t.Errorf("open PRs = %v, %v, want completed transition", open, err)
+			}
+			if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+				t.Errorf("workspace retained after completion: %v", err)
+			}
+		})
+	}
+}
