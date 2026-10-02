@@ -62,7 +62,7 @@ gh pr create --repo {{ .Repo }} \
   --draft \
   --title "fix: {{ .PRTitle }}" \
   --body "<filled PR template or fallback below>" \
-  --head majiayu000:{{ .BranchName }} \
+  --head {{ .GitHubUsername }}:{{ .BranchName }} \
   --base {{ .BaseBranch }}
 ```
 

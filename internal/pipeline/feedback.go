@@ -309,14 +309,16 @@ func (p *Pipeline) handleOpen(ctx context.Context, pr *models.PullRequest, prRep
 					break
 				}
 				tmplCtx := map[string]any{
-					"Repo":        prRepo,
-					"IssueNumber": issue.IssueNumber,
-					"IssueData":   formatIssueForPrompt(issue),
-					"PRNumber":    pr.PRNumber,
-					"PRURL":       pr.PRURL,
-					"BranchName":  pr.BranchName,
-					"IsRework":    true,
-					"ReworkRound": pr.FeedbackRound + 1,
+					"Repo":           prRepo,
+					"GitHubUsername": p.cfg.GitHubUsername,
+					"GitHubEmail":    p.cfg.GitHubEmail,
+					"IssueNumber":    issue.IssueNumber,
+					"IssueData":      formatIssueForPrompt(issue),
+					"PRNumber":       pr.PRNumber,
+					"PRURL":          pr.PRURL,
+					"BranchName":     pr.BranchName,
+					"IsRework":       true,
+					"ReworkRound":    pr.FeedbackRound + 1,
 					"ReworkInstructionsData": formatUntrustedGitHubData(map[string]any{
 						"rework_instructions": "Codecov reports missing test coverage on changed lines. Read the Codecov comment on the PR to identify which lines need coverage. Add tests to cover the missing lines, then push.",
 					}),
@@ -538,15 +540,17 @@ func (p *Pipeline) attemptCIFix(ctx context.Context, pr *models.PullRequest, prR
 	}
 
 	tmplCtx := map[string]any{
-		"Repo":         prRepo,
-		"IssueNumber":  issue.IssueNumber,
-		"IssueData":    formatIssueForPrompt(issue),
-		"PRNumber":     pr.PRNumber,
-		"PRURL":        pr.PRURL,
-		"BranchName":   pr.BranchName,
-		"FailedChecks": strings.Join(ci.FailedChecks, ", "),
-		"IsRework":     true,
-		"ReworkRound":  pr.FeedbackRound + 1,
+		"Repo":           prRepo,
+		"GitHubUsername": p.cfg.GitHubUsername,
+		"GitHubEmail":    p.cfg.GitHubEmail,
+		"IssueNumber":    issue.IssueNumber,
+		"IssueData":      formatIssueForPrompt(issue),
+		"PRNumber":       pr.PRNumber,
+		"PRURL":          pr.PRURL,
+		"BranchName":     pr.BranchName,
+		"FailedChecks":   strings.Join(ci.FailedChecks, ", "),
+		"IsRework":       true,
+		"ReworkRound":    pr.FeedbackRound + 1,
 		"ReworkInstructionsData": formatUntrustedGitHubData(map[string]any{
 			"rework_instructions": fmt.Sprintf(
 				"CI checks failed: %s. Read the CI logs, identify the root cause, fix the code, and push.",
@@ -607,6 +611,8 @@ func (p *Pipeline) buildResponderCtx(
 ) map[string]any {
 	return map[string]any{
 		"Repo":                      issue.Repo,
+		"GitHubUsername":            p.cfg.GitHubUsername,
+		"GitHubEmail":               p.cfg.GitHubEmail,
 		"IssueNumber":               issue.IssueNumber,
 		"IssueData":                 formatIssueForPrompt(issue),
 		"OriginalIssueCommentsData": formatUntrustedGitHubData(p.fetchOriginalIssueComments(issue)),
